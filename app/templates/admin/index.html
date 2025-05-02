@@ -1,0 +1,29 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Admin</h1>
+<section class="grid">
+  <div class="card">
+    <h2>Users</h2>
+    <p>Create accounts, change roles, reset passwords.</p>
+    <p><a href="{{ base }}/admin/users">Manage users →</a></p>
+  </div>
+  <div class="card">
+    <h2>Branding</h2>
+    <p>Logo, colors, header / footer text, disclaimer. Drives both the live UI and the PDF report.</p>
+    <p><a href="{{ base }}/admin/branding">Edit branding →</a></p>
+  </div>
+  <div class="card">
+    <h2>Reports</h2>
+    <p>Generated PDF reports are listed on each assessment's detail page.</p>
+  </div>
+  <div class="card">
+    <h2>Toolkit</h2>
+    <p>Validation probes — standalone CLI tools that confirm scanner findings against any target.</p>
+    <p><a href="{{ base }}/admin/toolkit">View installed probes →</a></p>
+  </div>
+</section>
+{% endblock %}

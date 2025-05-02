@@ -1,0 +1,145 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Scan <code>{{ scan_id }}</code></h1>
+<p><a href="{{ base }}/scan">← back to scans</a></p>
+
+<section class="card">
+  <h2>Details</h2>
+  <dl>
+    <dt>Tool</dt><dd>{{ meta.tool }}</dd>
+    <dt>Target</dt><dd>{{ meta.target }}</dd>
+    <dt>Command</dt><dd><code>{{ meta.cmd|join(" ") }}</code></dd>
+    <dt>Started</dt><dd>{{ meta.started_at }}</dd>
+    <dt>Finished</dt><dd>{{ meta.finished_at or "(running)" }}</dd>
+    <dt>Status</dt><dd><span class="badge {{ meta.status }}">{{ meta.status }}</span></dd>
+  </dl>
+  {% if meta.status == "running" %}
+    <form method="post" action="{{ base }}/scan/{{ scan_id }}/kill"
+          onsubmit="return confirm('Kill this scan?')">
+      <button type="submit" class="warn">Kill scan</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if primary_report %}
+<section class="card">
+  <h2>Report</h2>
+  <p><a href="{{ base }}/scan/{{ scan_id }}/file/{{ primary_report }}" target="_blank">
+    Open primary report → <code>{{ primary_report }}</code>
+  </a></p>
+</section>
+{% endif %}
+
+{% if scan_flows %}
+<section class="card">
+  <h2>Captured requests / responses ({{ scan_flows|length }})</h2>
+  <p class="muted">Every HTTP probe the scanner sent through the per-scan
+  intercept proxy. Click an ID to view the request and response in raw HTTP
+  format, ready for LLM analysis or human review.</p>
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Method</th><th>URL</th><th>Status</th>
+      <th>Resp size</th><th>Findings</th><th>Files</th>
+    </tr></thead>
+    <tbody>
+    {% for f in scan_flows[:200] %}
+      <tr>
+        <td><code>{{ f.id }}</code></td>
+        <td>{{ f.method }}</td>
+        <td class="url">{{ f.url|truncate(120) }}</td>
+        <td>{{ f.status_code or "-" }}</td>
+        <td>{{ f.response_size }}</td>
+        <td>
+          {% if f.findings %}
+            <span class="badge red">{{ f.findings|length }}</span>
+            {{ f.findings|map(attribute='type')|unique|join(", ") }}
+          {% else %}<span class="muted">none</span>{% endif %}
+        </td>
+        <td>
+          <a href="{{ base }}/scan/{{ scan_id }}/file/flows/{{ f.id }}_request.txt" target="_blank">req</a>
+          / <a href="{{ base }}/scan/{{ scan_id }}/file/flows/{{ f.id }}_response.txt" target="_blank">resp</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if scan_flows|length > 200 %}
+    <p class="muted">Showing 200 of {{ scan_flows|length }} flows.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if oob_flows %}
+<section class="card">
+  <h2 style="cursor:pointer; user-select:none" onclick="document.getElementById('oob').style.display = (document.getElementById('oob').style.display==='none' ? '' : 'none')">
+    Scanner OOB callbacks ({{ oob_flows|length }}) — click to toggle
+  </h2>
+  <p class="muted">These are the scanner's own callback / housekeeping requests
+  to <code>oast.online</code>, <code>interact.sh</code>, etc. — they're how the
+  scanner detects out-of-band exploitation (blind SSRF / SQLi / RCE).
+  Findings analysis is intentionally skipped on these flows.</p>
+  <div id="oob" style="display:none">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Method</th><th>URL</th><th>Status</th><th>Files</th>
+      </tr></thead>
+      <tbody>
+      {% for f in oob_flows[:200] %}
+        <tr>
+          <td><code>{{ f.id }}</code></td>
+          <td>{{ f.method }}</td>
+          <td class="url">{{ f.url|truncate(120) }}</td>
+          <td>{{ f.status_code or "-" }}</td>
+          <td>
+            <a href="{{ base }}/scan/{{ scan_id }}/file/flows/{{ f.id }}_request.txt" target="_blank">req</a>
+            / <a href="{{ base }}/scan/{{ scan_id }}/file/flows/{{ f.id }}_response.txt" target="_blank">resp</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if artifacts %}
+<section class="card">
+  <h2>All artifacts</h2>
+  <ul>
+    {% for a in artifacts %}
+      <li>
+        <a href="{{ base }}/scan/{{ scan_id }}/file/{{ a.name }}" target="_blank">
+          {{ a.name }}{% if a.is_dir %}/{% endif %}
+        </a>
+        <span class="muted">({{ a.size }} B)</span>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Output {% if meta.status == "running" %}(live){% endif %}</h2>
+  <pre class="log" id="output">{{ output }}</pre>
+</section>
+
+{% if meta.status == "running" %}
+<script>
+  async function refresh() {
+    try {
+      const r = await fetch('{{ base }}/scan/{{ scan_id }}/output');
+      const t = await r.text();
+      const el = document.getElementById('output');
+      const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+      el.textContent = t;
+      if (stick) el.scrollTop = el.scrollHeight;
+    } catch (e) {}
+  }
+  setInterval(refresh, 2000);
+</script>
+{% endif %}
+{% endblock %}

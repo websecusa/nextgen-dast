@@ -1,0 +1,45 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Captured flows</h1>
+<p class="muted">
+  Most recent {{ flows|length }} (limit {{ limit }}).
+  Each row links to its persisted <code>&lt;id&gt;_request.txt</code> and
+  <code>&lt;id&gt;_response.txt</code>.
+</p>
+
+{% if flows %}
+<table>
+  <thead><tr>
+    <th>ID</th><th>Method</th><th>URL</th><th>Status</th>
+    <th>Resp size</th><th>Findings</th><th>Files</th>
+  </tr></thead>
+  <tbody>
+  {% for f in flows %}
+    <tr>
+      <td><a href="{{ base }}/flow/{{ f.id }}"><code>{{ f.id }}</code></a></td>
+      <td>{{ f.method }}</td>
+      <td class="url">{{ f.url }}</td>
+      <td>{{ f.status_code or "-" }}</td>
+      <td>{{ f.response_size }}</td>
+      <td>
+        {% if f.findings %}
+          <span class="badge red">{{ f.findings|length }}</span>
+          {{ f.findings|map(attribute='type')|unique|join(", ") }}
+        {% else %}<span class="muted">none</span>{% endif %}
+      </td>
+      <td>
+        <a href="{{ base }}/flow/{{ f.id }}#request">req</a>
+        / <a href="{{ base }}/flow/{{ f.id }}#response">resp</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No flows yet — start the proxy and send some traffic.</p>
+{% endif %}
+{% endblock %}

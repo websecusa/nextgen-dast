@@ -1,0 +1,29 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. Excludes runtime state and local dev artifacts from
+# the Docker build context so they never end up baked into the image.
+
+# Runtime state — never goes in the image
+data/
+*.sensitive_secrets_info*
+
+# Generated env files (random-suffixed). Plain .env handled too.
+.env
+.env_*
+
+# Python build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Source control
+.git/
+.gitignore
+
+# Local agent / tooling state — never bake into image
+.claude/

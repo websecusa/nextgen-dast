@@ -1,0 +1,148 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Flow <code>{{ flow.id }}</code></h1>
+<p>
+  <a href="{{ base }}/flows">← back to flows</a>
+</p>
+
+<section class="card">
+  <h2>Summary</h2>
+  <dl>
+    <dt>Time</dt><dd>{{ flow.timestamp }}</dd>
+    <dt>Client</dt><dd>{{ flow.client or "-" }}</dd>
+    <dt>Request</dt><dd>{{ flow.method }} {{ flow.url }}</dd>
+    <dt>Response</dt><dd>{{ flow.status_code }} ({{ flow.response_size }} B, {{ flow.duration_ms }} ms)</dd>
+    <dt>Persisted</dt>
+    <dd>
+      <code>/data/flows/{{ flow.request_file }}</code><br>
+      <code>/data/flows/{{ flow.response_file }}</code>
+    </dd>
+  </dl>
+</section>
+
+{% if flow.findings %}
+<section class="card">
+  <h2>Findings ({{ flow.findings|length }})</h2>
+  <table>
+    <thead><tr><th>Where</th><th>Type</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for f in flow.findings %}
+      <tr>
+        <td>{{ f.where }}</td>
+        <td><span class="badge red">{{ f.type }}</span></td>
+        <td>
+          {% if f.examples %}
+            count={{ f.count }}; examples:
+            <ul>
+              {% for ex in f.examples %}<li><code>{{ ex }}</code></li>{% endfor %}
+            </ul>
+          {% elif f.missing %}
+            missing: {{ f.missing|join(", ") }}
+            {% if f.cookie %}<br>cookie: <code>{{ f.cookie }}</code>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Analyze with LLM</h2>
+  {% if llm_endpoints %}
+  <form method="post" action="{{ base }}/flow/{{ flow.id }}/analyze">
+    <label>Endpoint
+      <select name="endpoint_id">
+        <option value="">— default —</option>
+        {% for e in llm_endpoints %}
+          <option value="{{ e.id }}">{{ e.name }} ({{ e.backend }} / {{ e.model }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Analyze</button>
+    <small class="muted">Sends the request, response, and existing findings to the LLM and stores the structured result below.</small>
+  </form>
+  {% else %}
+  <p class="muted">No LLM endpoints configured. Add one on <a href="{{ base }}/llm">/llm</a>.</p>
+  {% endif %}
+
+  {% if analyzes %}
+    {% for a in analyzes %}
+    <div id="analysis-{{ a.id }}" style="margin-top:1em; border-top:1px solid var(--border); padding-top:1em">
+      <p>
+        <span class="badge {{ a.status }}">{{ a.status }}</span>
+        <code>{{ a.endpoint_name }}</code> / <code>{{ a.model }}</code>
+        — {{ a.created_at }}
+        {% if a.request_tokens %}· in: {{ a.request_tokens }} / out: {{ a.response_tokens }} tok{% endif %}
+      </p>
+      {% if a.error_text %}<pre class="log">{{ a.error_text }}</pre>{% endif %}
+      {% if a.findings is not none %}
+        {% if a.findings %}
+        <table>
+          <thead><tr><th>Severity</th><th>Category</th><th>Title</th><th>Evidence</th><th>Recommendation</th></tr></thead>
+          <tbody>
+          {% for f in a.findings %}
+            <tr>
+              <td><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span></td>
+              <td>{{ f.category }}</td>
+              <td>{{ f.title }}<br><small class="muted">{{ f.description }}</small></td>
+              <td><code>{{ f.evidence|truncate(120) }}</code></td>
+              <td><small>{{ f.recommendation }}</small></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">LLM found no issues.</p>
+        {% endif %}
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Scan this endpoint</h2>
+  <p class="muted">Run a targeted scanner against <code>{{ flow.url }}</code>. Captured cookies are passed through automatically.</p>
+  <div style="display:flex; gap:.6em; flex-wrap:wrap">
+    {% for tool in ["sqlmap", "dalfox", "nuclei", "wapiti"] %}
+      <form method="post" action="{{ base }}/flow/{{ flow.id }}/scan">
+        <input type="hidden" name="tool" value="{{ tool }}">
+        <button type="submit">{{ tool }}</button>
+      </form>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Save session as auth profile</h2>
+  <form method="post" action="{{ base }}/auth/capture">
+    <input type="hidden" name="flow_id" value="{{ flow.id }}">
+    <label>Profile name
+      <input name="name" required placeholder="e.g. {{ flow.host }}-session">
+    </label>
+    <label>Host filter
+      <input name="host_filter" value="{{ flow.host }}">
+    </label>
+    <button type="submit">Capture cookies + Authorization</button>
+    <small class="muted">
+      Use this after logging in through the proxy with SSO / Okta FastPass /
+      DUO — the resulting session is saved as a reusable scan profile.
+    </small>
+  </form>
+</section>
+
+<section class="card" id="request">
+  <h2>Request</h2>
+  <pre class="log">{{ request_text }}</pre>
+</section>
+<section class="card" id="response">
+  <h2>Response</h2>
+  <pre class="log">{{ response_text }}</pre>
+</section>
+{% endblock %}

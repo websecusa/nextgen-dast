@@ -1,0 +1,143 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Auth profiles</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+<section class="card">
+  <h2>Why this exists</h2>
+  <p>
+    Authenticated scanning needs a session. For plain logins, give us the
+    credentials. For <strong>SSO / OAuth / SAML / Okta FastPass / DUO</strong>,
+    those flows can't be driven headlessly — the MFA challenge is the whole
+    point. Instead:
+  </p>
+  <ol>
+    <li>Start the intercept proxy.</li>
+    <li>Point your browser at the proxy URL and log in normally — complete
+        the MFA challenge.</li>
+    <li>Open <a href="{{ base }}/flows">Flows</a>, find a request from after login,
+        and click <em>Save as auth profile</em>. The system extracts your
+        session cookies (and any <code>Authorization</code> header) into a
+        reusable "cookies" profile.</li>
+    <li>Pick that profile when launching a scan.</li>
+  </ol>
+  <p class="muted">
+    Note: nikto's CLI only supports HTTP basic auth. wapiti supports basic,
+    form, cookies, and bearer.
+  </p>
+</section>
+
+<section>
+  <h2>Existing profiles</h2>
+  {% if profiles %}
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th>Host filter</th><th>Detail</th><th></th></tr></thead>
+    <tbody>
+    {% for p in profiles %}
+      <tr>
+        <td><code>{{ p.name }}</code></td>
+        <td><span class="badge">{{ p.type }}</span></td>
+        <td>{{ p.host_filter or "(any)" }}</td>
+        <td class="muted">
+          {% if p.type == "basic" %}
+            user: <code>{{ p.basic.username }}</code>
+          {% elif p.type == "form" %}
+            url: <code>{{ p.form_login.login_url }}</code>, user: <code>{{ p.form_login.username }}</code>
+          {% elif p.type == "cookies" %}
+            {{ (p.cookies or [])|length }} cookie(s)
+            {% if p.headers %}, {{ p.headers|length }} header(s){% endif %}
+            {% if p.captured_from_flow %}
+              <br>captured from flow <code>{{ p.captured_from_flow }}</code>
+            {% endif %}
+          {% elif p.type == "bearer" %}
+            token: <code>{{ p.bearer.token[:12] }}…</code>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="{{ base }}/auth/profile/{{ p.name }}/delete"
+                onsubmit="return confirm('Delete profile {{ p.name }}?')">
+            <button class="warn" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No profiles yet.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Create / update profile</h2>
+  <form method="post" action="{{ base }}/auth/profile">
+    <label>Name (unique)
+      <input name="name" required placeholder="e.g. fairtprm-okta">
+    </label>
+    <label>Type
+      <select name="type" required onchange="document.querySelectorAll('.tsec').forEach(e=>e.style.display='none');document.getElementById('t-'+this.value).style.display='block'">
+        <option value="basic">basic — HTTP basic auth</option>
+        <option value="form">form — HTML form login (wapiti only)</option>
+        <option value="cookies" selected>cookies — pre-acquired session (best for SSO/MFA)</option>
+        <option value="bearer">bearer — Authorization: Bearer &lt;token&gt;</option>
+      </select>
+    </label>
+    <label>Host filter (domain the profile applies to)
+      <input name="host_filter" placeholder="fairtprm.com">
+    </label>
+
+    <div id="t-basic" class="tsec" style="display:none">
+      <label>Username <input name="basic_username"></label>
+      <label>Password <input name="basic_password" type="password"></label>
+    </div>
+
+    <div id="t-form" class="tsec" style="display:none">
+      <label>Login URL (where the form POSTs)
+        <input name="form_login_url" placeholder="https://app.example.com/login">
+      </label>
+      <label>Username <input name="form_username"></label>
+      <label>Password <input name="form_password" type="password"></label>
+    </div>
+
+    <div id="t-cookies" class="tsec">
+      <label>Raw Cookie header
+        <textarea name="cookies_raw" rows="3"
+          placeholder="Cookie: sessionid=abc; csrftoken=def"></textarea>
+      </label>
+      <small class="muted">
+        Easier: don't use this — instead capture from a flow. See <a href="{{ base }}/flows">Flows</a>.
+      </small>
+    </div>
+
+    <div id="t-bearer" class="tsec" style="display:none">
+      <label>Token
+        <textarea name="bearer_token" rows="3" placeholder="eyJhbGciOi…"></textarea>
+      </label>
+    </div>
+
+    <button type="submit">Save profile</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Capture from flow</h2>
+  <form method="post" action="{{ base }}/auth/capture">
+    <label>Flow ID
+      <input name="flow_id" required placeholder="20260425-153012-ab12cd">
+    </label>
+    <label>Profile name
+      <input name="name" required placeholder="fairtprm-session">
+    </label>
+    <label>Host filter (defaults to flow's host)
+      <input name="host_filter" placeholder="fairtprm.com">
+    </label>
+    <button type="submit">Capture</button>
+    <small class="muted">
+      Pulls Set-Cookie from the flow's response and any Authorization header
+      from the request, and saves them as a "cookies" profile.
+    </small>
+  </form>
+</section>
+{% endblock %}

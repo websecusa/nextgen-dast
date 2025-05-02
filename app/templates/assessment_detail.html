@@ -1,0 +1,160 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Assessment #{{ a.id }} — <code>{{ a.fqdn }}</code></h1>
+<p>
+  <span class="badge">{{ a.profile }}</span>
+  <span class="badge">LLM: {{ a.llm_tier }}</span>
+  <span class="badge {{ a.status }}" id="status">{{ a.status }}</span>
+  &nbsp;
+  <span class="muted" id="step">{{ a.current_step or "" }}</span>
+</p>
+<p class="muted">
+  Started {{ a.created_at }}
+  {% if a.finished_at %}· finished {{ a.finished_at }}{% endif %}
+  {% if a.status not in ('running', 'queued', 'deleting') %}
+    &nbsp;·&nbsp;
+    <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
+          style="display:inline"
+          onsubmit="return confirm('Permanently delete assessment #{{ a.id }} ({{ a.fqdn }}) and all of its scan files? This cannot be undone.')">
+      <button type="submit" class="warn">Delete assessment</button>
+    </form>
+  {% endif %}
+</p>
+
+<section class="card">
+  <h2>Severity rollup</h2>
+  <div style="display:flex; gap:1em; flex-wrap:wrap">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      <div style="flex:1; min-width:120px; text-align:center; padding:.8em; border-radius:6px; border:1px solid var(--border)">
+        <div class="badge sev-{{ sev }}" style="font-size:1em; padding:.3em .6em">{{ sev }}</div>
+        <div style="font-size:1.6em; font-weight:600; margin-top:.3em">{{ sev_counts[sev] }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+{% if a.exec_summary %}
+<section class="card">
+  <h2>Executive summary <small class="muted">(LLM)</small></h2>
+  <div style="white-space:pre-wrap">{{ a.exec_summary }}</div>
+</section>
+{% endif %}
+
+<section>
+  <h2>Findings ({{ findings|length }})</h2>
+  {% if findings %}
+  <table>
+    <thead><tr>
+      <th>Severity</th><th>Tool</th><th>Title</th><th>OWASP</th>
+      <th>CWE</th><th>Evidence</th>
+    </tr></thead>
+    <tbody>
+    {% for f in findings %}
+      <tr>
+        <td><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span></td>
+        <td>{{ f.source_tool }}</td>
+        <td>
+          <a href="{{ base }}/finding/{{ f.id }}">{{ f.title|truncate(140) }}</a>
+          {% if f.seen_count and f.seen_count > 1 %}
+            <span class="badge" title="Number of times this finding was reported by the same tool">×{{ f.seen_count }}</span>
+          {% endif %}
+          {% if f.description %}
+            <details><summary class="muted" style="cursor:pointer">details</summary>
+              <pre style="white-space:pre-wrap; font-size:.85em">{{ f.description|truncate(2000) }}</pre>
+              {% if f.remediation %}
+                <p><strong>Remediation:</strong> {{ f.remediation }}</p>
+              {% endif %}
+              <p><a href="{{ base }}/finding/{{ f.id }}">Open full guidance &amp; ticket export →</a></p>
+            </details>
+          {% endif %}
+        </td>
+        <td><small>{{ f.owasp_category or "—" }}</small></td>
+        <td>{{ "CWE-" + f.cwe if f.cwe else "—" }}</td>
+        <td class="url"><small>{{ f.evidence_url|truncate(80) if f.evidence_url else "" }}</small></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No findings yet — assessment in progress.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>PDF report</h2>
+  {% if a.status not in ('running','queued','deleting') %}
+    {% if is_admin %}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report" style="display:inline">
+        <button type="submit">Generate PDF report</button>
+      </form>
+      <small class="muted" style="margin-left:.6em">5–15 s per generation; produces a fresh dated file.</small>
+    {% else %}
+      <p class="muted">Read-only — ask an admin to generate a new report. Existing reports are downloadable below.</p>
+    {% endif %}
+  {% else %}
+    <p class="muted">Report generation available once the assessment finishes.</p>
+  {% endif %}
+
+  {% if reports %}
+    <table style="margin-top:.8em">
+      <thead><tr><th>Filename</th><th>Generated</th><th>Size</th><th></th></tr></thead>
+      <tbody>
+      {% for r in reports %}
+        <tr>
+          <td><code>{{ r.filename }}</code></td>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+          <td>{{ (r.size_bytes / 1024) | round(1) }} KB</td>
+          <td>
+            <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">Download</a>
+            {% if is_admin %}
+              &nbsp;·&nbsp;
+              <form method="post"
+                    action="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}/delete"
+                    style="display:inline"
+                    onsubmit="return confirm('Delete report {{ r.filename }}? This cannot be undone.')">
+                <button type="submit" class="warn link">Delete</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted small">No reports generated yet.</p>
+  {% endif %}
+</section>
+
+{% if scan_ids %}
+<section class="card">
+  <h2>Underlying scans</h2>
+  <ul>
+    {% for sid in scan_ids %}
+      <li><a href="{{ base }}/scan/{{ sid }}">#{{ sid }}</a></li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if a.status not in ('done','error','cancelled') %}
+<script>
+async function poll() {
+  try {
+    const r = await fetch('{{ base }}/assessment/{{ a.id }}/status');
+    const j = await r.json();
+    document.getElementById('status').textContent = j.status;
+    document.getElementById('status').className = 'badge ' + j.status;
+    document.getElementById('step').textContent = j.current_step || '';
+    if (j.status === 'done' || j.status === 'error' || j.status === 'cancelled') {
+      window.location.reload();
+    }
+  } catch (e) {}
+}
+setInterval(poll, 4000);
+</script>
+{% endif %}
+{% endblock %}

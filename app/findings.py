@@ -1,0 +1,417 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+"""
+Per-tool finding parsers. Each parser reads the artifacts that the named tool
+produced under /data/scans/<scan_id>/ and yields normalized finding dicts:
+
+  {
+    "source_tool": str,
+    "severity": "critical|high|medium|low|info",
+    "title": str,
+    "description": str,
+    "owasp_category": Optional[str],
+    "cwe": Optional[str],
+    "cvss": Optional[str],
+    "evidence_url": Optional[str],
+    "evidence_method": Optional[str],
+    "remediation": Optional[str],
+    "raw_data": dict (will be JSON-serialised),
+  }
+
+These are intentionally tool-shaped — the LLM consolidation phase will dedupe,
+normalize OWASP categories, and assign CVSS where missing.
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Iterable
+
+
+# Crude CWE → OWASP-2021 mapping for the most common cases. Extend as needed.
+OWASP_BY_CWE = {
+    "22":  "A01:2021-Broken_Access_Control",
+    "284": "A01:2021-Broken_Access_Control",
+    "287": "A07:2021-Identification_and_Authentication_Failures",
+    "295": "A02:2021-Cryptographic_Failures",
+    "311": "A02:2021-Cryptographic_Failures",
+    "326": "A02:2021-Cryptographic_Failures",
+    "327": "A02:2021-Cryptographic_Failures",
+    "352": "A01:2021-Broken_Access_Control",
+    "522": "A04:2021-Insecure_Design",
+    "611": "A05:2021-Security_Misconfiguration",
+    "693": "A05:2021-Security_Misconfiguration",
+    "732": "A01:2021-Broken_Access_Control",
+    "79":  "A03:2021-Injection",
+    "89":  "A03:2021-Injection",
+    "94":  "A03:2021-Injection",
+    "918": "A10:2021-SSRF",
+    "200": "A04:2021-Insecure_Design",
+    "601": "A01:2021-Broken_Access_Control",
+}
+
+NUCLEI_OWASP_BY_TAG = {
+    "exposure": "A05:2021-Security_Misconfiguration",
+    "misconfig": "A05:2021-Security_Misconfiguration",
+    "default-login": "A07:2021-Identification_and_Authentication_Failures",
+    "ssrf": "A10:2021-SSRF",
+    "lfi": "A03:2021-Injection",
+    "rce": "A03:2021-Injection",
+    "sqli": "A03:2021-Injection",
+    "xss": "A03:2021-Injection",
+    "xxe": "A05:2021-Security_Misconfiguration",
+    "redirect": "A01:2021-Broken_Access_Control",
+    "fileupload": "A03:2021-Injection",
+    "tech": None,  # info-only
+    "cve": None,   # depends, will be set by description
+}
+
+
+# ---- nuclei -----------------------------------------------------------------
+
+def parse_nuclei(scan_dir: Path) -> Iterable[dict]:
+    p = scan_dir / "report.jsonl"
+    if not p.exists():
+        return
+    for line in p.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        info = r.get("info", {}) or {}
+        sev = (info.get("severity") or "info").lower()
+        if sev not in ("critical", "high", "medium", "low", "info"):
+            sev = "info"
+        tags = info.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",")]
+        owasp = None
+        for t in tags:
+            if t.lower() in NUCLEI_OWASP_BY_TAG:
+                owasp = NUCLEI_OWASP_BY_TAG[t.lower()]
+                if owasp:
+                    break
+        cve = None
+        for ref in info.get("classification", {}).get("cve-id", []) or []:
+            cve = ref
+            break
+        cwe = (info.get("classification", {}).get("cwe-id") or [None])
+        cwe_id = None
+        if cwe and cwe[0]:
+            m = re.search(r"\d+", cwe[0])
+            if m:
+                cwe_id = m.group(0)
+        if cwe_id and not owasp:
+            owasp = OWASP_BY_CWE.get(cwe_id)
+        yield {
+            "source_tool": "nuclei",
+            "severity": sev,
+            "title": info.get("name") or r.get("template-id", "nuclei finding"),
+            "description": info.get("description") or "",
+            "owasp_category": owasp,
+            "cwe": cwe_id,
+            "cvss": (info.get("classification", {}) or {}).get("cvss-score"),
+            "evidence_url": r.get("matched-at") or r.get("host"),
+            "evidence_method": (r.get("type") or "http").upper(),
+            "remediation": info.get("remediation") or "",
+            "raw_data": r,
+        }
+
+
+# ---- nikto ------------------------------------------------------------------
+
+NIKTO_LINE = re.compile(r"^\+\s*(?:\[(\d+)\]\s*)?(.+)$")
+NIKTO_NOISE = (
+    "Server:", "Target IP", "Target Hostname", "Target Port",
+    "Start Time", "End Time", "Scan terminated", "0 errors and",
+    "host(s) tested", "Platform:",
+)
+# Word-boundaried — naive substring matching falsely tagged "force" as RCE,
+# "version" matched "adversion", etc. Each hint compiled with \b on either
+# side; multi-word hints become space-separated literal phrases.
+import re as _re
+
+_NIKTO_SEV_PATTERNS = [
+    ("critical", [
+        r"\bRCE\b",
+        r"\bremote code execution\b",
+        r"\bcommand injection\b",
+        r"\bdefault credentials\b",
+        r"\bdefault password\b",
+        r"\bshell upload\b",
+    ]),
+    ("high", [
+        r"\bSQL\s*injection\b",
+        r"\bdirectory traversal\b",
+        r"\bpath traversal\b",
+        r"\bfile disclosure\b",
+        r"\bauthentication bypass\b",
+        r"\banonymous\b",
+        r"\boutdated\b",
+        r"\bvulnerable\b",
+    ]),
+    ("medium", [
+        r"\bXSS\b",
+        r"\bcross[- ]site\b",
+        r"\bopen redirect\b",
+        r"\bphpinfo\b",
+        r"\bdirectory listing\b",
+        r"\bclickjacking\b",
+    ]),
+    ("low", [
+        r"\bsecurity header\b",
+        r"\bsuggested security\b",
+        r"\bmime[- ]sniffing\b",
+        r"\bx-content-type-options\b",
+        r"\bstrict-transport\b",
+        r"\bx-frame-options\b",
+        r"\breferrer-policy\b",
+        r"\bpermissions-policy\b",
+        r"\bcontent-security-policy\b",
+    ]),
+]
+_NIKTO_SEV_RES = [(sev, [_re.compile(p, _re.IGNORECASE) for p in pats])
+                  for sev, pats in _NIKTO_SEV_PATTERNS]
+
+# Status messages nikto emits that aren't findings — they tell you what nikto
+# DIDN'T do. Drop them outright.
+_NIKTO_STATUS_PATTERNS = [
+    _re.compile(p, _re.IGNORECASE) for p in (
+        r"^no cgi directories found",
+        r"cgi tests skipped",
+        r"^no host header",
+        r"^server banner changed",
+        r"\btests skipped\b",
+        r"^scan terminated",
+        r"^[\d:]+ start time",
+        r"^[\d:]+ end time",
+    )
+]
+
+
+def _nikto_severity(text: str) -> str:
+    for sev, pats in _NIKTO_SEV_RES:
+        for pat in pats:
+            if pat.search(text):
+                return sev
+    return "info"
+
+
+def _nikto_is_status(text: str) -> bool:
+    return any(p.search(text) for p in _NIKTO_STATUS_PATTERNS)
+
+
+def parse_nikto(scan_dir: Path) -> Iterable[dict]:
+    log = scan_dir / "output.log"
+    if not log.exists():
+        return
+    seen: set = set()
+    for line in log.read_text(errors="replace").splitlines():
+        m = NIKTO_LINE.match(line.strip())
+        if not m:
+            continue
+        text = m.group(2).strip()
+        if any(text.startswith(n) for n in NIKTO_NOISE):
+            continue
+        if _nikto_is_status(text):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        sev = _nikto_severity(text)
+        yield {
+            "source_tool": "nikto",
+            "severity": sev,
+            "title": text[:200],
+            "description": text,
+            "owasp_category": "A05:2021-Security_Misconfiguration"
+                              if sev in ("low", "info", "medium") else None,
+            "raw_data": {"line": text, "id": m.group(1)},
+        }
+
+
+# ---- testssl ----------------------------------------------------------------
+
+TESTSSL_SEV = {
+    "OK":       "info",
+    "INFO":     "info",
+    "LOW":      "low",
+    "MEDIUM":   "medium",
+    "HIGH":     "high",
+    "CRITICAL": "critical",
+    "WARN":     "low",
+}
+
+
+TESTSSL_SCAN_SYSTEM_IDS = {
+    "engine_problem", "scanProblem", "scanTime", "service",
+    "TLS_extensions", "session_ticket", "SSL_sessionID_support",
+    "sessionresumption_ticket", "sessionresumption_ID", "cert_keySize",
+}
+
+
+def parse_testssl(scan_dir: Path) -> Iterable[dict]:
+    p = scan_dir / "report.json"
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return
+    if not isinstance(data, list):
+        data = data.get("scanResult", []) if isinstance(data, dict) else []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        sev_raw = (entry.get("severity") or "INFO").upper()
+        # testssl emits an INFO/OK row for every protocol fact, cipher,
+        # extension, ALPN value, etc. Those are inventory, not findings.
+        if sev_raw in ("OK", "INFO"):
+            continue
+        # FATAL/WARN inside scan-system identifiers are runner errors, not
+        # TLS posture issues.
+        if sev_raw in ("FATAL", "WARN") and entry.get("id") in TESTSSL_SCAN_SYSTEM_IDS:
+            continue
+        sev = TESTSSL_SEV.get(sev_raw, "low")
+        if not entry.get("finding"):
+            continue
+        yield {
+            "source_tool": "testssl",
+            "severity": sev,
+            "title": entry.get("id") or "TLS finding",
+            "description": entry.get("finding") or "",
+            "owasp_category": "A02:2021-Cryptographic_Failures",
+            "cwe": (entry.get("cwe") or "").replace("CWE-", "") or None,
+            "cvss": entry.get("cvss"),
+            "raw_data": entry,
+        }
+
+
+# ---- wapiti -----------------------------------------------------------------
+
+WAPITI_SEV_BY_LEVEL = {
+    1: "low",
+    2: "medium",
+    3: "high",
+    4: "critical",
+}
+
+# Wapiti tags every 500 response from an injection probe as level 3. That's
+# wrong — a 500 means the injection FAILED to land (the app errored out
+# rather than processing the bad input). It's a positive signal, not a
+# vulnerability. The only follow-up worth doing is checking the 500 response
+# body for a stack-trace leak; that's a separate info-disclosure finding.
+WAPITI_SEVERITY_OVERRIDES = {
+    "Internal Server Error": "info",
+    "Fingerprint web technology": "info",
+    "Review Webserver Metafiles for Information Leakage": "info",
+}
+
+
+def parse_wapiti(scan_dir: Path) -> Iterable[dict]:
+    rep = scan_dir / "report"
+    if not rep.is_dir():
+        return
+    js = next((p for p in rep.glob("*.json")), None)
+    if not js:
+        return
+    try:
+        data = json.loads(js.read_text(errors="replace"))
+    except Exception:
+        return
+    for category, items in (data.get("vulnerabilities") or {}).items():
+        for it in items or []:
+            level = it.get("level", 1)
+            sev = WAPITI_SEV_BY_LEVEL.get(level, "low")
+            sev = WAPITI_SEVERITY_OVERRIDES.get(category, sev)
+            yield {
+                "source_tool": "wapiti",
+                "severity": sev,
+                "title": category,
+                "description": it.get("info") or "",
+                "evidence_url": it.get("path"),
+                "evidence_method": it.get("method"),
+                "remediation": (data.get("classifications") or {})
+                               .get(category, {}).get("solution"),
+                "raw_data": it,
+            }
+    for category, items in (data.get("anomalies") or {}).items():
+        for it in items or []:
+            yield {
+                "source_tool": "wapiti",
+                "severity": "low",
+                "title": f"anomaly: {category}",
+                "description": it.get("info") or "",
+                "evidence_url": it.get("path"),
+                "raw_data": it,
+            }
+
+
+# ---- sqlmap -----------------------------------------------------------------
+
+def parse_sqlmap(scan_dir: Path) -> Iterable[dict]:
+    base = scan_dir / "sqlmap"
+    if not base.is_dir():
+        return
+    log = next(base.rglob("log"), None)
+    if not log:
+        return
+    text = log.read_text(errors="replace")
+    if "is vulnerable" in text.lower() or "parameter" in text.lower() and "injectable" in text.lower():
+        yield {
+            "source_tool": "sqlmap",
+            "severity": "critical",
+            "title": "SQL injection confirmed",
+            "description": text[:2000],
+            "owasp_category": "A03:2021-Injection",
+            "cwe": "89",
+            "raw_data": {"log_path": str(log)},
+        }
+
+
+# ---- dalfox -----------------------------------------------------------------
+
+def parse_dalfox(scan_dir: Path) -> Iterable[dict]:
+    p = scan_dir / "report.json"
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return
+    items = data if isinstance(data, list) else data.get("results", [])
+    for it in items or []:
+        sev_raw = (it.get("severity") or "medium").lower()
+        sev = sev_raw if sev_raw in ("critical", "high", "medium", "low", "info") else "medium"
+        yield {
+            "source_tool": "dalfox",
+            "severity": sev,
+            "title": "Cross-site scripting (XSS)",
+            "description": it.get("message") or it.get("type") or "",
+            "owasp_category": "A03:2021-Injection",
+            "cwe": "79",
+            "evidence_url": it.get("data") or it.get("url"),
+            "raw_data": it,
+        }
+
+
+# ---- dispatcher -------------------------------------------------------------
+
+PARSERS = {
+    "nuclei":  parse_nuclei,
+    "nikto":   parse_nikto,
+    "testssl": parse_testssl,
+    "wapiti":  parse_wapiti,
+    "sqlmap":  parse_sqlmap,
+    "dalfox":  parse_dalfox,
+}
+
+
+def parse_scan(tool: str, scan_dir: Path) -> Iterable[dict]:
+    fn = PARSERS.get(tool)
+    if fn:
+        yield from fn(scan_dir)

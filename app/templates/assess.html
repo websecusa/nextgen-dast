@@ -1,0 +1,97 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Assess a target</h1>
+<p class="muted">Enter an FQDN. We'll run the per-profile tool set against
+both <code>http://</code> and <code>https://</code>, capture every probe, and
+(in the next iteration) hand the results to the LLM tier you choose for a
+consolidated report.</p>
+
+<section class="card">
+  <form method="post" action="{{ base }}/assess">
+    <label>FQDN
+      <input name="fqdn" required placeholder="example.com  /  app.example.com"
+             autofocus>
+    </label>
+    <div style="display:flex; gap:1.5em">
+      <label class="check"><input type="checkbox" name="scan_http" checked> http://</label>
+      <label class="check"><input type="checkbox" name="scan_https" checked> https://</label>
+    </div>
+
+    <label>Profile
+      <select name="profile">
+        <option value="quick">quick — testssl + nuclei (curated tags). ~5 min.</option>
+        <option value="standard" selected>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
+        <option value="thorough">thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
+      </select>
+    </label>
+
+    <label>LLM tier
+      <select name="llm_tier">
+        <option value="none">none — scanners only, no LLM</option>
+        <option value="basic" selected>basic — roll-up + executive summary (~$5–10 / scan)</option>
+        <option value="advanced">advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
+      </select>
+    </label>
+
+    <label>LLM endpoint
+      <select name="llm_endpoint_id">
+        <option value="">— default —</option>
+        {% for e in endpoints %}
+          <option value="{{ e.id }}">{{ e.name }} ({{ e.model }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>User-Agent
+      <select name="user_agent_id">
+        <option value="">— default —</option>
+        {% for u in user_agents %}
+          <option value="{{ u.id }}" {% if u.is_default %}selected{% endif %}>{{ u.label }}</option>
+        {% endfor %}
+      </select>
+      <small class="muted">Sent by every HTTP scanner. Manage on <a href="{{ base }}/user-agents">/user-agents</a>.</small>
+    </label>
+
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:.8em 1em">
+      <legend style="padding:0 .4em; color: var(--muted)">Credentialed scan (optional)</legend>
+      <p class="muted" style="margin-top:0">Leave blank for an unauthenticated scan. SSO / Okta FastPass / DUO targets:
+      use <a href="{{ base }}/auth">capture-then-replay</a> instead — paste-in form creds can't drive MFA.</p>
+      <label>Username <input name="creds_username"></label>
+      <label>Password <input name="creds_password" type="password"></label>
+      <label>Login URL (form POST target)
+        <input name="login_url" placeholder="https://app.example.com/login">
+      </label>
+    </fieldset>
+
+    <button type="submit">Start assessment</button>
+  </form>
+</section>
+
+<section>
+  <h2>Recent assessments</h2>
+  {% if recent %}
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Target</th><th>Profile</th><th>Status</th>
+      <th>Findings</th><th>Started</th>
+    </tr></thead>
+    <tbody>
+    {% for r in recent %}
+      <tr>
+        <td><a href="{{ base }}/assessment/{{ r.id }}">#{{ r.id }}</a></td>
+        <td><code>{{ r.fqdn }}</code></td>
+        <td><span class="badge">{{ r.profile }}</span></td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.total_findings or 0 }}</td>
+        <td>{{ r.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No assessments yet.</p>{% endif %}
+</section>
+{% endblock %}

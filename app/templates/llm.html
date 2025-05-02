@@ -1,0 +1,96 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>LLM endpoints</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+{% if not db_ok %}
+  <section class="card">
+    <p class="err"><strong>Database unreachable.</strong> Run
+    <code>./pentest.sh bootstrap</code> (first time) or
+    <code>./pentest.sh reset</code> from the project directory.</p>
+  </section>
+{% endif %}
+
+<section class="card">
+  <h2>What this is</h2>
+  <p>LLM endpoints power the <em>Analyze with LLM</em> action on captured flows
+  and scans. The model receives the request, the response, and the existing
+  regex findings, and returns a JSON list of issues with severity, evidence,
+  and remediation.</p>
+  <p>Two backends are supported:</p>
+  <ul>
+    <li><strong>anthropic</strong> — Anthropic Messages API. Set
+        <em>model</em> to your provider's current model identifier (see your
+        Anthropic console); leave <em>base URL</em> blank.</li>
+    <li><strong>openai_compat</strong> — anything speaking
+        <code>/v1/chat/completions</code>: open-webui, LibreChat, OpenAI,
+        Ollama, LiteLLM. Set <em>base URL</em> to the
+        <code>/v1</code> root (e.g.
+        <code>https://your-openwebui/api</code> or
+        <code>https://api.openai.com/v1</code>).</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Existing endpoints</h2>
+  {% if endpoints %}
+  <table>
+    <thead><tr>
+      <th>Name</th><th>Backend</th><th>Model</th><th>Base URL</th>
+      <th>Default</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for e in endpoints %}
+      <tr>
+        <td><code>{{ e.name }}</code></td>
+        <td><span class="badge">{{ e.backend }}</span></td>
+        <td><code>{{ e.model }}</code></td>
+        <td class="url">{{ e.base_url or "—" }}</td>
+        <td>{% if e.is_default %}<span class="badge finished">default</span>{% endif %}</td>
+        <td>
+          <form method="post" action="{{ base }}/llm/endpoint/{{ e.id }}/delete"
+                onsubmit="return confirm('Delete endpoint {{ e.name }}?')">
+            <button class="warn" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No endpoints yet.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Add / update endpoint</h2>
+  <form method="post" action="{{ base }}/llm/endpoint">
+    <label>Name (unique)
+      <input name="name" required placeholder="e.g. anthropic-opus / open-webui-local">
+    </label>
+    <label>Backend
+      <select name="backend" required>
+        <option value="anthropic">anthropic — native Anthropic API</option>
+        <option value="openai_compat">openai_compat — open-webui / LibreChat / OpenAI / Ollama / LiteLLM</option>
+      </select>
+    </label>
+    <label>Base URL (openai_compat only)
+      <input name="base_url" placeholder="https://your-openwebui/api  or  https://api.openai.com/v1">
+    </label>
+    <label>API key
+      <input name="api_key" type="password" placeholder="sk-... or service-account key">
+    </label>
+    <label>Model
+      <input name="model" required placeholder="provider model identifier (e.g. gpt-4o, llama3.1:70b)">
+    </label>
+    <label>Extra headers (JSON, optional)
+      <input name="extra_headers" placeholder='{"X-Custom": "value"}'>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="is_default"> Use as default endpoint
+    </label>
+    <button type="submit">Save endpoint</button>
+  </form>
+</section>
+{% endblock %}

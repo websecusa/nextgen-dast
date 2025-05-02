@@ -1,0 +1,20 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_disclosure",
+  "version": "1.0",
+  "summary": "Info-disclosure check: scans body + headers for stack traces, secrets, debug pages.",
+  "validates": [
+    "A04:2021-Insecure_Design",
+    "CWE-200"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target URL to fetch (required)",
+    "--method": "HTTP method (default GET)",
+    "--cookie": "Cookie header value",
+    "--pattern": "Custom regex (repeatable)",
+    "--no-default-patterns": "Skip the built-in catalog and only use --pattern"
+  }
+}

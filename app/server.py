@@ -1,0 +1,1732 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+"""
+Pentest proxy + scanner UI.
+
+- Manages a mitmdump subprocess in reverse-proxy mode for intercept logging.
+- Launches wapiti / nikto scans against configurable targets.
+- Serves a small Jinja2 web UI on 127.0.0.1:8888.
+"""
+import json
+import os
+import re
+from contextlib import asynccontextmanager
+import shlex
+import signal
+import subprocess
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import psutil
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, RedirectResponse,
+                               StreamingResponse)
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+import auth as auth_mod
+import branding as branding_mod
+import cleanup as cleanup_mod
+import db
+import enrichment as enrichment_mod
+import llm as llm_mod
+import reports as reports_mod
+import sessions
+import toolkit as toolkit_mod
+import useragent as ua_mod
+import users as users_mod
+
+ROOT_PATH = os.environ.get("UI_ROOT_PATH", "").rstrip("/")
+
+DATA = Path("/data")
+FLOWS_DIR = DATA / "flows"
+LOGS_DIR = DATA / "logs"
+SCANS_DIR = DATA / "scans"
+STATE_FILE = DATA / "state.json"
+FLOW_LOG = LOGS_DIR / "flows.jsonl"
+PROXY_PID_FILE = DATA / "proxy.pid"
+PROXY_LOG = LOGS_DIR / "proxy.log"
+
+for d in (FLOWS_DIR, LOGS_DIR, SCANS_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_STATE = {
+    "proxy": {
+        "running": False,
+        "listen_host": "127.0.0.1",
+        "listen_port": 9443,
+        "mode": "reverse",
+        "upstream": "https://127.0.0.1:443",
+        "upstream_host_header": "fairtprm.com",
+        "ssl_insecure": True,
+    }
+}
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return json.loads(json.dumps(DEFAULT_STATE))
+
+
+def save_state(s: dict) -> None:
+    STATE_FILE.write_text(json.dumps(s, indent=2))
+
+
+# ---- mitmdump process management ---------------------------------------------
+
+def proxy_pid() -> Optional[int]:
+    if not PROXY_PID_FILE.exists():
+        return None
+    try:
+        pid = int(PROXY_PID_FILE.read_text().strip())
+    except ValueError:
+        return None
+    if not psutil.pid_exists(pid):
+        return None
+    try:
+        p = psutil.Process(pid)
+        if "mitmdump" not in " ".join(p.cmdline()):
+            return None
+    except psutil.NoSuchProcess:
+        return None
+    return pid
+
+
+def stop_proxy() -> None:
+    pid = proxy_pid()
+    if pid is None:
+        if PROXY_PID_FILE.exists():
+            PROXY_PID_FILE.unlink()
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(20):
+            if not psutil.pid_exists(pid):
+                break
+            time.sleep(0.1)
+        if psutil.pid_exists(pid):
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if PROXY_PID_FILE.exists():
+        PROXY_PID_FILE.unlink()
+
+
+def start_proxy(cfg: dict) -> tuple[bool, str]:
+    if proxy_pid() is not None:
+        stop_proxy()
+
+    listen_host = cfg["listen_host"]
+    listen_port = int(cfg["listen_port"])
+    upstream = cfg["upstream"].strip()
+    host_header = (cfg.get("upstream_host_header") or "").strip()
+    ssl_insecure = bool(cfg.get("ssl_insecure", True))
+
+    if not re.match(r"^https?://", upstream):
+        return False, f"upstream must start with http:// or https:// (got {upstream!r})"
+
+    args = [
+        "mitmdump",
+        "--mode", f"reverse:{upstream}",
+        "--listen-host", listen_host,
+        "--listen-port", str(listen_port),
+        "-s", "/app/proxy_addon.py",
+        "--set", f"flow_log_path={FLOW_LOG}",
+        "--set", "termlog_verbosity=info",
+    ]
+    if ssl_insecure:
+        args += ["--set", "ssl_insecure=true"]
+    if host_header:
+        # mitmproxy modify_headers: /flow-filter/header-name/value
+        args += ["--modify-headers", f"/~q/Host/{host_header}"]
+
+    log_fh = open(PROXY_LOG, "ab", buffering=0)
+    log_fh.write(f"\n--- start {datetime.now(timezone.utc).isoformat()} ---\n".encode())
+    log_fh.write(("$ " + " ".join(shlex.quote(a) for a in args) + "\n").encode())
+    proc = subprocess.Popen(
+        args,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        cwd="/app",
+        start_new_session=True,
+    )
+    PROXY_PID_FILE.write_text(str(proc.pid))
+    # give it a moment to fail fast
+    time.sleep(0.4)
+    if proc.poll() is not None:
+        if PROXY_PID_FILE.exists():
+            PROXY_PID_FILE.unlink()
+        tail = PROXY_LOG.read_bytes()[-2000:].decode("utf-8", "replace")
+        return False, f"mitmdump exited immediately. tail:\n{tail}"
+    return True, f"started pid {proc.pid}"
+
+
+# ---- scan management ---------------------------------------------------------
+
+def list_scans() -> list[dict]:
+    scans = []
+    for d in sorted(SCANS_DIR.iterdir(), reverse=True):
+        meta = d / "meta.json"
+        if not meta.exists():
+            continue
+        try:
+            m = json.loads(meta.read_text())
+        except Exception:
+            continue
+        # refresh status if process gone
+        if m.get("status") == "running":
+            pid = m.get("pid")
+            if pid and not psutil.pid_exists(pid):
+                m["status"] = "finished"
+                m["finished_at"] = m.get("finished_at") or datetime.now(timezone.utc).isoformat()
+                meta.write_text(json.dumps(m, indent=2))
+        scans.append(m)
+    return scans
+
+
+def kill_scan(scan_id: str) -> None:
+    meta = SCANS_DIR / scan_id / "meta.json"
+    if not meta.exists():
+        return
+    m = json.loads(meta.read_text())
+    pid = m.get("pid")
+    if pid and psutil.pid_exists(pid):
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    m["status"] = "killed"
+    m["finished_at"] = datetime.now(timezone.utc).isoformat()
+    meta.write_text(json.dumps(m, indent=2))
+
+
+def _free_port(low: int = 19000, high: int = 19999) -> int:
+    import socket
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            p = s.getsockname()[1]
+        if low <= p <= high or True:  # any free ephemeral port is fine
+            return p
+    raise RuntimeError("no free port")
+
+
+def start_scan(tool: str, target: str, extra: str = "",
+               auth_profile: str = "",
+               user_agent: Optional[str] = None) -> tuple[str, Optional[str]]:
+    scan_id = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    sdir = SCANS_DIR / scan_id
+    sdir.mkdir(parents=True, exist_ok=True)
+    out = sdir / "output.log"
+    extra_args = shlex.split(extra) if extra else []
+
+    profile = auth_mod.get_profile(auth_profile) if auth_profile else None
+    auth_args: list[str] = []
+    auth_warning: Optional[str] = None
+    if profile:
+        if tool == "wapiti":
+            auth_args = auth_mod.wapiti_args(profile, sdir, target)
+        elif tool == "nikto":
+            auth_args, auth_warning = auth_mod.nikto_args(profile)
+
+    proxy_port = _free_port()
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+    # Some scanners need an explicit --proxy flag (HTTP_PROXY env isn't enough
+    # for Perl/Python tools that use their own HTTP client). testssl.sh uses
+    # raw TLS sockets so a HTTP proxy can't capture it — we skip the wrapper
+    # for testssl and warn instead.
+
+    if tool == "wapiti":
+        report = sdir / "report"
+        cmd = ["wapiti", "-u", target, "-f", "html", "-o", str(report),
+               "--flush-session", "--verbose", "1",
+               "--proxy", proxy_url,
+               # broaden the default attack surface — wapiti's default subset
+               # routinely returns "0 vulnerabilities" on shallow targets.
+               "-m", "all"]
+        cmd += auth_args
+        cmd += extra_args
+    elif tool == "nikto":
+        report = sdir / "report.html"
+        cmd = ["nikto", "-h", target, "-output", str(report), "-Format", "htm",
+               "-ask", "no", "-nointeractive",
+               "-useproxy", proxy_url]
+        cmd += auth_args
+        cmd += extra_args
+    elif tool == "nuclei":
+        report = sdir / "report.jsonl"
+        cmd = ["nuclei", "-target", target, "-jsonl-export", str(report),
+               "-disable-update-check", "-no-color", "-silent",
+               "-severity", "info,low,medium,high,critical",
+               "-proxy", proxy_url]
+        cmd += extra_args
+    elif tool == "testssl":
+        # raw TLS — no HTTP proxy capture. Flow files won't exist for this.
+        report = sdir / "report.json"
+        cmd = ["testssl.sh", "--jsonfile", str(report),
+               "--quiet", "--color", "0", "--warnings", "off", target]
+        cmd += extra_args
+        proxy_port = 0  # signal: don't wrap with mitmdump
+    elif tool == "sqlmap":
+        report = sdir / "sqlmap"
+        cmd = ["sqlmap", "-u", target, "--batch", "--output-dir", str(report),
+               "--random-agent",
+               "--proxy", proxy_url]
+        cmd += extra_args
+    elif tool == "dalfox":
+        report = sdir / "report.json"
+        cmd = ["dalfox", "url", target, "--format", "json",
+               "--output", str(report), "--no-spinner", "--silence",
+               "--proxy", proxy_url]
+        cmd += extra_args
+    else:
+        raise ValueError(f"unknown tool: {tool}")
+
+    # apply user-agent flags per scanner (skips testssl)
+    ua_flags = ua_mod.flags_for(tool, user_agent)
+    if ua_flags:
+        cmd += ua_flags
+
+    # wrap with run_scan.sh unless this scanner doesn't go over HTTP
+    if proxy_port:
+        cmd = ["/app/scripts/run_scan.sh", str(sdir), str(proxy_port), "--"] + cmd
+
+    log_fh = open(out, "ab", buffering=0)
+    log_fh.write(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n".encode())
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    meta = {
+        "id": scan_id,
+        "tool": tool,
+        "target": target,
+        "extra": extra,
+        "auth_profile": auth_profile or None,
+        "auth_warning": auth_warning,
+        "cmd": cmd,
+        "pid": proc.pid,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+    }
+    (sdir / "meta.json").write_text(json.dumps(meta, indent=2))
+    return scan_id, auth_warning
+
+
+# ---- flow log helpers --------------------------------------------------------
+
+def read_flows(limit: int = 200) -> list[dict]:
+    if not FLOW_LOG.exists():
+        return []
+    # read tail efficiently
+    try:
+        lines = FLOW_LOG.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return list(reversed(out))
+
+
+def read_flow(flow_id: str) -> Optional[dict]:
+    if not FLOW_LOG.exists():
+        return None
+    for line in FLOW_LOG.read_text(errors="replace").splitlines():
+        try:
+            f = json.loads(line)
+        except Exception:
+            continue
+        if f.get("id") == flow_id:
+            return f
+    return None
+
+
+# ---- FastAPI app -------------------------------------------------------------
+
+# Mask anything that looks like credentials in a displayed scanner command
+# so screenshots / over-the-shoulder views don't leak the auditor1 password.
+_CRED_MASK_FLAGS = (
+    "--form-cred", "--auth-cred", "--auth-user", "--auth-password",
+    "--form-user", "--form-password", "--cookie", "-C", "--header",
+    "--api-key", "--token", "-id",
+)
+
+
+def mask_command(cmd: list) -> list:
+    """Replace the value following any credential-bearing flag with '***'."""
+    if not cmd:
+        return []
+    out = list(cmd)
+    for i, tok in enumerate(out):
+        if tok in _CRED_MASK_FLAGS and i + 1 < len(out):
+            out[i + 1] = "***"
+    return out
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """FastAPI lifespan — start a background sweeper that cleans up
+    assessments marked status='deleting'. Polls every 60s."""
+    import asyncio
+
+    async def sweeper():
+        while True:
+            try:
+                ids = cleanup_mod.find_pending()
+                for aid in ids:
+                    try:
+                        cleanup_mod.cleanup_assessment(aid)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+    task = asyncio.create_task(sweeper())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Pentest Proxy", root_path=ROOT_PATH, lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+templates = Jinja2Templates(directory="/app/templates")
+
+
+# ---- auth middleware --------------------------------------------------------
+# Public paths (no login required). Everything else requires a valid session.
+PUBLIC_PATHS = ("/login", "/health", "/static", "/branding/logo")
+ADMIN_PATHS = ("/admin",)
+# Routes a readonly user is allowed to POST to (otherwise POST/DELETE/PUT
+# require admin role).
+READONLY_WRITE_OK = ("/me/",)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # request.url.path includes the nginx /test prefix because we strip it at
+    # the proxy layer rather than at uvicorn's --root-path. Normalize here so
+    # PUBLIC_PATHS matches regardless of how it gets to us.
+    if ROOT_PATH and path.startswith(ROOT_PATH):
+        path = path[len(ROOT_PATH):] or "/"
+    if any(path == p or path.startswith(p + "/") for p in PUBLIC_PATHS):
+        return await call_next(request)
+
+    cookie = request.cookies.get(sessions.COOKIE_NAME)
+    user = sessions.verify(cookie) if cookie else None
+    if not user:
+        return RedirectResponse(
+            f"{ROOT_PATH}/login?next={path}", status_code=303
+        )
+
+    request.state.user = user
+
+    if any(path.startswith(p) for p in ADMIN_PATHS) and user.get("role") != "admin":
+        return JSONResponse({"error": "admin only"}, status_code=403)
+
+    if request.method in ("POST", "PUT", "DELETE", "PATCH") \
+            and user.get("role") != "admin" \
+            and not any(path.startswith(p) for p in READONLY_WRITE_OK):
+        return JSONResponse(
+            {"error": "read-only account — write actions require an admin"},
+            status_code=403,
+        )
+
+    return await call_next(request)
+
+
+def current_user(request: Request) -> Optional[dict]:
+    return getattr(request.state, "user", None) if hasattr(request, "state") else None
+
+
+def redirect(path: str, code: int = 303) -> RedirectResponse:
+    """Build a redirect that survives being served under a path prefix."""
+    if path.startswith("/"):
+        return RedirectResponse(f"{ROOT_PATH}{path}", status_code=code)
+    return RedirectResponse(path, status_code=code)
+
+
+def ctx(request: Request, **extra) -> dict:
+    state = load_state()
+    user = current_user(request)
+    try:
+        if db.healthy():
+            brand = branding_mod.get()
+            web_theme = branding_mod.get_web()
+        else:
+            brand, web_theme = {}, branding_mod.DARK_DEFAULTS
+    except Exception:
+        brand, web_theme = {}, branding_mod.DARK_DEFAULTS
+    return {
+        "request": request,
+        "base": ROOT_PATH,
+        "state": state,
+        "proxy_running": proxy_pid() is not None,
+        "user": user,
+        "is_admin": (user.get("role") == "admin") if user else False,
+        "brand": brand,
+        "web": web_theme,
+        **extra,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    flows = read_flows(20)
+    scans = list_scans()[:10]
+    return templates.TemplateResponse("index.html",
+                                      ctx(request, flows=flows, scans=scans))
+
+
+# Proxy ------------------------------------------------------------------------
+
+@app.get("/proxy", response_class=HTMLResponse)
+def proxy_page(request: Request):
+    return templates.TemplateResponse("proxy.html", ctx(request))
+
+
+@app.post("/proxy/config")
+def proxy_config(
+    listen_host: str = Form("127.0.0.1"),
+    listen_port: int = Form(9443),
+    upstream: str = Form(...),
+    upstream_host_header: str = Form(""),
+    ssl_insecure: Optional[str] = Form(None),
+):
+    s = load_state()
+    s["proxy"].update({
+        "listen_host": listen_host or "127.0.0.1",
+        "listen_port": int(listen_port),
+        "upstream": upstream,
+        "upstream_host_header": upstream_host_header,
+        "ssl_insecure": ssl_insecure is not None,
+    })
+    save_state(s)
+    if proxy_pid() is not None:
+        ok, msg = start_proxy(s["proxy"])  # restart with new config
+        s["proxy"]["running"] = ok
+        s["proxy"]["last_message"] = msg
+        save_state(s)
+    return redirect("/proxy")
+
+
+@app.post("/proxy/start")
+def proxy_start():
+    s = load_state()
+    ok, msg = start_proxy(s["proxy"])
+    s["proxy"]["running"] = ok
+    s["proxy"]["last_message"] = msg
+    save_state(s)
+    return redirect("/proxy")
+
+
+@app.post("/proxy/stop")
+def proxy_stop():
+    stop_proxy()
+    s = load_state()
+    s["proxy"]["running"] = False
+    s["proxy"]["last_message"] = "stopped"
+    save_state(s)
+    return redirect("/proxy")
+
+
+@app.post("/proxy/clear")
+def proxy_clear():
+    if FLOW_LOG.exists():
+        FLOW_LOG.unlink()
+    return redirect("/proxy")
+
+
+@app.get("/proxy/log", response_class=PlainTextResponse)
+def proxy_log_view():
+    if not PROXY_LOG.exists():
+        return ""
+    data = PROXY_LOG.read_bytes()[-8000:]
+    return data.decode("utf-8", "replace")
+
+
+# Flows ------------------------------------------------------------------------
+
+@app.get("/flows", response_class=HTMLResponse)
+def flows_page(request: Request, limit: int = 200):
+    flows = read_flows(limit)
+    return templates.TemplateResponse("flows.html",
+                                      ctx(request, flows=flows, limit=limit))
+
+
+@app.get("/flows.json")
+def flows_json(limit: int = 200):
+    return JSONResponse(read_flows(limit))
+
+
+@app.get("/flow/{flow_id}", response_class=HTMLResponse)
+def flow_detail(request: Request, flow_id: str):
+    f = read_flow(flow_id)
+    if not f:
+        raise HTTPException(404, "flow not found")
+    req_path = FLOWS_DIR / f.get("request_file", f"{flow_id}_request.txt")
+    resp_path = FLOWS_DIR / f.get("response_file", f"{flow_id}_response.txt")
+    request_text = req_path.read_text(errors="replace") if req_path.exists() else "(missing)"
+    response_text = resp_path.read_text(errors="replace") if resp_path.exists() else "(missing)"
+    # cap rendered size to keep the UI snappy
+    cap = 200_000
+    if len(request_text) > cap:
+        request_text = request_text[:cap] + f"\n\n…[truncated, full file at {req_path}]"
+    if len(response_text) > cap:
+        response_text = response_text[:cap] + f"\n\n…[truncated, full file at {resp_path}]"
+    analyzes = _flow_analyses(flow_id)
+    endpoints = db.query("SELECT id, name, backend, model FROM llm_endpoints ORDER BY name") if db.healthy() else []
+    return templates.TemplateResponse(
+        "flow_detail.html",
+        ctx(request, flow=f, request_text=request_text,
+            response_text=response_text, analyzes=analyzes,
+            llm_endpoints=endpoints),
+    )
+
+
+@app.get("/flow/{flow_id}/request.txt", response_class=PlainTextResponse)
+def flow_request_raw(flow_id: str):
+    p = FLOWS_DIR / f"{flow_id}_request.txt"
+    if not p.exists():
+        raise HTTPException(404)
+    return p.read_text(errors="replace")
+
+
+@app.get("/flow/{flow_id}/response.txt", response_class=PlainTextResponse)
+def flow_response_raw(flow_id: str):
+    p = FLOWS_DIR / f"{flow_id}_response.txt"
+    if not p.exists():
+        raise HTTPException(404)
+    return p.read_text(errors="replace")
+
+
+# Scans ------------------------------------------------------------------------
+
+@app.get("/scan", response_class=HTMLResponse)
+def scan_page(request: Request):
+    uas = (db.query("SELECT id, label, user_agent, is_default FROM user_agents "
+                    "ORDER BY is_default DESC, label")
+           if db.healthy() else [])
+    return templates.TemplateResponse(
+        "scan.html",
+        ctx(request, scans=list_scans(), profiles=auth_mod.list_profiles(),
+            user_agents=uas),
+    )
+
+
+def _opt_int(v) -> Optional[int]:
+    """Form field coercion. FastAPI's int validator rejects empty strings,
+    which is what HTML <select> emits for the '— default —' option."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _resolve_user_agent(uid: Optional[int]) -> Optional[str]:
+    if not db.healthy():
+        return None
+    if uid:
+        row = db.query_one("SELECT user_agent FROM user_agents WHERE id=%s", (uid,))
+        return row["user_agent"] if row else None
+    row = db.query_one("SELECT user_agent FROM user_agents WHERE is_default=1 LIMIT 1")
+    return row["user_agent"] if row else None
+
+
+@app.post("/scan")
+def scan_start(tool: str = Form(...), target: str = Form(...),
+               extra: str = Form(""), auth_profile: str = Form(""),
+               user_agent_id: str = Form("")):
+    target = target.strip()
+    if tool in ("wapiti",) and not re.match(r"^https?://", target):
+        target = f"http://{target}"
+    if not target:
+        raise HTTPException(400, "target required")
+    ua = _resolve_user_agent(_opt_int(user_agent_id))
+    sid, _warn = start_scan(tool, target, extra,
+                            auth_profile=auth_profile, user_agent=ua)
+    return redirect(f"/scan/{sid}")
+
+
+def _scan_flows(sdir: Path, limit: int = 500) -> list[dict]:
+    log = sdir / "flows.jsonl"
+    if not log.exists():
+        return []
+    out = []
+    for line in log.read_text(errors="replace").splitlines()[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return list(reversed(out))
+
+
+def _primary_report(sdir: Path) -> Optional[str]:
+    """Pick the most useful report file to link prominently."""
+    rep = sdir / "report"
+    if rep.is_dir():
+        # wapiti emits both a Mako template (report.html, raw $vars) and a
+        # populated dated .html. Prefer the populated one.
+        candidates = [p for p in rep.glob("*.html") if "$" not in p.read_text(errors="replace")[:2000]]
+        if candidates:
+            best = max(candidates, key=lambda p: p.stat().st_size)
+            return f"report/{best.name}"
+    if (sdir / "report.html").exists():
+        return "report.html"
+    if (sdir / "report.jsonl").exists():
+        return "report.jsonl"
+    if (sdir / "report.json").exists():
+        return "report.json"
+    return None
+
+
+@app.get("/scan/{scan_id}", response_class=HTMLResponse)
+def scan_view(request: Request, scan_id: str):
+    sdir = SCANS_DIR / scan_id
+    if not (sdir / "meta.json").exists():
+        raise HTTPException(404)
+    meta = json.loads((sdir / "meta.json").read_text())
+    if meta.get("status") == "running" and meta.get("pid") and not psutil.pid_exists(meta["pid"]):
+        meta["status"] = "finished"
+        meta["finished_at"] = datetime.now(timezone.utc).isoformat()
+        (sdir / "meta.json").write_text(json.dumps(meta, indent=2))
+    # display-only: redact any credential-bearing flags from the cmd echo
+    meta["cmd"] = mask_command(meta.get("cmd") or [])
+    output = (sdir / "output.log").read_text(errors="replace") if (sdir / "output.log").exists() else ""
+    primary = _primary_report(sdir)
+    all_flows = _scan_flows(sdir)
+    target_flows = [f for f in all_flows if not f.get("is_oob")]
+    oob_flows = [f for f in all_flows if f.get("is_oob")]
+    artifacts = []
+    HIDE = {"meta.json", "output.log", "flows.jsonl", "flows", "proxy.log"}
+    for p in sorted(sdir.iterdir()):
+        if p.name in HIDE:
+            continue
+        artifacts.append({"name": p.name, "size": p.stat().st_size,
+                          "is_dir": p.is_dir()})
+    return templates.TemplateResponse(
+        "scan_detail.html",
+        ctx(request, meta=meta, output=output, artifacts=artifacts,
+            scan_id=scan_id, primary_report=primary,
+            scan_flows=target_flows, oob_flows=oob_flows),
+    )
+
+
+@app.get("/scan/{scan_id}/output", response_class=PlainTextResponse)
+def scan_output(scan_id: str):
+    p = SCANS_DIR / scan_id / "output.log"
+    if not p.exists():
+        raise HTTPException(404)
+    return p.read_text(errors="replace")
+
+
+_INLINE_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".htm":  "text/html; charset=utf-8",
+    ".css":  "text/css; charset=utf-8",
+    ".js":   "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".jsonl": "application/json; charset=utf-8",
+    ".txt":  "text/plain; charset=utf-8",
+    ".log":  "text/plain; charset=utf-8",
+    ".xml":  "application/xml; charset=utf-8",
+    ".svg":  "image/svg+xml",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".ico":  "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf":  "font/ttf",
+    ".pdf":  "application/pdf",
+}
+
+
+@app.get("/scan/{scan_id}/file/{name:path}")
+def scan_file(scan_id: str, name: str):
+    base_dir = (SCANS_DIR / scan_id).resolve()
+    target = (base_dir / name).resolve()
+    if not str(target).startswith(str(base_dir)) or not target.exists():
+        raise HTTPException(404)
+    if target.is_dir():
+        rel = name.rstrip("/")
+        parent_link = ""
+        if rel:
+            parent = "/".join(rel.split("/")[:-1])
+            parent_url = f"{ROOT_PATH}/scan/{scan_id}/file" + (f"/{parent}" if parent else "")
+            parent_link = f'<p><a href="{parent_url}">../</a></p>'
+        rows = []
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            entry = (rel + "/" + p.name) if rel else p.name
+            label = p.name + ("/" if p.is_dir() else "")
+            size = "" if p.is_dir() else f' <span style="color:#8a96a3">({p.stat().st_size} B)</span>'
+            rows.append(
+                f'<li><a href="{ROOT_PATH}/scan/{scan_id}/file/{entry}">{label}</a>{size}</li>'
+            )
+        body = (
+            f'<!doctype html><meta charset="utf-8"><title>{name or "/"}</title>'
+            f'<style>body{{font-family:ui-monospace,Menlo,monospace;background:#0f1419;color:#d8dee5;padding:1.5em}}'
+            f'a{{color:#5fb3d7;text-decoration:none}}a:hover{{text-decoration:underline}}</style>'
+            f'<h3>{name or "/"}</h3>{parent_link}<ul>{"".join(rows)}</ul>'
+        )
+        return HTMLResponse(body)
+    ctype = _INLINE_TYPES.get(target.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(target), media_type=ctype)
+
+
+@app.post("/scan/{scan_id}/kill")
+def scan_kill(scan_id: str):
+    kill_scan(scan_id)
+    return redirect(f"/scan/{scan_id}")
+
+
+@app.post("/scans/delete")
+async def scans_delete(request: Request):
+    """Bulk-delete one or more scan dirs. Each scan_id is independently
+    validated by the cleanup module's strict regex + path-resolve guard,
+    so a malformed value can't traverse out of /data/scans."""
+    form = await request.form()
+    scan_ids = [s for s in form.getlist("scan_ids") if s]
+    if not scan_ids:
+        return redirect("/scan?msg=nothing+selected")
+
+    removed = 0
+    failed: list[str] = []
+    for sid in scan_ids:
+        result = cleanup_mod.delete_scan(sid)
+        if result.get("ok") and result.get("removed"):
+            removed += 1
+            # Detach this scan_id from any owning assessment so the
+            # detail page doesn't list a dangling reference.
+            for row in db.query(
+                "SELECT id, scan_ids FROM assessments WHERE scan_ids LIKE %s",
+                (f"%{sid}%",)):
+                ids = [s for s in (row["scan_ids"] or "").split(",")
+                       if s and s != sid]
+                db.execute(
+                    "UPDATE assessments SET scan_ids = %s WHERE id = %s",
+                    (",".join(ids), row["id"]))
+        else:
+            failed.append(sid)
+
+    msg = f"deleted+{removed}"
+    if failed:
+        msg += f"+failed:{len(failed)}"
+    return redirect(f"/scan?msg={msg}")
+
+
+# Auth profiles ---------------------------------------------------------------
+
+@app.get("/auth", response_class=HTMLResponse)
+def auth_page(request: Request, msg: str = ""):
+    return templates.TemplateResponse(
+        "auth.html",
+        ctx(request, profiles=auth_mod.list_profiles(), msg=msg),
+    )
+
+
+@app.post("/auth/profile")
+def auth_save(
+    name: str = Form(...),
+    type: str = Form(...),
+    host_filter: str = Form(""),
+    # basic
+    basic_username: str = Form(""),
+    basic_password: str = Form(""),
+    # form
+    form_login_url: str = Form(""),
+    form_username: str = Form(""),
+    form_password: str = Form(""),
+    # bearer
+    bearer_token: str = Form(""),
+    # cookies (paste raw "Cookie: a=1; b=2" or "a=1; b=2")
+    cookies_raw: str = Form(""),
+):
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    p: dict = {"name": name, "type": type, "host_filter": host_filter.strip()}
+    if type == "basic":
+        p["basic"] = {"username": basic_username, "password": basic_password}
+    elif type == "form":
+        p["form_login"] = {
+            "login_url": form_login_url,
+            "username": form_username,
+            "password": form_password,
+        }
+    elif type == "bearer":
+        p["bearer"] = {"token": bearer_token}
+    elif type == "cookies":
+        cookies = []
+        raw = cookies_raw.strip()
+        if raw.lower().startswith("cookie:"):
+            raw = raw.split(":", 1)[1].strip()
+        for piece in raw.split(";"):
+            piece = piece.strip()
+            if not piece:
+                continue
+            n, _, v = piece.partition("=")
+            if n:
+                cookies.append({
+                    "name": n.strip(), "value": v.strip(),
+                    "path": "/", "domain": host_filter,
+                    "secure": False, "httponly": False,
+                })
+        p["cookies"] = cookies
+        p["headers"] = {}
+    else:
+        raise HTTPException(400, f"unknown type {type}")
+    auth_mod.save_profile(p)
+    return redirect(f"/auth?msg=saved+{name}")
+
+
+@app.post("/auth/profile/{name}/delete")
+def auth_delete(name: str):
+    auth_mod.delete_profile(name)
+    return redirect(f"/auth?msg=deleted+{name}")
+
+
+@app.post("/auth/capture")
+def auth_capture(flow_id: str = Form(...), name: str = Form(...),
+                 host_filter: str = Form("")):
+    try:
+        auth_mod.capture_from_flow(flow_id, name.strip(), host_filter.strip())
+    except FileNotFoundError:
+        raise HTTPException(404, "flow files not found")
+    return redirect(f"/auth?msg=captured+{name}")
+
+
+# LLM endpoints + analysis ----------------------------------------------------
+
+@app.get("/llm", response_class=HTMLResponse)
+def llm_page(request: Request, msg: str = ""):
+    endpoints = []
+    if db.healthy():
+        endpoints = db.query("SELECT * FROM llm_endpoints ORDER BY name")
+    return templates.TemplateResponse(
+        "llm.html",
+        ctx(request, endpoints=endpoints, msg=msg, db_ok=db.healthy()),
+    )
+
+
+@app.post("/llm/endpoint")
+def llm_endpoint_save(
+    name: str = Form(...),
+    backend: str = Form(...),
+    base_url: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(...),
+    extra_headers: str = Form(""),
+    is_default: Optional[str] = Form(None),
+):
+    if backend not in ("anthropic", "openai_compat"):
+        raise HTTPException(400, f"invalid backend {backend!r}")
+    if backend == "openai_compat" and not base_url.strip():
+        raise HTTPException(400, "openai_compat needs base_url")
+    is_def = 1 if is_default else 0
+    if is_def:
+        db.execute("UPDATE llm_endpoints SET is_default = 0")
+    db.execute(
+        "INSERT INTO llm_endpoints "
+        "(name, backend, base_url, api_key, model, is_default, extra_headers) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE backend=VALUES(backend), base_url=VALUES(base_url), "
+        "api_key=VALUES(api_key), model=VALUES(model), is_default=VALUES(is_default), "
+        "extra_headers=VALUES(extra_headers)",
+        (name.strip(), backend, base_url.strip(), api_key.strip(),
+         model.strip(), is_def, extra_headers.strip()),
+    )
+    return redirect(f"/llm?msg=saved+{name}")
+
+
+@app.post("/llm/endpoint/{eid}/delete")
+def llm_endpoint_delete(eid: int):
+    db.execute("DELETE FROM llm_endpoints WHERE id = %s", (eid,))
+    return redirect("/llm?msg=deleted")
+
+
+def _resolve_endpoint(endpoint_id: Optional[int]) -> Optional[dict]:
+    if endpoint_id:
+        return db.query_one("SELECT * FROM llm_endpoints WHERE id = %s", (endpoint_id,))
+    row = db.query_one("SELECT * FROM llm_endpoints WHERE is_default = 1 LIMIT 1")
+    if row:
+        return row
+    return db.query_one("SELECT * FROM llm_endpoints ORDER BY id LIMIT 1")
+
+
+@app.post("/flow/{flow_id}/analyze")
+def flow_analyze(flow_id: str, endpoint_id: str = Form("")):
+    flow = read_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "flow not found")
+    endpoint = _resolve_endpoint(_opt_int(endpoint_id))
+    if not endpoint:
+        raise HTTPException(400, "no LLM endpoints configured — add one on /llm")
+
+    req_path = FLOWS_DIR / flow.get("request_file", f"{flow_id}_request.txt")
+    resp_path = FLOWS_DIR / flow.get("response_file", f"{flow_id}_response.txt")
+    request_text = req_path.read_text(errors="replace") if req_path.exists() else ""
+    response_text = resp_path.read_text(errors="replace") if resp_path.exists() else ""
+
+    analysis_id = db.execute(
+        "INSERT INTO llm_analyses "
+        "(target_type, target_id, endpoint_id, endpoint_name, model, status) "
+        "VALUES ('flow', %s, %s, %s, %s, 'running')",
+        (flow_id, endpoint["id"], endpoint["name"], endpoint["model"]),
+    )
+
+    result = llm_mod.analyze(endpoint, request_text, response_text,
+                             flow.get("findings"))
+
+    if result.get("ok"):
+        db.execute(
+            "UPDATE llm_analyses SET status='done', request_tokens=%s, "
+            "response_tokens=%s, raw_response=%s, findings_json=%s, "
+            "finished_at=NOW() WHERE id=%s",
+            (result.get("in_tokens"), result.get("out_tokens"),
+             result.get("raw"),
+             json.dumps(result.get("findings")) if result.get("findings") is not None else None,
+             analysis_id),
+        )
+    else:
+        db.execute(
+            "UPDATE llm_analyses SET status='error', raw_response=%s, "
+            "error_text=%s, finished_at=NOW() WHERE id=%s",
+            (result.get("raw"), result.get("error"), analysis_id),
+        )
+    return redirect(f"/flow/{flow_id}#analysis-{analysis_id}")
+
+
+# From-flow scans -------------------------------------------------------------
+
+@app.post("/flow/{flow_id}/scan")
+def flow_scan(flow_id: str, tool: str = Form(...), extra: str = Form("")):
+    """Launch sqlmap / dalfox / nuclei / etc. against the URL of a captured flow.
+
+    For sqlmap and dalfox we propagate the cookie header from the captured
+    request so the scan inherits the session.
+    """
+    if tool not in ("sqlmap", "dalfox", "nuclei", "wapiti", "nikto", "testssl"):
+        raise HTTPException(400, f"unsupported tool: {tool}")
+    flow = read_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "flow not found")
+    target = flow["url"]
+    extra_args = []
+    # carry session cookie from the captured request, when present
+    req_path = FLOWS_DIR / flow.get("request_file", f"{flow_id}_request.txt")
+    cookie_header = ""
+    if req_path.exists():
+        head = req_path.read_text(errors="replace").split("\r\n\r\n", 1)[0]
+        for line in head.splitlines():
+            if line.lower().startswith("cookie:"):
+                cookie_header = line.split(":", 1)[1].strip()
+                break
+    if cookie_header:
+        if tool == "sqlmap":
+            extra_args += ["--cookie", cookie_header]
+        elif tool == "dalfox":
+            extra_args += ["--cookie", cookie_header]
+        elif tool == "nuclei":
+            extra_args += ["-H", f"Cookie: {cookie_header}"]
+    combined_extra = " ".join(shlex.quote(a) for a in extra_args)
+    if extra:
+        combined_extra = (combined_extra + " " + extra).strip()
+    sid, _ = start_scan(tool, target, combined_extra)
+    return redirect(f"/scan/{sid}")
+
+
+def _flow_analyses(flow_id: str) -> list[dict]:
+    if not db.healthy():
+        return []
+    rows = db.query(
+        "SELECT id, endpoint_name, model, status, request_tokens, response_tokens, "
+        "findings_json, error_text, created_at, finished_at "
+        "FROM llm_analyses WHERE target_type='flow' AND target_id=%s "
+        "ORDER BY id DESC", (flow_id,))
+    for r in rows:
+        try:
+            r["findings"] = json.loads(r["findings_json"]) if r.get("findings_json") else None
+        except Exception:
+            r["findings"] = None
+    return rows
+
+
+# Assessments (orchestrated multi-tool scans) --------------------------------
+
+@app.get("/assess", response_class=HTMLResponse)
+def assess_page(request: Request):
+    endpoints = (db.query("SELECT id, name, model FROM llm_endpoints ORDER BY name")
+                 if db.healthy() else [])
+    uas = (db.query("SELECT id, label, user_agent, is_default FROM user_agents "
+                    "ORDER BY is_default DESC, label")
+           if db.healthy() else [])
+    recent = (db.query("SELECT id, fqdn, profile, status, total_findings, "
+                       "created_at FROM assessments ORDER BY id DESC LIMIT 20")
+              if db.healthy() else [])
+    return templates.TemplateResponse(
+        "assess.html",
+        ctx(request, endpoints=endpoints, user_agents=uas, recent=recent),
+    )
+
+
+@app.post("/assess")
+def assess_start(
+    fqdn: str = Form(...),
+    profile: str = Form("standard"),
+    llm_tier: str = Form("basic"),
+    llm_endpoint_id: str = Form(""),
+    user_agent_id: str = Form(""),
+    scan_http: Optional[str] = Form(None),
+    scan_https: Optional[str] = Form(None),
+    creds_username: str = Form(""),
+    creds_password: str = Form(""),
+    login_url: str = Form(""),
+):
+    llm_endpoint_id_i = _opt_int(llm_endpoint_id)
+    user_agent_id_i = _opt_int(user_agent_id)
+    fqdn = fqdn.strip().lower()
+    fqdn = re.sub(r"^https?://", "", fqdn).split("/", 1)[0]
+    if not fqdn:
+        raise HTTPException(400, "fqdn required")
+    if profile not in ("quick", "standard", "thorough"):
+        raise HTTPException(400, "invalid profile")
+    if llm_tier not in ("none", "basic", "advanced"):
+        raise HTTPException(400, "invalid llm_tier")
+
+    aid = db.execute(
+        """INSERT INTO assessments
+           (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
+            user_agent_id, creds_username, creds_password, login_url, status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
+        (fqdn,
+         1 if scan_http else 0,
+         1 if scan_https else 0,
+         profile, llm_tier, llm_endpoint_id_i,
+         user_agent_id_i,
+         creds_username or None,
+         creds_password or None,
+         login_url or None),
+    )
+    # spawn detached orchestrator
+    log_path = LOGS_DIR / f"orchestrator_{aid}.log"
+    log_fh = open(log_path, "ab", buffering=0)
+    subprocess.Popen(
+        ["python", "-m", "scripts.orchestrator", str(aid)],
+        stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True, cwd="/app",
+    )
+    return redirect(f"/assessment/{aid}")
+
+
+@app.get("/assessments", response_class=HTMLResponse)
+def assessments_list(request: Request):
+    rows = (db.query("SELECT id, fqdn, profile, llm_tier, status, "
+                     "total_findings, created_at, finished_at "
+                     "FROM assessments ORDER BY id DESC LIMIT 100")
+            if db.healthy() else [])
+    return templates.TemplateResponse("assessments.html",
+                                      ctx(request, assessments=rows))
+
+
+@app.get("/assessment/{aid}", response_class=HTMLResponse)
+def assessment_detail(request: Request, aid: int):
+    a = db.query_one("SELECT * FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    findings = db.query(
+        "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
+        "cwe, cvss, title, description, evidence_url, remediation, "
+        "COALESCE(seen_count, 1) AS seen_count "
+        "FROM findings WHERE assessment_id = %s "
+        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
+        (aid,))
+    sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
+    for f in findings:
+        sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
+    scan_ids = (a.get("scan_ids") or "").split(",") if a.get("scan_ids") else []
+    scan_ids = [s for s in scan_ids if s]
+    reports = reports_mod.list_reports(aid)
+    return templates.TemplateResponse(
+        "assessment_detail.html",
+        ctx(request, a=a, findings=findings, sev_counts=sev_counts,
+            scan_ids=scan_ids, reports=reports),
+    )
+
+
+@app.post("/assessment/{aid}/delete")
+def assessment_delete(aid: int):
+    """Mark an assessment for deletion; the background sweeper handles the
+    actual filesystem removal asynchronously. Returns immediately so big
+    scan dirs (16+ GB) don't block the request."""
+    a = db.query_one("SELECT id, status FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    # Refuse to delete a still-running scan; user must cancel/wait first.
+    if a["status"] == "running":
+        raise HTTPException(409, "assessment is still running — cancel it first")
+    db.execute(
+        "UPDATE assessments SET status='deleting', "
+        "current_step='queued for deletion' WHERE id = %s", (aid,))
+    return redirect("/assessments?msg=queued+for+deletion")
+
+
+@app.get("/assessment/{aid}/status")
+def assessment_status_json(aid: int):
+    a = db.query_one(
+        "SELECT id, status, current_step, total_findings, finished_at "
+        "FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    return JSONResponse({k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                         for k, v in a.items()})
+
+
+# User-Agent management ------------------------------------------------------
+
+@app.get("/user-agents", response_class=HTMLResponse)
+def user_agents_page(request: Request, msg: str = ""):
+    rows = (db.query("SELECT id, label, user_agent, is_default, is_seeded "
+                     "FROM user_agents ORDER BY is_default DESC, label")
+            if db.healthy() else [])
+    return templates.TemplateResponse(
+        "user_agents.html",
+        ctx(request, user_agents=rows, msg=msg),
+    )
+
+
+@app.post("/user-agents")
+def user_agents_add(
+    label: str = Form(...),
+    user_agent: str = Form(...),
+    is_default: Optional[str] = Form(None),
+):
+    label = label.strip()
+    user_agent = user_agent.strip()
+    if not label or not user_agent:
+        raise HTTPException(400, "label and user_agent are required")
+    if is_default:
+        db.execute("UPDATE user_agents SET is_default = 0")
+    db.execute(
+        "INSERT INTO user_agents (label, user_agent, is_default, is_seeded) "
+        "VALUES (%s, %s, %s, 0) "
+        "ON DUPLICATE KEY UPDATE user_agent=VALUES(user_agent), "
+        "is_default=VALUES(is_default)",
+        (label, user_agent, 1 if is_default else 0),
+    )
+    return redirect(f"/user-agents?msg=saved+{label}")
+
+
+@app.post("/user-agents/{uid}/delete")
+def user_agents_delete(uid: int):
+    db.execute("DELETE FROM user_agents WHERE id = %s", (uid,))
+    return redirect("/user-agents?msg=deleted")
+
+
+@app.post("/user-agents/{uid}/default")
+def user_agents_make_default(uid: int):
+    db.execute("UPDATE user_agents SET is_default = 0")
+    db.execute("UPDATE user_agents SET is_default = 1 WHERE id = %s", (uid,))
+    return redirect("/user-agents?msg=default+set")
+
+
+# Auth ------------------------------------------------------------------------
+
+def _set_session_cookie(response, user: dict) -> None:
+    payload = {"id": user["id"], "username": user["username"],
+               "role": user["role"]}
+    cookie = sessions.sign(payload)
+    response.set_cookie(
+        key=sessions.COOKIE_NAME, value=cookie,
+        max_age=sessions.DEFAULT_TTL,
+        path=ROOT_PATH or "/",
+        httponly=True, secure=True, samesite="strict",
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "", error: str = ""):
+    # Already logged in? Send them on.
+    cookie = request.cookies.get(sessions.COOKIE_NAME)
+    if sessions.verify(cookie):
+        return RedirectResponse(next or f"{ROOT_PATH}/", status_code=303)
+    return templates.TemplateResponse(
+        "login.html",
+        {"request": request, "base": ROOT_PATH, "next": next, "error": error},
+    )
+
+
+@app.post("/login")
+def login_submit(request: Request,
+                 username: str = Form(...),
+                 password: str = Form(...),
+                 next: str = Form("")):
+    u = users_mod.authenticate(username, password)
+    if not u:
+        return RedirectResponse(
+            f"{ROOT_PATH}/login?error=Invalid+credentials"
+            + (f"&next={next}" if next else ""),
+            status_code=303,
+        )
+    target = next if next.startswith(ROOT_PATH or "/") else f"{ROOT_PATH}/"
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, u)
+    return response
+
+
+@app.post("/logout")
+def logout():
+    response = RedirectResponse(f"{ROOT_PATH}/login", status_code=303)
+    response.delete_cookie(sessions.COOKIE_NAME, path=ROOT_PATH or "/")
+    return response
+
+
+# Admin -----------------------------------------------------------------------
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_index(request: Request):
+    return templates.TemplateResponse("admin/index.html", ctx(request))
+
+
+@app.get("/admin/users", response_class=HTMLResponse)
+def admin_users_page(request: Request, msg: str = ""):
+    return templates.TemplateResponse(
+        "admin/users.html",
+        ctx(request, users=users_mod.list_users(), msg=msg),
+    )
+
+
+@app.post("/admin/users")
+def admin_users_create(
+    request: Request,
+    username: str = Form(...),
+    role: str = Form("readonly"),
+    password: str = Form(""),
+):
+    username = username.strip()
+    if not re.match(r"^[A-Za-z0-9_.\-]{2,64}$", username):
+        raise HTTPException(400, "username must be 2–64 chars, [A-Za-z0-9_.-]")
+    if role not in users_mod.ROLES:
+        raise HTTPException(400, "invalid role")
+    if users_mod.get_by_username(username):
+        return redirect(f"/admin/users?msg=user+already+exists")
+    pw = password.strip() or users_mod.gen_password()
+    users_mod.create(username, pw, role)
+    msg = f"created+{username}+pw={pw}"
+    return redirect(f"/admin/users?msg={msg}")
+
+
+@app.post("/admin/users/{uid}/role")
+def admin_users_set_role(uid: int, role: str = Form(...)):
+    if role not in users_mod.ROLES:
+        raise HTTPException(400, "invalid role")
+    users_mod.set_role(uid, role)
+    return redirect("/admin/users?msg=role+updated")
+
+
+@app.post("/admin/users/{uid}/disabled")
+def admin_users_disabled(uid: int, disabled: str = Form("")):
+    users_mod.set_disabled(uid, bool(disabled))
+    return redirect("/admin/users?msg=disabled+updated")
+
+
+@app.post("/admin/users/{uid}/password")
+def admin_users_password(uid: int, password: str = Form("")):
+    pw = password.strip() or users_mod.gen_password()
+    users_mod.set_password(uid, pw)
+    return redirect(f"/admin/users?msg=password+for+%23{uid}+set+to+{pw}")
+
+
+@app.post("/admin/users/{uid}/delete")
+def admin_users_delete(request: Request, uid: int):
+    me = current_user(request) or {}
+    if int(uid) == int(me.get("id", -1)):
+        raise HTTPException(400, "cannot delete the account you're logged in as")
+    users_mod.delete(uid)
+    return redirect("/admin/users?msg=deleted")
+
+
+@app.post("/me/password")
+def me_password(request: Request,
+                current_password: str = Form(...),
+                new_password: str = Form(...)):
+    me = current_user(request) or {}
+    u = users_mod.get_by_id(me.get("id", 0))
+    if not u or not users_mod.authenticate(u["username"], current_password):
+        raise HTTPException(403, "current password incorrect")
+    if len(new_password) < 8:
+        raise HTTPException(400, "new password must be ≥ 8 characters")
+    users_mod.set_password(u["id"], new_password)
+    return redirect("/?msg=password+changed")
+
+
+# Branding --------------------------------------------------------------------
+
+@app.get("/admin/branding", response_class=HTMLResponse)
+def admin_branding_landing(request: Request, msg: str = ""):
+    """Landing page — picks which side to edit (web vs PDF)."""
+    return templates.TemplateResponse(
+        "admin/branding.html",
+        ctx(request, brand=branding_mod.get(),
+            web=branding_mod.get_web(),
+            pdf=branding_mod.get_pdf(), msg=msg),
+    )
+
+
+@app.get("/admin/branding/web", response_class=HTMLResponse)
+def admin_branding_web_page(request: Request, msg: str = ""):
+    return templates.TemplateResponse(
+        "admin/branding_web.html",
+        ctx(request, brand=branding_mod.get(),
+            web=branding_mod.get_web(), msg=msg),
+    )
+
+
+@app.get("/admin/branding/pdf", response_class=HTMLResponse)
+def admin_branding_pdf_page(request: Request, msg: str = ""):
+    return templates.TemplateResponse(
+        "admin/branding_pdf.html",
+        ctx(request, brand=branding_mod.get(),
+            pdf=branding_mod.get_pdf(), msg=msg),
+    )
+
+
+@app.post("/admin/branding/shared")
+def admin_branding_save_shared(
+    company_name: str = Form(""),
+    tagline: str = Form(""),
+    classification: str = Form(""),
+    contact_email: str = Form(""),
+    disclaimer: str = Form(""),
+    footer_text: str = Form(""),
+    header_text: str = Form(""),
+):
+    branding_mod.update({
+        "company_name": company_name, "tagline": tagline,
+        "classification": classification, "contact_email": contact_email,
+        "disclaimer": disclaimer,
+        "footer_text": footer_text, "header_text": header_text,
+    })
+    return redirect("/admin/branding?msg=shared+saved")
+
+
+@app.post("/admin/branding/web")
+def admin_branding_save_web(
+    web_mode: str = Form("dark"),
+    web_primary_color: str = Form(""),
+    web_accent_color: str = Form(""),
+    web_font_family: str = Form(""),
+    web_sev_critical: str = Form(""),
+    web_sev_high: str = Form(""),
+    web_sev_medium: str = Form(""),
+    web_sev_low: str = Form(""),
+    web_sev_info: str = Form(""),
+):
+    if web_mode not in ("dark", "custom"):
+        web_mode = "dark"
+    branding_mod.update({
+        "web_mode": web_mode,
+        "web_primary_color": web_primary_color,
+        "web_accent_color": web_accent_color,
+        "web_font_family": web_font_family,
+        "web_sev_critical": web_sev_critical,
+        "web_sev_high": web_sev_high,
+        "web_sev_medium": web_sev_medium,
+        "web_sev_low": web_sev_low,
+        "web_sev_info": web_sev_info,
+    })
+    return redirect("/admin/branding/web?msg=web+branding+saved")
+
+
+@app.post("/admin/branding/pdf")
+def admin_branding_save_pdf(
+    primary_color: str = Form(""),
+    accent_color: str = Form(""),
+    classification_color: str = Form(""),
+    pdf_font_family: str = Form(""),
+    pdf_cover_text_color: str = Form(""),
+    pdf_header_color: str = Form(""),
+    pdf_body_color: str = Form(""),
+    pdf_sev_critical: str = Form(""),
+    pdf_sev_high: str = Form(""),
+    pdf_sev_medium: str = Form(""),
+    pdf_sev_low: str = Form(""),
+    pdf_sev_info: str = Form(""),
+):
+    branding_mod.update({
+        "primary_color": primary_color,
+        "accent_color": accent_color,
+        "classification_color": classification_color,
+        "pdf_font_family": pdf_font_family,
+        "pdf_cover_text_color": pdf_cover_text_color,
+        "pdf_header_color": pdf_header_color,
+        "pdf_body_color": pdf_body_color,
+        "pdf_sev_critical": pdf_sev_critical,
+        "pdf_sev_high": pdf_sev_high,
+        "pdf_sev_medium": pdf_sev_medium,
+        "pdf_sev_low": pdf_sev_low,
+        "pdf_sev_info": pdf_sev_info,
+    })
+    return redirect("/admin/branding/pdf?msg=pdf+branding+saved")
+
+
+@app.post("/admin/branding/logo/{kind}")
+async def admin_branding_logo_upload(kind: str, file: UploadFile = File(...)):
+    if kind not in branding_mod.ALLOWED_KINDS:
+        raise HTTPException(400, "kind must be 'header' or 'footer'")
+    data = await file.read()
+    result = branding_mod.save_logo(kind, data)
+    if not result.get("ok"):
+        return redirect(f"/admin/branding?msg=upload+failed:+{result.get('error','?')}")
+    return redirect(f"/admin/branding?msg={kind}+logo+saved")
+
+
+@app.post("/admin/branding/logo/{kind}/delete")
+def admin_branding_logo_delete(kind: str):
+    if kind not in branding_mod.ALLOWED_KINDS:
+        raise HTTPException(400, "kind must be 'header' or 'footer'")
+    branding_mod.delete_logo(kind)
+    return redirect(f"/admin/branding?msg={kind}+logo+removed")
+
+
+# Toolkit (validation probes) -------------------------------------------------
+
+@app.get("/admin/toolkit", response_class=HTMLResponse)
+def admin_toolkit_page(request: Request):
+    return templates.TemplateResponse(
+        "admin/toolkit.html",
+        ctx(request, probes=toolkit_mod.list_probes()),
+    )
+
+
+# Reports ---------------------------------------------------------------------
+
+@app.post("/assessment/{aid}/report")
+def assessment_report_generate(aid: int):
+    """Generate a fresh PDF report for an assessment. Synchronous in v1 —
+    big assessments may take 5–15 s. Returns a redirect to the assessment
+    detail page so the new file shows up in the report list."""
+    a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    try:
+        path = reports_mod.generate(aid)
+    except Exception as e:
+        return redirect(f"/assessment/{aid}?msg=report+failed:+{type(e).__name__}")
+    if not path:
+        return redirect(f"/assessment/{aid}?msg=no+data+to+report")
+    return redirect(f"/assessment/{aid}?msg=report+ready:+{path.name}")
+
+
+_REPORT_NAME_RE = re.compile(r"^assessment_\d+_[0-9]{8}-[0-9]{6}\.pdf$")
+
+
+@app.get("/assessment/{aid}/report/{filename}")
+def assessment_report_download(aid: int, filename: str):
+    """Serve a generated report. Strict regex on filename + path-resolve
+    check inside reports.REPORTS_DIR so the route can't be coerced into
+    serving anything outside the reports directory."""
+    if not _REPORT_NAME_RE.match(filename):
+        raise HTTPException(400, "invalid report name")
+    if not filename.startswith(f"assessment_{int(aid)}_"):
+        raise HTTPException(403)
+    target = (reports_mod.REPORTS_DIR / filename).resolve()
+    if not str(target).startswith(str(reports_mod.REPORTS_DIR.resolve())):
+        raise HTTPException(403)
+    if not target.exists():
+        raise HTTPException(404)
+    return FileResponse(str(target), media_type="application/pdf",
+                        filename=filename)
+
+
+@app.post("/assessment/{aid}/report/{filename}/delete")
+def assessment_report_delete(aid: int, filename: str):
+    """Remove a generated PDF report file. Same strict filename validation
+    as the download route."""
+    if not _REPORT_NAME_RE.match(filename):
+        raise HTTPException(400, "invalid report name")
+    a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    if not reports_mod.delete_report(aid, filename):
+        return redirect(f"/assessment/{aid}?msg=report+not+found")
+    return redirect(f"/assessment/{aid}?msg=report+deleted")
+
+
+# Finding detail + enrichment ------------------------------------------------
+
+@app.get("/finding/{fid}", response_class=HTMLResponse)
+def finding_detail(request: Request, fid: int):
+    """Per-finding view with enrichment guidance + ticket-export buttons."""
+    f = db.query_one(
+        "SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    e = None
+    if f.get("enrichment_id"):
+        e = db.query_one(
+            "SELECT * FROM finding_enrichment WHERE id = %s",
+            (f["enrichment_id"],))
+    # parse JSON columns for the template
+    if e:
+        try:
+            e["steps"] = json.loads(e.get("remediation_steps") or "[]")
+        except Exception:
+            e["steps"] = []
+        try:
+            e["references"] = json.loads(e.get("references_json") or "[]")
+        except Exception:
+            e["references"] = []
+    return templates.TemplateResponse(
+        "finding_detail.html",
+        ctx(request, f=f, e=e),
+    )
+
+
+@app.get("/finding/{fid}/export")
+def finding_export(fid: int, format: str = "jira"):
+    """Render a ticket-ready body for paste into Jira / ServiceNow / GitHub.
+    Supported formats: jira, servicenow, markdown, github, csv."""
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    e = None
+    if f.get("enrichment_id"):
+        e = db.query_one(
+            "SELECT * FROM finding_enrichment WHERE id = %s",
+            (f["enrichment_id"],))
+    if not e:
+        raise HTTPException(404, "no enrichment available for this finding")
+    ctype, body = enrichment_mod.render_export(e, f, format)
+    return PlainTextResponse(body, media_type=ctype)
+
+
+@app.post("/admin/finding/{fid}/enrichment")
+def admin_finding_enrichment_save(
+    request: Request,
+    fid: int,
+    owasp_category: str = Form(""),
+    cwe: str = Form(""),
+    description_long: str = Form(""),
+    impact: str = Form(""),
+    remediation_long: str = Form(""),
+    remediation_steps: str = Form(""),     # one step per line
+    code_example: str = Form(""),
+    references: str = Form(""),             # one URL per line
+    user_story: str = Form(""),
+    suggested_priority: str = Form(""),
+    notes: str = Form(""),
+):
+    """Admin: edit (or create-on-the-fly) enrichment for this finding's type.
+    The edit applies to the *signature*, so every other finding of the same
+    type — past, present, future — picks up the same content. Edits set
+    source='manual' + is_locked=1, so future automatic enrichment will not
+    overwrite them."""
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    user = current_user(request) or {}
+    steps_list = [s.strip() for s in remediation_steps.splitlines() if s.strip()]
+    refs_list = [r.strip() for r in references.splitlines() if r.strip()]
+    edits = {
+        "owasp_category": owasp_category.strip() or None,
+        "cwe": cwe.strip() or None,
+        "description_long": description_long,
+        "impact": impact,
+        "remediation_long": remediation_long,
+        "remediation_steps": json.dumps(steps_list),
+        "code_example": code_example,
+        "references_json": json.dumps(refs_list),
+        "user_story": user_story,
+        "suggested_priority": suggested_priority.strip() or None,
+        "notes": notes,
+    }
+    if f.get("enrichment_id"):
+        enrichment_mod.update_manual(f["enrichment_id"], edits, user.get("id"))
+        eid = f["enrichment_id"]
+    else:
+        # Build a manual stub bound to this finding's signature, then point
+        # the finding row at it.
+        stub_input = dict(edits)
+        stub_input["remediation_steps"] = steps_list
+        stub_input["references"] = refs_list
+        eid = enrichment_mod.create_manual_stub(f, stub_input, user.get("id"))
+        db.execute("UPDATE findings SET enrichment_id = %s WHERE id = %s",
+                   (eid, f["id"]))
+    # Also rebuild the bug-report body + jira summary so they reflect edits.
+    e_row = db.query_one("SELECT * FROM finding_enrichment WHERE id = %s", (eid,))
+    payload = {
+        "description_long": e_row.get("description_long") or "",
+        "impact": e_row.get("impact") or "",
+        "remediation_long": e_row.get("remediation_long") or "",
+        "remediation_steps": json.loads(e_row.get("remediation_steps") or "[]"),
+        "code_example": e_row.get("code_example") or "",
+        "references": json.loads(e_row.get("references_json") or "[]"),
+        "user_story": e_row.get("user_story") or "",
+        "owasp_category": e_row.get("owasp_category") or "",
+    }
+    db.execute(
+        "UPDATE finding_enrichment SET bug_report_md = %s, jira_summary = %s "
+        "WHERE id = %s",
+        (enrichment_mod.build_bug_report_md(f, payload),
+         enrichment_mod.build_jira_summary(f, payload),
+         eid),
+    )
+    return redirect(f"/finding/{fid}?msg=enrichment+saved")
+
+
+@app.post("/admin/finding/{fid}/enrichment/unlock")
+def admin_finding_enrichment_unlock(fid: int):
+    """Clear the manual lock so the next assessment with an LLM endpoint
+    will re-enrich this finding type from scratch."""
+    f = db.query_one("SELECT enrichment_id FROM findings WHERE id = %s", (fid,))
+    if not f or not f.get("enrichment_id"):
+        raise HTTPException(404)
+    db.execute(
+        "UPDATE finding_enrichment SET is_locked = 0 WHERE id = %s",
+        (f["enrichment_id"],))
+    return redirect(f"/finding/{fid}?msg=unlocked")
+
+
+@app.get("/branding/logo/{kind}")
+def branding_logo_serve(kind: str):
+    """Public — needed so the login page and the report can show the logo
+    without an active session."""
+    p = branding_mod.get_logo_path(kind)
+    if not p:
+        raise HTTPException(404)
+    return FileResponse(str(p), media_type=branding_mod.get_content_type(p.name))
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "proxy_pid": proxy_pid(), "db_ok": db.healthy()}

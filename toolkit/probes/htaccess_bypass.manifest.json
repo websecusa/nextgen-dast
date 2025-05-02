@@ -1,0 +1,34 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "htaccess_bypass",
+  "version": "1.0",
+  "summary": "High-fidelity check of an alleged access-control bypass: distinguishes real bypass from 404 / unrestricted resource / 403 noise.",
+  "validates": [
+    "A01:2021-Broken_Access_Control",
+    "CWE-284",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "htaccess bypass",
+    "weak restriction bypass",
+    "access control bypass",
+    "authorization bypass",
+    "auth bypass",
+    "broken access control",
+    "directory access bypass"
+  ],
+  "matches_tools": [
+    "wapiti",
+    "nuclei",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Target URL the scanner reported (required)",
+    "--cookie": "Cookie header to send unauthenticated comparison against",
+    "--baseline-404": "Optional URL of a guaranteed-404 path on this host, used as the negative-control fingerprint",
+    "--threshold": "Levenshtein-like body similarity (0-1) above which two responses are 'the same'. Default 0.85"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "sqli_boolean",
+  "version": "1.0",
+  "summary": "Boolean-based SQL injection confirmation via response-difference analysis.",
+  "validates": [
+    "A03:2021-Injection",
+    "CWE-89"
+  ],
+  "safety_class": "probe",
+  "request_budget_typical": 12,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target URL with the parameter to test (required)",
+    "--param": "Name of the parameter to inject into (required)",
+    "--method": "HTTP method (default GET)",
+    "--cookie": "Cookie header value for authenticated tests",
+    "--threshold": "Response-size delta required (bytes, default 50)",
+    "--time-based": "Fall back to time-based detection if boolean inconclusive",
+    "--time-threshold": "Seconds delta to consider time-based confirmed (default 4.0)"
+  }
+}

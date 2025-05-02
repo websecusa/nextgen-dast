@@ -1,0 +1,24 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+# Runtime state — never commit
+data/
+.env
+.env.*
+!.env.example
+
+# Generated secrets
+*.sensitive_secrets_info*
+
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local agent / tooling state — never publish
+.claude/

@@ -1,0 +1,80 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Intercept proxy</h1>
+
+<section class="card">
+  <h2>Configuration</h2>
+  <form method="post" action="{{ base }}/proxy/config">
+    <label>Listen host
+      <input name="listen_host" value="{{ state.proxy.listen_host }}" required>
+    </label>
+    <label>Listen port
+      <input name="listen_port" type="number" min="1" max="65535"
+             value="{{ state.proxy.listen_port }}" required>
+    </label>
+    <label>Upstream (full URL — http(s)://host[:port])
+      <input name="upstream" value="{{ state.proxy.upstream }}" required
+             placeholder="https://127.0.0.1:443">
+    </label>
+    <label>Override Host header (optional)
+      <input name="upstream_host_header"
+             value="{{ state.proxy.upstream_host_header }}"
+             placeholder="fairtprm.com">
+    </label>
+    <label class="check">
+      <input type="checkbox" name="ssl_insecure"
+             {% if state.proxy.ssl_insecure %}checked{% endif %}>
+      Skip TLS verification on upstream (self-signed OK)
+    </label>
+    <button type="submit">Save</button>
+    <small class="muted">Saving while the proxy is running will restart it.</small>
+  </form>
+
+  <p style="margin-top:1em">
+    <form method="post" action="{{ base }}/proxy/start" style="display:inline">
+      <button type="submit" {% if proxy_running %}disabled{% endif %}>Start</button>
+    </form>
+    <form method="post" action="{{ base }}/proxy/stop" style="display:inline">
+      <button type="submit" {% if not proxy_running %}disabled{% endif %}>Stop</button>
+    </form>
+    <form method="post" action="{{ base }}/proxy/clear" style="display:inline"
+          onsubmit="return confirm('Wipe captured flows.jsonl?')">
+      <button type="submit" class="warn">Clear flow log</button>
+    </form>
+  </p>
+  {% if state.proxy.last_message %}
+    <p><code>{{ state.proxy.last_message }}</code></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>How to test</h2>
+  <p>The proxy is a <em>reverse</em> proxy: clients connect to it directly (no
+  proxy settings on the client). With the defaults, point your scanner /
+  browser at:</p>
+  <pre>https://{{ state.proxy.listen_host }}:{{ state.proxy.listen_port }}/</pre>
+  <p>It will be re-issued to <code>{{ state.proxy.upstream }}</code> with the
+  Host header rewritten to <code>{{ state.proxy.upstream_host_header or "(unchanged)" }}</code>.
+  Every request and response is dumped to
+  <code>/data/flows/&lt;testid&gt;_request.txt</code> and
+  <code>/data/flows/&lt;testid&gt;_response.txt</code> on the host.</p>
+  <p>The proxy presents mitmproxy's CA cert. Import
+  <code>~/.mitmproxy/mitmproxy-ca-cert.pem</code> from inside the container
+  (or copy it out via <code>docker cp</code>) into the test client trust store
+  to avoid TLS warnings.</p>
+</section>
+
+<section class="card">
+  <h2>Recent mitmdump log</h2>
+  <pre id="proxylog" class="log">loading…</pre>
+  <script>
+    fetch('{{ base }}/proxy/log').then(r => r.text()).then(t => {
+      document.getElementById('proxylog').textContent = t || '(empty)';
+    });
+  </script>
+</section>
+{% endblock %}

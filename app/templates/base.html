@@ -1,0 +1,75 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}{{ brand.company_name or "Pentest Proxy" }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ base }}/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --accent: {{ web.primary }};
+      --green:  {{ web.accent }};
+      --sev-critical: {{ web.sev_critical }};
+      --sev-high:     {{ web.sev_high }};
+      --sev-medium:   {{ web.sev_medium }};
+      --sev-low:      {{ web.sev_low }};
+      --sev-info:     {{ web.sev_info }};
+    }
+    body { font-family: {{ web.font|safe }}; }
+  </style>
+</head>
+<body>
+{% if brand and brand.classification %}
+<div style="background: {{ brand.classification_color or '#e67373' }}; color: #fff; text-align: center; font-weight: 700; padding: .25em; font-size: .85em; letter-spacing: .08em">{{ brand.classification }}</div>
+{% endif %}
+<header>
+  <nav>
+    <a href="{{ base }}/" class="brand" style="display:flex;align-items:center;gap:.5em">
+      {% if brand and brand.header_logo_filename %}
+        <img src="{{ base }}/branding/logo/header" alt="" style="height:1.6em;width:auto">
+      {% endif %}
+      {{ brand.company_name or "pentest-proxy" }}
+    </a>
+    <a href="{{ base }}/assess"><strong>Assess</strong></a>
+    <a href="{{ base }}/assessments">Assessments</a>
+    <a href="{{ base }}/proxy">Proxy</a>
+    <a href="{{ base }}/flows">Flows</a>
+    <a href="{{ base }}/scan">Scan</a>
+    <a href="{{ base }}/auth">Auth</a>
+    <a href="{{ base }}/llm">LLM</a>
+    <a href="{{ base }}/user-agents">UAs</a>
+    {% if is_admin %}<a href="{{ base }}/admin">Admin</a>{% endif %}
+    <span class="status {% if proxy_running %}on{% else %}off{% endif %}">
+      mitmproxy: {% if proxy_running %}running{% else %}stopped{% endif %}
+    </span>
+    {% if user %}
+      <span class="status" style="margin-left:.6em">
+        <code>{{ user.username }}</code> · {{ user.role }}
+        <form method="post" action="{{ base }}/logout" style="display:inline; margin-left:.6em">
+          <button type="submit" style="padding:.1em .5em; font-size:.85em">Sign out</button>
+        </form>
+      </span>
+    {% endif %}
+  </nav>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+<footer>
+  {% if brand and brand.footer_logo_filename %}
+    <img src="{{ base }}/branding/logo/footer" alt="" style="height:1.4em;width:auto;vertical-align:middle;margin-right:.5em">
+  {% endif %}
+  <small>
+    {% if brand and brand.footer_text %}{{ brand.footer_text }} · {% endif %}
+    bound 127.0.0.1 only · proxy: {{ state.proxy.listen_host }}:{{ state.proxy.listen_port }} → {{ state.proxy.upstream }}
+  </small>
+  {% if brand and brand.disclaimer %}
+  <p style="max-width:60em;margin:.6em auto 0;color:var(--muted);font-size:.78em">{{ brand.disclaimer }}</p>
+  {% endif %}
+</footer>
+</body>
+</html>

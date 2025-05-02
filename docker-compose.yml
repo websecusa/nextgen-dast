@@ -1,0 +1,57 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+# Pentest-proxy / nextgen-dast — production deployment.
+#
+# Pulls the application image from the private registry and only mounts the
+# runtime data directory. To build locally instead (no registry access),
+# remove the `image:` line on `pentest-proxy` and uncomment `build: .`.
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: pentest-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-pentest}
+      MARIADB_USER: ${MARIADB_USER:-pentest}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+      # Schema seed for the *first* container start. Subsequent starts skip
+      # this directory; the application also re-applies the schema via
+      # scripts/reset.py, so this mount is convenience, not load-bearing.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:13306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  pentest-proxy:
+    image: dockerregistry.fairtprm.com/nextgen-dast:2.1.1
+    # build: .                # uncomment to build locally instead of pulling
+    container_name: pentest-proxy
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - UI_HOST=127.0.0.1
+      - UI_PORT=8888
+      - UI_ROOT_PATH=/test
+      - DB_HOST=127.0.0.1
+      - DB_PORT=13306
+      - DB_NAME=${MARIADB_DATABASE:-pentest}
+      - DB_USER=${MARIADB_USER:-pentest}
+      - DB_PASSWORD=${MARIADB_PASSWORD}
+      - ENV_SUFFIX=${ENV_SUFFIX}
+      - SECRETS_FILE=${SECRETS_FILE:-/data/.sensitive_secrets_info}
+      - APP_URL=${APP_URL:-https://localhost/test/}
+      - APP_SECRET=${APP_SECRET}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    command: ["python", "-m", "uvicorn", "server:app",
+              "--host", "127.0.0.1", "--port", "8888", "--root-path", "/test"]

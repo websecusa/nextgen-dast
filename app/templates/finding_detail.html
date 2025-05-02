@@ -1,0 +1,231 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<p><a href="{{ base }}/assessment/{{ f.assessment_id }}">← Assessment #{{ f.assessment_id }}</a></p>
+<h1>
+  <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
+  {{ f.title }}
+</h1>
+<p class="muted">
+  {{ f.source_tool }}
+  {% if f.owasp_category %}· <strong>{{ f.owasp_category }}</strong>{% endif %}
+  {% if f.cwe %}· CWE-{{ f.cwe }}{% endif %}
+  {% if f.cvss %}· CVSS {{ f.cvss }}{% endif %}
+  {% if e and e.suggested_priority %}
+    · <span class="badge">Priority {{ e.suggested_priority|upper }}</span>
+  {% endif %}
+  {% if e and e.source %}
+    · <span class="badge"
+            title="static = catalog · llm = generated · manual = admin-edited">
+        {{ e.source }}{% if e.is_locked %} · locked{% endif %}
+      </span>
+  {% endif %}
+</p>
+
+{% if f.evidence_url %}
+<section class="card">
+  <h2>Evidence</h2>
+  <p><code>{{ f.evidence_method or "GET" }} {{ f.evidence_url }}</code></p>
+</section>
+{% endif %}
+
+{% if e %}
+  {% if e.description_long %}
+  <section class="card">
+    <h2>What this means</h2>
+    <p style="white-space:pre-wrap">{{ e.description_long }}</p>
+  </section>
+  {% endif %}
+
+  {% if e.impact %}
+  <section class="card">
+    <h2>Impact</h2>
+    <p style="white-space:pre-wrap">{{ e.impact }}</p>
+  </section>
+  {% endif %}
+
+  {% if e.remediation_long or e.steps %}
+  <section class="card">
+    <h2>Remediation</h2>
+    {% if e.remediation_long %}
+      <p style="white-space:pre-wrap">{{ e.remediation_long }}</p>
+    {% endif %}
+    {% if e.steps %}
+      <ol>
+      {% for step in e.steps %}
+        <li>{{ step }}</li>
+      {% endfor %}
+      </ol>
+    {% endif %}
+    {% if e.code_example %}
+      <h3 class="muted">Example</h3>
+      <pre style="background:#0f1419; padding:.8em; border-radius:6px; overflow:auto"><code>{{ e.code_example }}</code></pre>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if e.references %}
+  <section class="card">
+    <h2>References</h2>
+    <ul>
+    {% for r in e.references %}
+      <li><a href="{{ r }}" target="_blank" rel="noopener">{{ r }}</a></li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if e.user_story %}
+  <section class="card">
+    <h2>User story</h2>
+    <blockquote style="border-left:3px solid var(--accent); padding-left:1em; margin:0">
+      {{ e.user_story }}
+    </blockquote>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>Open as a ticket</h2>
+    <p class="muted">
+      The body below is generated from the fields above. Click a button to copy
+      it to your clipboard, then paste into your tracker.
+    </p>
+    <p>
+      <button type="button" onclick="copyExport('jira')">Copy Jira / Markdown</button>
+      <button type="button" onclick="copyExport('servicenow')">Copy ServiceNow (plain)</button>
+      <a href="{{ base }}/finding/{{ f.id }}/export?format=csv"
+         class="button">Download CSV row</a>
+      <span id="copy-status" class="muted" style="margin-left:.6em"></span>
+    </p>
+    <details>
+      <summary class="muted" style="cursor:pointer">Preview body</summary>
+      <pre style="white-space:pre-wrap; background:#0f1419; padding:.8em; border-radius:6px">{{ e.bug_report_md }}</pre>
+    </details>
+  </section>
+
+  {% if is_admin %}
+  <section class="card">
+    <h2>Edit guidance <small class="muted">(admin)</small></h2>
+    <p class="muted">
+      Edits apply to the <em>type</em> of finding (signature
+      <code>{{ f.source_tool }}</code> / <code>{{ f.title|truncate(80) }}</code>),
+      so every other matching finding will pick up the same content.
+      Saving locks the entry: future automatic enrichment will not overwrite it.
+    </p>
+    <form method="post" action="{{ base }}/admin/finding/{{ f.id }}/enrichment">
+      <p>
+        <label>OWASP category<br>
+          <input type="text" name="owasp_category"
+                 value="{{ e.owasp_category or '' }}" style="width:100%">
+        </label>
+      </p>
+      <p>
+        <label>CWE (just the number)<br>
+          <input type="text" name="cwe" value="{{ e.cwe or '' }}" style="width:100%">
+        </label>
+      </p>
+      <p>
+        <label>Suggested priority<br>
+          <select name="suggested_priority">
+            {% for p in ['', 'p0', 'p1', 'p2', 'p3', 'p4'] %}
+              <option value="{{ p }}" {% if e.suggested_priority == p %}selected{% endif %}>{{ p or '—' }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </p>
+      <p>
+        <label>Description<br>
+          <textarea name="description_long" rows="4" style="width:100%">{{ e.description_long or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Impact<br>
+          <textarea name="impact" rows="3" style="width:100%">{{ e.impact or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Remediation overview<br>
+          <textarea name="remediation_long" rows="3" style="width:100%">{{ e.remediation_long or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Steps (one per line)<br>
+          <textarea name="remediation_steps" rows="6" style="width:100%">{{ e.steps|join('\n') }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Code/config example<br>
+          <textarea name="code_example" rows="6" style="width:100%; font-family:ui-monospace,Menlo,monospace">{{ e.code_example or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>References (one URL per line)<br>
+          <textarea name="references" rows="4" style="width:100%">{{ e.references|join('\n') }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>User story<br>
+          <textarea name="user_story" rows="2" style="width:100%">{{ e.user_story or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Internal notes (not exported)<br>
+          <textarea name="notes" rows="2" style="width:100%">{{ e.notes or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <button type="submit">Save manual override</button>
+        {% if e.is_locked %}
+        &nbsp;·&nbsp;
+        <button type="submit" formaction="{{ base }}/admin/finding/{{ f.id }}/enrichment/unlock"
+                onclick="return confirm('Unlock will let future automatic enrichment overwrite this content. Continue?')"
+                class="warn">Unlock for re-enrichment</button>
+        {% endif %}
+      </p>
+    </form>
+  </section>
+  {% endif %}
+
+{% else %}
+  <section class="card">
+    <h2>No enrichment yet</h2>
+    <p class="muted">
+      This finding has not been enriched. Run the assessment again with an
+      LLM endpoint configured, or add a manual entry below.
+    </p>
+    {% if is_admin %}
+    <form method="post" action="{{ base }}/admin/finding/{{ f.id }}/enrichment">
+      <p>
+        <label>Description<br>
+          <textarea name="description_long" rows="4" style="width:100%"></textarea>
+        </label>
+      </p>
+      <p>
+        <label>Remediation steps (one per line)<br>
+          <textarea name="remediation_steps" rows="6" style="width:100%"></textarea>
+        </label>
+      </p>
+      <button type="submit">Create manual entry</button>
+    </form>
+    {% endif %}
+  </section>
+{% endif %}
+
+<script>
+async function copyExport(fmt) {
+  const status = document.getElementById('copy-status');
+  status.textContent = 'fetching…';
+  try {
+    const r = await fetch('{{ base }}/finding/{{ f.id }}/export?format=' + fmt);
+    const text = await r.text();
+    await navigator.clipboard.writeText(text);
+    status.textContent = 'copied ' + fmt + ' body to clipboard';
+  } catch (e) {
+    status.textContent = 'failed: ' + e;
+  }
+}
+</script>
+{% endblock %}
