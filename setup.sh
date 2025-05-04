@@ -180,10 +180,13 @@ ensure_user_in_docker_group() {
 # ---- Registry login --------------------------------------------------------
 
 ensure_registry_login() {
-    # If we're using --build we don't need registry access.
+    # In --build mode we'll build from the local source, so we don't need
+    # to reach the registry at all.
     if [[ "${BUILD_MODE:-0}" == "1" ]]; then
         return
     fi
+    # The registry is public — pull is anonymous. If this fails, it's
+    # almost always a network / DNS / corporate-proxy issue, not auth.
     if docker pull --quiet "$IMAGE" >/dev/null 2>&1; then
         log "Registry image is accessible: $IMAGE"
         return
@@ -192,17 +195,27 @@ ensure_registry_login() {
 
 ==============================================================================
   Cannot pull $IMAGE
-  You're not logged in to the private registry, or the image doesn't exist.
 
-  To log in:
-      docker login ${REGISTRY_HOST}
+  The application image is published as PUBLIC — no docker login is
+  required to pull it. This failure is almost always a network problem.
+  Check, in order:
 
-  Then re-run:
-      sudo ./setup.sh
+    1. DNS + outbound HTTPS to the registry:
+         curl -sI https://${REGISTRY_HOST}/v2/
+       (should print HTTP/2 200)
 
-  If you don't have registry credentials, you can build the image locally
-  (no registry needed) by running:
-      sudo ./setup.sh --build
+    2. Corporate HTTP proxy: configure docker via
+         sudo systemctl edit docker.service
+       and set HTTP_PROXY / HTTPS_PROXY in the override.
+
+    3. Registry policy change: if your administrator has switched the
+       registry to require authentication, run
+         docker login ${REGISTRY_HOST}
+       once and re-run setup.
+
+    4. Air-gapped / no network at all: skip the registry and build the
+       image from the local source tree:
+         sudo ./setup.sh --build
 ==============================================================================
 EOF
     exit 2

@@ -16,16 +16,28 @@ something doesn't work, jump to **Troubleshooting** at the bottom.
 
 ## TL;DR — fast path
 
-If you have a fresh Ubuntu / Debian / Kali / RHEL / Oracle Linux box and
-credentials for `dockerregistry.fairtprm.com`:
+On a fresh Ubuntu / Debian / Kali / RHEL / Oracle Linux box:
 
 ```bash
-sudo mkdir -p /data/pentest && sudo chown "$USER":"$USER" /data/pentest
+# 1. Make the deploy directory and own it as your user.
+sudo mkdir -p /data/pentest
+sudo chown "$USER":"$USER" /data/pentest
+
+# 2. Clone the source tree directly into the deploy directory.
+#    This brings in setup.sh, docker-compose.yml, the Dockerfile, and
+#    everything else listed under "Files you need" below.
+git clone https://git.hackrange.com/trice/nextgen-dast.git /data/pentest
+
+# 3. Run the bootstrap helper.
 cd /data/pentest
-# … place every file from the src/ tree here (see "Files you need" below) …
-docker login dockerregistry.fairtprm.com   # one-time
 sudo ./setup.sh
 ```
+
+That's it. The application image at
+`dockerregistry.fairtprm.com/nextgen-dast:2.1.1` is **publicly pullable**
+— no `docker login` and no registry credentials required to install or
+upgrade. (Login is only needed if you're pushing new images to the
+registry, which is the maintainer's job, not yours.)
 
 `setup.sh` will:
 1. Install Docker Engine + Compose plugin if they aren't present.
@@ -106,20 +118,27 @@ x86_64 and arm64 builds are both produced by the registry image.
 
 ### 1. Get the files onto the host
 
-Create the deploy directory and put the source tree in it. Two equivalent
-ways:
+The repository contains everything you need — `setup.sh`, the
+`docker-compose.yml`, the schema, plus the source if you ever want to
+build the image locally. Clone it into `/data/pentest`:
 
 ```bash
-# Option A — clone the (future) git repo into /data/pentest
 sudo mkdir -p /data/pentest
 sudo chown "$USER":"$USER" /data/pentest
-git clone <repo-url> /data/pentest
+git clone https://git.hackrange.com/trice/nextgen-dast.git /data/pentest
+```
 
-# Option B — copy a release tarball
+(Alternative if a `git` client isn't available — `curl` a release
+tarball and unpack it:
+
+```bash
 sudo mkdir -p /data/pentest
-sudo tar -xzf nextgen-dast-2.1.1.tgz -C /data/pentest --strip-components=1
+sudo curl -fsSL -o /tmp/nextgen-dast.tgz \
+    https://git.hackrange.com/trice/nextgen-dast/archive/2.1.1.tar.gz
+sudo tar -xzf /tmp/nextgen-dast.tgz -C /data/pentest --strip-components=1
 sudo chown -R "$USER":"$USER" /data/pentest
 ```
+)
 
 Verify:
 
@@ -129,17 +148,22 @@ ls /data/pentest
 #         scripts  setup.sh  toolkit  pentest.sh
 ```
 
-### 2. Authenticate to the registry (one-time per machine)
+### 2. (Optional) verify the image is reachable
+
+The application image is **publicly pullable** — no login required —
+but it's worth confirming connectivity before you run setup, especially
+if you're behind a corporate firewall or proxy:
 
 ```bash
-docker login dockerregistry.fairtprm.com
-# Username: <your registry user>
-# Password: <your registry token>
+docker pull dockerregistry.fairtprm.com/nextgen-dast:2.1.1
 ```
 
-If you don't have credentials and your registry administrator can't issue
-one quickly, you can build the image locally instead — pass `--build` to
-`setup.sh` in step 4 and skip this step.
+A successful pull means you're ready. If it fails, see
+**Troubleshooting → "Cannot reach the registry"** below.
+
+> If for some reason you can't reach the registry at all, you can build
+> the image locally from the source you just cloned. Pass `--build` to
+> `setup.sh` in step 4 instead and skip this step.
 
 ### 3. (Optional) decide your public URL
 
@@ -561,10 +585,30 @@ critical — losing the env file means losing the database password.
 
 ## Troubleshooting
 
-### `setup.sh` says "cannot pull image"
-You're not logged in to the private registry. Run
-`docker login dockerregistry.fairtprm.com` first. If you don't have
-credentials, use `sudo ./setup.sh --build` to build locally.
+### `setup.sh` says "cannot pull image" / "Cannot reach the registry"
+The image is public, so this is almost always a network problem rather
+than an auth one. Walk down the list:
+
+1. **DNS / outbound HTTPS to the registry:**
+   `curl -sI https://dockerregistry.fairtprm.com/v2/` should print
+   `HTTP/2 200`. If it fails, your firewall, corporate proxy, or DNS
+   resolver is blocking outbound HTTPS to that host.
+2. **Behind an HTTP proxy?** Add the proxy to Docker:
+   `sudo systemctl edit docker.service` → in the override file:
+   ```
+   [Service]
+   Environment="HTTP_PROXY=http://proxy.corp:3128"
+   Environment="HTTPS_PROXY=http://proxy.corp:3128"
+   ```
+   Then `sudo systemctl daemon-reload && sudo systemctl restart docker`
+   and re-run setup.
+3. **Private mirror or registry policy changed:** if your administrator
+   has switched the registry to require authentication, run
+   `docker login dockerregistry.fairtprm.com` once with your credentials,
+   then re-run setup.
+4. **Air-gapped install:** skip the registry entirely with
+   `sudo ./setup.sh --build` — the image is built from the local
+   source tree.
 
 ### Login page redirects in a loop
 Almost always a TLS issue. The session cookie is `Secure`-only — it won't
@@ -585,11 +629,14 @@ directory:
 sudo chcon -Rt container_file_t /data/pentest/data
 ```
 
-### Docker pulls fine on the command line but `setup.sh` fails to pull
-You ran `docker login` as a normal user, then ran `setup.sh` with sudo —
-the credentials are in `~/.docker/config.json` of whichever user logged
-in. Either log in as root (`sudo docker login …`) or invoke setup
-without sudo after Docker is installed and you're in the docker group.
+### Docker pulls fine as your user but `setup.sh` fails to pull
+This only matters if your registry has been switched to private mode and
+you've run `docker login`. In that case the credentials live in
+`~/.docker/config.json` of whichever user logged in. If you logged in as
+your normal user but ran `setup.sh` with `sudo`, root doesn't see those
+credentials. Either log in as root (`sudo docker login …`) or, after
+Docker is installed and you've been added to the `docker` group, re-run
+setup without sudo.
 
 ### Forgot the admin password
 ```bash
