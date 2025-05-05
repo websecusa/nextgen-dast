@@ -671,11 +671,3 @@ sudo ./setup.sh
 Everything except TLS termination runs inside containers. The application
 container itself spawns scanner subprocesses (wapiti, nuclei, etc.) — they
 all live in the same image, so no extra installs on the host.
-
----
-
-## Support
-
-* Source / issues: `<repo URL once published>`
-* Image tags: `https://dockerregistry.fairtprm.com/v2/nextgen-dast/tags/list`
-* Day-2 questions: see the comments at the top of `setup.sh` and `pentest.sh`.
