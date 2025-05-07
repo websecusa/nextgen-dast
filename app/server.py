@@ -1586,7 +1586,9 @@ def assessment_report_delete(aid: int, filename: str):
 
 @app.get("/finding/{fid}", response_class=HTMLResponse)
 def finding_detail(request: Request, fid: int):
-    """Per-finding view with enrichment guidance + ticket-export buttons."""
+    """Per-finding view: enrichment guidance, ticket export, and the
+    Challenge / False-Positive workflow. The view is read-only for
+    non-admin users; the action buttons render disabled in that case."""
     f = db.query_one(
         "SELECT * FROM findings WHERE id = %s", (fid,))
     if not f:
@@ -1596,7 +1598,6 @@ def finding_detail(request: Request, fid: int):
         e = db.query_one(
             "SELECT * FROM finding_enrichment WHERE id = %s",
             (f["enrichment_id"],))
-    # parse JSON columns for the template
     if e:
         try:
             e["steps"] = json.loads(e.get("remediation_steps") or "[]")
@@ -1606,9 +1607,19 @@ def finding_detail(request: Request, fid: int):
             e["references"] = json.loads(e.get("references_json") or "[]")
         except Exception:
             e["references"] = []
+    # Probe matched by title / OWASP / CWE — None if no validation tool fits.
+    # The template uses this to decide whether to render the Challenge button.
+    probe = toolkit_mod.find_probe_for_finding(f)
+    # Decode validation_evidence (stored as JSON when a probe ran).
+    validation = None
+    if f.get("validation_evidence"):
+        try:
+            validation = json.loads(f["validation_evidence"])
+        except Exception:
+            validation = {"raw": f["validation_evidence"][:2000]}
     return templates.TemplateResponse(
         "finding_detail.html",
-        ctx(request, f=f, e=e),
+        ctx(request, f=f, e=e, probe=probe, validation=validation),
     )
 
 
@@ -1715,6 +1726,142 @@ def admin_finding_enrichment_unlock(fid: int):
         "UPDATE finding_enrichment SET is_locked = 0 WHERE id = %s",
         (f["enrichment_id"],))
     return redirect(f"/finding/{fid}?msg=unlocked")
+
+
+# ---- Validation workflow (Challenge / Mark False Positive / Reopen) -------
+#
+# Three small POST routes that act on a single finding's state:
+#
+#   /finding/{id}/challenge       — runs the toolkit probe mapped by
+#       toolkit.find_probe_for_finding(). Stores the JSON verdict in
+#       findings.validation_evidence and updates validation_status to
+#       'validated' / 'inconclusive' / 'false_positive' / 'errored'
+#       depending on the probe's verdict.
+#
+#   /finding/{id}/false_positive  — analyst override: marks the finding as
+#       a confirmed false positive. Optional reason is stored in
+#       validation_evidence so the audit trail records *why*. Sets both
+#       findings.status='false_positive' (excludes from score) and
+#       validation_status='false_positive' (excludes from re-validation).
+#
+#   /finding/{id}/reopen          — undo a false-positive mark. Clears
+#       validation_status back to 'unvalidated' and restores status='open'.
+#
+# All three require admin (the global middleware already enforces this on
+# any POST). Probes are read-only by manifest, so re-running Challenge on
+# the same finding is safe.
+
+def _run_finding_probe(finding: dict, probe: dict,
+                       extra: Optional[dict] = None) -> dict:
+    """Construct a probe config from the finding's evidence URL and
+    invoke toolkit.run_probe. Returns the probe's verdict dict (always —
+    errors are captured into the 'error' key, never raised)."""
+    from urllib.parse import urlparse
+    url = finding.get("evidence_url") or ""
+    parsed = urlparse(url)
+    # Lock the probe to the host of the finding so it cannot wander.
+    scope = [parsed.hostname] if parsed.hostname else []
+    config = {
+        "url": url,
+        "method": (finding.get("evidence_method") or "GET").upper(),
+        "scope": scope,
+        "max_requests": int(probe.get("request_budget_max") or 30),
+        "max_rps": 5.0,
+        "dry_run": False,
+    }
+    if extra:
+        config.update(extra)
+    # Per-probe timeout = its typical budget × 2 seconds (worst case),
+    # clamped to 120s so a stuck request can't hang the web request.
+    typical = int(probe.get("request_budget_typical") or 12)
+    timeout = min(120.0, max(30.0, typical * 2.0))
+    return toolkit_mod.run_probe(probe["name"], config, timeout=timeout)
+
+
+def _verdict_to_status(verdict: dict) -> str:
+    """Map a probe verdict into the findings.validation_status enum.
+    The probe schema uses validated=True/False/None; we collapse that
+    plus 'ok' / 'error' into the four enum values supported by the DB."""
+    if not verdict.get("ok", True) or verdict.get("error"):
+        return "errored"
+    v = verdict.get("validated")
+    if v is True:
+        return "validated"
+    if v is False:
+        # A confident "no" from the probe — treat as a false positive on
+        # the original scanner finding.
+        if (verdict.get("confidence") or 0) >= 0.8:
+            return "false_positive"
+        return "inconclusive"
+    return "inconclusive"
+
+
+@app.post("/finding/{fid}/challenge")
+def finding_challenge(fid: int):
+    """Run the matched validation probe against this finding's evidence
+    URL. The verdict is recorded on the finding row so the same probe
+    doesn't have to be re-run unless the analyst chooses to."""
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    probe = toolkit_mod.find_probe_for_finding(f)
+    if not probe:
+        return redirect(f"/finding/{fid}?msg=no+probe+matches+this+finding")
+    if not f.get("evidence_url"):
+        return redirect(
+            f"/finding/{fid}?msg=cannot+challenge+%E2%80%94+no+evidence+URL")
+    verdict = _run_finding_probe(f, probe)
+    new_status = _verdict_to_status(verdict)
+    db.execute(
+        "UPDATE findings SET validation_status = %s, "
+        "validation_probe = %s, validation_run_at = NOW(), "
+        "validation_evidence = %s WHERE id = %s",
+        (new_status, probe["name"][:64],
+         json.dumps(verdict, default=str)[:65000], fid),
+    )
+    return redirect(f"/finding/{fid}?msg=challenge+result%3A+{new_status}")
+
+
+@app.post("/finding/{fid}/false_positive")
+def finding_mark_false_positive(request: Request, fid: int,
+                                reason: str = Form("")):
+    """Analyst override: confirms this finding is a false positive. The
+    optional `reason` is stored alongside the timestamp + acting user so
+    audits can reconstruct *why* a finding was suppressed."""
+    f = db.query_one("SELECT id FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    user = current_user(request) or {}
+    payload = {
+        "kind": "analyst-override",
+        "user": user.get("username"),
+        "reason": (reason or "").strip()[:2000] or None,
+        "set_at": datetime.now(timezone.utc).isoformat(),
+    }
+    db.execute(
+        "UPDATE findings SET status = 'false_positive', "
+        "validation_status = 'false_positive', "
+        "validation_run_at = NOW(), validation_evidence = %s "
+        "WHERE id = %s",
+        (json.dumps(payload), fid),
+    )
+    return redirect(f"/finding/{fid}?msg=marked+false+positive")
+
+
+@app.post("/finding/{fid}/reopen")
+def finding_reopen(fid: int):
+    """Undo a false-positive mark. Returns the finding to the open pool
+    so it counts toward the score and re-appears in regenerated reports."""
+    f = db.query_one("SELECT id FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    db.execute(
+        "UPDATE findings SET status = 'open', "
+        "validation_status = 'unvalidated', validation_evidence = NULL, "
+        "validation_run_at = NULL, validation_probe = NULL WHERE id = %s",
+        (fid,),
+    )
+    return redirect(f"/finding/{fid}?msg=reopened")
 
 
 @app.get("/branding/logo/{kind}")

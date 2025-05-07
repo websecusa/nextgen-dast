@@ -32,6 +32,108 @@
 </section>
 {% endif %}
 
+{# ----------------------------------------------------------------------
+   Validation workflow card. Always renders so the analyst can see the
+   current state and act on it. The Challenge button only renders when a
+   toolkit probe is mapped to this finding's signature.
+   ---------------------------------------------------------------------- #}
+<section class="card">
+  <h2>Validation</h2>
+  <p class="muted" style="margin-top:0">
+    {% set vs = f.validation_status or 'unvalidated' %}
+    Current status:
+    <span class="badge"
+      title="{% if vs == 'validated' %}Confirmed by a high-fidelity probe.
+{% elif vs == 'false_positive' %}Suppressed — analyst override or refuted by a probe.
+{% elif vs == 'inconclusive' %}A probe ran but couldn't decide either way.
+{% elif vs == 'errored' %}The validation probe failed to run.
+{% else %}No validation has been attempted yet.{% endif %}">{{ vs }}</span>
+    {% if f.validation_probe %}
+      via <code>{{ f.validation_probe }}</code>
+    {% endif %}
+    {% if f.validation_run_at %}
+      &middot; last run {{ f.validation_run_at }}
+    {% endif %}
+    {% if f.status == 'false_positive' %}
+      &middot; <span class="badge warn">excluded from score / report</span>
+    {% endif %}
+  </p>
+
+  <div style="display:flex; gap:.6em; flex-wrap:wrap; margin-top:.6em">
+    {# Challenge button — only when a toolkit probe is matched. #}
+    {% if probe %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
+            style="display:inline">
+        <button type="submit" {% if not is_admin %}disabled{% endif %}>
+          Challenge with <code>{{ probe.name }}</code>
+        </button>
+      </form>
+      <span class="muted small" style="align-self:center">
+        High-fidelity check (read-only). Probe budget:
+        ~{{ probe.request_budget_typical or '?' }} requests, max
+        {{ probe.request_budget_max or '?' }}.
+      </span>
+    {% else %}
+      <button type="button" disabled
+              title="No toolkit probe is mapped to this finding's signature.
+Add one in /app/toolkit/probes/ and update its manifest's matches_titles
+or matches_tools array.">
+        Challenge (no probe available)
+      </button>
+    {% endif %}
+
+    {# False-positive / Reopen — analyst override, always available. #}
+    {% if f.status == 'false_positive' %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/reopen"
+            style="display:inline"
+            onsubmit="return confirm('Re-open this finding? It will start counting toward the score again.')">
+        <button type="submit" {% if not is_admin %}disabled{% endif %}>
+          Re-open finding
+        </button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/false_positive"
+            style="display:inline; align-items:center; gap:.4em"
+            onsubmit="return confirm('Mark this finding as a false positive? It will be excluded from scores and reports until you re-open it.')">
+        <input type="text" name="reason" maxlength="200"
+               placeholder="optional reason (kept in audit log)"
+               style="width:18em; padding:.2em .4em">
+        <button type="submit" class="warn"
+                {% if not is_admin %}disabled{% endif %}>
+          Mark as false positive
+        </button>
+      </form>
+    {% endif %}
+  </div>
+
+  {% if not is_admin %}
+    <p class="muted small" style="margin-top:.4em">
+      Read-only account — ask an admin to challenge or override.
+    </p>
+  {% endif %}
+
+  {# Evidence: human-readable summary if the probe wrote one, plus the
+     full JSON for debugging / audit. #}
+  {% if validation %}
+    {% if validation.summary %}
+      <p style="margin-top:1em"><strong>Last run summary:</strong>
+        {{ validation.summary }}</p>
+    {% endif %}
+    {% if validation.kind == 'analyst-override' %}
+      <p style="margin-top:1em">
+        <strong>Analyst override</strong>
+        {% if validation.user %}by <code>{{ validation.user }}</code>{% endif %}
+        {% if validation.set_at %}at {{ validation.set_at }}{% endif %}
+        {% if validation.reason %}<br>Reason: <em>{{ validation.reason }}</em>{% endif %}
+      </p>
+    {% endif %}
+    <details style="margin-top:.6em">
+      <summary class="muted" style="cursor:pointer">Full validation evidence</summary>
+      <pre style="white-space:pre-wrap; background:#0f1419; padding:.8em; border-radius:6px; max-height:400px; overflow:auto">{{ validation | tojson(indent=2) }}</pre>
+    </details>
+  {% endif %}
+</section>
+
 {% if e %}
   {% if e.description_long %}
   <section class="card">
