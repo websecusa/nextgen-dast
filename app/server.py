@@ -1751,11 +1751,59 @@ def admin_finding_enrichment_unlock(fid: int):
 # any POST). Probes are read-only by manifest, so re-running Challenge on
 # the same finding is safe.
 
+def _resolve_challenge_cookie(finding: dict,
+                              manual_cookie: str = "") -> tuple[Optional[str], dict]:
+    """Resolve the session cookie to use when challenging this finding.
+
+    Order of preference:
+      1. A manually-pasted cookie (textarea on the Challenge form).
+      2. Live form login using the assessment's stored creds + login_url.
+         Done in-memory by auth.form_login_cookie(); the password never
+         leaves this function's frame.
+      3. None — probe runs anonymously, same as before.
+
+    Returns (cookie_header_or_None, diagnostics_dict). The diagnostics
+    dict is what gets persisted into validation_evidence — it never
+    contains the cookie value, only metadata about how it was obtained
+    (cookie names, login response status, etc.)."""
+    if manual_cookie and manual_cookie.strip():
+        return manual_cookie.strip(), {"source": "manual-paste",
+                                       "redacted": auth_mod.redact_cookie(manual_cookie.strip())}
+    # Need the assessment's creds to attempt auto-login.
+    a = db.query_one(
+        "SELECT id, creds_username, creds_password, login_url "
+        "FROM assessments WHERE id = %s", (finding.get("assessment_id"),))
+    if not a or not (a.get("creds_username")
+                     and a.get("creds_password")
+                     and a.get("login_url")):
+        return None, {"source": "anonymous",
+                      "reason": "no manual cookie + no stored credentials "
+                                "+ login_url on assessment"}
+    result = auth_mod.form_login_cookie(
+        a["login_url"], a["creds_username"], a["creds_password"])
+    if not result.get("ok"):
+        return None, {"source": "anonymous",
+                      "reason": "form_login_cookie failed",
+                      "login_error": result.get("error"),
+                      "login_diagnostics": result.get("diagnostics") or {}}
+    diagnostics = {
+        "source": "form-login",
+        "redacted_cookie": auth_mod.redact_cookie(result["cookie"]),
+        "login_diagnostics": result.get("diagnostics") or {},
+    }
+    return result["cookie"], diagnostics
+
+
 def _run_finding_probe(finding: dict, probe: dict,
+                       cookie: Optional[str] = None,
                        extra: Optional[dict] = None) -> dict:
     """Construct a probe config from the finding's evidence URL and
     invoke toolkit.run_probe. Returns the probe's verdict dict (always —
-    errors are captured into the 'error' key, never raised)."""
+    errors are captured into the 'error' key, never raised).
+
+    If a cookie is provided, it travels to the probe via stdin JSON only
+    — not argv (which would be visible in `ps aux`). The probe's
+    SafeClient sends it as a `Cookie:` header on every request."""
     from urllib.parse import urlparse
     url = finding.get("evidence_url") or ""
     parsed = urlparse(url)
@@ -1769,6 +1817,8 @@ def _run_finding_probe(finding: dict, probe: dict,
         "max_rps": 5.0,
         "dry_run": False,
     }
+    if cookie:
+        config["cookie"] = cookie  # picked up by SafeClient via Probe._build_client
     if extra:
         config.update(extra)
     # Per-probe timeout = its typical budget × 2 seconds (worst case),
@@ -1797,10 +1847,18 @@ def _verdict_to_status(verdict: dict) -> str:
 
 
 @app.post("/finding/{fid}/challenge")
-def finding_challenge(fid: int):
+def finding_challenge(fid: int, cookie: str = Form("")):
     """Run the matched validation probe against this finding's evidence
-    URL. The verdict is recorded on the finding row so the same probe
-    doesn't have to be re-run unless the analyst chooses to."""
+    URL. Authentication is preserved automatically:
+
+      * if the form's `cookie` field is filled in, that cookie is used;
+      * else if the assessment has stored creds + login_url, we do a
+        live form login here, in-memory, and use the resulting cookie;
+      * else the probe runs anonymously.
+
+    The cookie value is redacted before being saved to
+    validation_evidence — only the cookie *names* are recorded, plus
+    diagnostics about how the session was obtained."""
     f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
     if not f:
         raise HTTPException(404)
@@ -1810,7 +1868,18 @@ def finding_challenge(fid: int):
     if not f.get("evidence_url"):
         return redirect(
             f"/finding/{fid}?msg=cannot+challenge+%E2%80%94+no+evidence+URL")
-    verdict = _run_finding_probe(f, probe)
+
+    session_cookie, auth_diag = _resolve_challenge_cookie(f, manual_cookie=cookie)
+    verdict = _run_finding_probe(f, probe, cookie=session_cookie)
+
+    # Strip any echoed cookie value from the verdict before persisting.
+    if isinstance(verdict, dict):
+        verdict.setdefault("auth", {}).update(auth_diag)
+        # The audit log may have echoed the Cookie header; sanitise.
+        for entry in verdict.get("audit_log") or []:
+            if "headers" in entry:
+                entry["headers"].pop("Cookie", None)
+
     new_status = _verdict_to_status(verdict)
     db.execute(
         "UPDATE findings SET validation_status = %s, "

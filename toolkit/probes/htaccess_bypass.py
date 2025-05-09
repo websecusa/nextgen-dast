@@ -192,53 +192,117 @@ class HtaccessBypassProbe(Probe):
         if not args.url:
             return Verdict(ok=False, error="--url is required")
 
-        # 1. BASELINE — the URL exactly as wapiti reported it.
-        baseline = self._capture(client, "GET", args.url)
-        if baseline["status"] == 0:
+        # The original scanner finding was generated under whatever auth
+        # state the scan ran in (typically authenticated). To validate
+        # *bypass* rather than just public/private status, we need two
+        # baselines:
+        #
+        #   AUTH baseline = WITH the analyst's session cookie (if any).
+        #                   Confirms the resource is reachable as the
+        #                   intended, authenticated user.
+        #   ANON baseline = WITHOUT any cookie.
+        #                   Tells us whether the resource *requires* auth.
+        #                   This is the surface the bypass payloads attack.
+        #
+        # Verdict matrix:
+        #   AUTH=200, ANON=200  -> page is genuinely public; FP.
+        #   AUTH=200, ANON=401/403/redirect -> protected; run bypass payloads.
+        #   AUTH != 200         -> probe couldn't reach the resource even
+        #                          authenticated; inconclusive.
+        # When no cookie is supplied, AUTH and ANON are the same request
+        # and we fall back to the original single-baseline behaviour.
+
+        cookie_present = bool(client.cookie)
+
+        auth_baseline = self._capture(client, "GET", args.url)
+        if auth_baseline["status"] == 0:
             return Verdict(ok=False, validated=None,
                            summary="target unreachable",
-                           evidence={"baseline": baseline})
+                           evidence={"auth_baseline": auth_baseline})
 
-        # 2. NEGATIVE CONTROL — what a real 404 looks like on this host.
+        # Anon baseline — explicitly suppress the cookie via Cookie:""
+        # since SafeClient sets it from its constructor by default.
+        if cookie_present:
+            anon_baseline = self._capture(
+                client, "GET", args.url, extra_headers={"Cookie": ""})
+        else:
+            anon_baseline = auth_baseline
+
+        # Negative control — anonymous, what a real 404 looks like.
         neg_url = args.baseline_404 or self._make_404_url(args.url)
-        neg = self._capture(client, "GET", neg_url)
+        neg = self._capture(
+            client, "GET", neg_url,
+            extra_headers=({"Cookie": ""} if cookie_present else None))
 
         evidence = {
-            "baseline": {"url": args.url, **baseline},
+            "auth_baseline":   {"url": args.url, "cookie_used": cookie_present,
+                                **auth_baseline},
+            "anon_baseline":   {"url": args.url, "cookie_used": False,
+                                **anon_baseline},
             "negative_control": {"url": neg_url, **neg},
             "variants": [],
         }
+        # Keep the legacy `baseline` field around for back-compat with any
+        # consumer that grew up on the single-baseline shape.
+        evidence["baseline"] = evidence["anon_baseline"]
+        baseline = anon_baseline   # variants test the anon surface
 
-        # 3. SHORT-CIRCUITS — the obvious "not a vuln" cases.
-        if baseline["status"] == 200:
-            # The path returns 200 unauthenticated. Either no restriction was
-            # ever in place, or the scanner mis-identified the protected
-            # resource. Either way: this is NOT a bypass.
+        # ---- decisions based on the two baselines ----
+        if auth_baseline["status"] == 404:
             return Verdict(
                 validated=False, confidence=0.95,
-                summary=("Refuted: the URL returns 200 OK with no auth. "
-                         "There is no restriction to bypass — the scanner "
-                         "finding is a false positive."),
+                summary=("Refuted: the URL returns 404 even with auth. "
+                         "No resource here to bypass into — likely a stale "
+                         "path the scanner tested against a moved/deleted "
+                         "endpoint."),
+                evidence=evidence,
+            )
+
+        if (auth_baseline["status"] != 200
+                and auth_baseline["status"] // 100 != 3):
+            return Verdict(
+                validated=None, confidence=0.5,
+                summary=(f"Inconclusive: authenticated baseline returned "
+                         f"HTTP {auth_baseline['status']}. The probe "
+                         "cannot establish what an authenticated success "
+                         "looks like, so it can't tell whether anonymous "
+                         "variants achieved a bypass."),
+                evidence=evidence,
+            )
+
+        # AUTH=200 and ANON=200 with content distinct from the negative
+        # control: the resource is genuinely public.
+        if anon_baseline["status"] == 200 and not _similar(anon_baseline, neg):
+            return Verdict(
+                validated=False, confidence=0.95,
+                summary=(
+                    "Refuted: the URL returns 200 OK both with and without "
+                    "auth, and the response differs from the host's 404 "
+                    "page. The page is genuinely public — there is no "
+                    "restriction to bypass, so the scanner finding is a "
+                    "false positive."
+                    + (" (Important: this only proves that the *bypass* "
+                       "claim is wrong. If the page is *supposed* to be "
+                       "authenticated, that's a separate Broken Access "
+                       "Control / Missing Authorization finding worth "
+                       "filing on its own.)"
+                       if cookie_present else "")),
                 evidence=evidence,
                 remediation=(
                     "If the resource is genuinely public, mark this finding "
                     "as a false positive. If it should be restricted, "
-                    "treat that as a separate Broken Access Control finding "
+                    "treat it as a separate Broken Access Control finding "
                     "and add the auth check, then rerun the probe."),
             )
-        if baseline["status"] == 404:
-            return Verdict(
-                validated=False, confidence=0.95,
-                summary=("Refuted: the URL itself returns 404. There is no "
-                         "resource here to bypass into. Likely a stale path "
-                         "wapiti tested against a moved/deleted endpoint."),
-                evidence=evidence,
-            )
-        if baseline["status"] not in (401, 403, 405) and baseline["status"] // 100 != 3:
-            # Unusual — log it but proceed. WAF block (e.g. 451), 5xx, etc.
-            evidence["baseline_note"] = (
-                f"unusual baseline status {baseline['status']} — variants "
-                "still tested, but interpret with caution"
+
+        # ANON=200 but the response IS similar to the 404 control — that's
+        # likely a custom 404 served as 200 (anti-pattern). Fall through
+        # to running variants with caution.
+        if anon_baseline["status"] not in (401, 403, 405, 200) \
+                and anon_baseline["status"] // 100 != 3:
+            evidence["anon_baseline_note"] = (
+                f"unusual anon baseline status {anon_baseline['status']} — "
+                "variants still tested, but interpret with caution"
             )
 
         # 4. Run all variants. Each gets its own evidence row.

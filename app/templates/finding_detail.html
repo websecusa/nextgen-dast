@@ -60,19 +60,32 @@
   </p>
 
   <div style="display:flex; gap:.6em; flex-wrap:wrap; margin-top:.6em">
-    {# Challenge button — only when a toolkit probe is matched. #}
+    {# Challenge form — only when a toolkit probe is matched. #}
     {% if probe %}
       <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
-            style="display:inline">
+            style="display:flex; gap:.5em; align-items:center; flex-wrap:wrap">
         <button type="submit" {% if not is_admin %}disabled{% endif %}>
           Challenge with <code>{{ probe.name }}</code>
         </button>
+        <span class="muted small">
+          Probe budget: ~{{ probe.request_budget_typical or '?' }} requests,
+          max {{ probe.request_budget_max or '?' }}. Read-only.
+        </span>
+        <details style="width:100%; margin-top:.4em">
+          <summary class="muted" style="cursor:pointer">Authentication for the probe (optional override)</summary>
+          <p class="muted small" style="margin:.3em 0">
+            By default the probe re-runs the assessment's stored login
+            credentials in-memory and uses the resulting session cookie to
+            establish an authenticated baseline (the cookie value is
+            redacted in the saved evidence — only the cookie *names* are
+            recorded). Paste a cookie below to override that, e.g. when
+            login is MFA-protected and you've captured a session manually.
+          </p>
+          <input type="text" name="cookie" maxlength="2000"
+                 placeholder="optional: PHPSESSID=abc; XSRF-TOKEN=…"
+                 style="width:100%; font-family:ui-monospace,Menlo,monospace">
+        </details>
       </form>
-      <span class="muted small" style="align-self:center">
-        High-fidelity check (read-only). Probe budget:
-        ~{{ probe.request_budget_typical or '?' }} requests, max
-        {{ probe.request_budget_max or '?' }}.
-      </span>
     {% else %}
       <button type="button" disabled
               title="No toolkit probe is mapped to this finding's signature.

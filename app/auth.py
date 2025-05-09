@@ -232,3 +232,195 @@ def nikto_args(profile: dict) -> tuple[list[str], Optional[str]]:
     if t == "form":
         return [], "nikto does not support form-based login; use wapiti."
     return [], None
+
+
+# ---- Live form login (used by the Challenge / probe-validation flow) -------
+#
+# The Challenge button on a finding-detail page needs to validate under the
+# same authenticated context the original scan ran in. Rather than asking
+# the analyst to paste a cookie every time, we re-run the form login here
+# using the credentials stored on the assessment. The resulting Set-Cookie
+# is returned in memory and handed to the probe via stdin JSON — never via
+# argv (visible in `ps`), never written to the filesystem, and the value
+# is redacted in any saved evidence.
+#
+# Field-name discovery: GET the login URL, parse the first <form> that
+# contains both a text-style input and a password input, use those input
+# names for the POST. This handles ~95% of conventional PHP / Django /
+# Rails / Express login pages without a per-app config.
+import http.cookiejar
+import ssl
+import urllib.parse
+import urllib.request
+
+# Browser-like UA so badly-coded login pages don't reject the GET.
+_LOGIN_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+_RE_FORM   = re.compile(r"<form\b[^>]*>(.*?)</form>", re.IGNORECASE | re.DOTALL)
+_RE_ACTION = re.compile(r'\baction\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+_RE_INPUT  = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+_RE_NAME   = re.compile(r'\bname\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+_RE_TYPE   = re.compile(r'\btype\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+_RE_VALUE  = re.compile(r'\bvalue\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
+
+
+def _parse_login_form(html: str, page_url: str) -> Optional[dict]:
+    """Find the first <form> on the page that has both a username-ish input
+    and a password input. Returns dict with action, user_field, pass_field,
+    plus any hidden inputs (CSRF tokens, viewstate, etc.) we should send.
+    Returns None if no candidate form is present."""
+    for m in _RE_FORM.finditer(html):
+        body = m.group(1)
+        inputs = []
+        for inp in _RE_INPUT.findall(body):
+            name_m = _RE_NAME.search(inp)
+            type_m = _RE_TYPE.search(inp)
+            val_m  = _RE_VALUE.search(inp)
+            if not name_m:
+                continue
+            inputs.append({
+                "name": name_m.group(1),
+                "type": (type_m.group(1).lower() if type_m else "text"),
+                "value": (val_m.group(1) if val_m else ""),
+            })
+        pass_field = next((i for i in inputs if i["type"] == "password"), None)
+        if not pass_field:
+            continue
+        # Username-ish: text/email/search type, or commonly named field.
+        text_field = next(
+            (i for i in inputs if i["type"] in ("text", "email", "search")
+             or i["name"].lower() in ("username", "user", "login",
+                                       "email", "userid")),
+            None,
+        )
+        if not text_field:
+            continue
+        # action attribute on the form element itself
+        form_open = m.group(0)[:m.group(0).find(">") + 1]
+        action_m = _RE_ACTION.search(form_open)
+        action = action_m.group(1) if action_m else page_url
+        # Hidden inputs (CSRF, ViewState, etc.) — preserve their values.
+        hidden = {i["name"]: i["value"] for i in inputs
+                  if i["type"] == "hidden" and i["name"]
+                  and i["name"] not in (text_field["name"], pass_field["name"])}
+        return {
+            "action": urllib.parse.urljoin(page_url, action),
+            "user_field": text_field["name"],
+            "pass_field": pass_field["name"],
+            "hidden": hidden,
+        }
+    return None
+
+
+def form_login_cookie(login_url: str, username: str, password: str,
+                      timeout: float = 15.0,
+                      verify_tls: bool = False) -> dict:
+    """Execute a single form-based login and return the resulting session
+    cookie header value (the string you'd put in `Cookie:`).
+
+    Returns a dict:
+        {"ok": True, "cookie": "a=1; b=2", "diagnostics": {...}}
+        {"ok": False, "error": "...", "diagnostics": {...}}
+
+    The credentials only ever live in this function's frame and the
+    POST body. They are never written to disk, logged, or passed via
+    argv. Returned `cookie` should be passed to subprocess probes via
+    stdin JSON — not argv — and redacted before being persisted."""
+    if not (login_url and username and password):
+        return {"ok": False, "error": "login_url + username + password required"}
+
+    # Cookie jar tracks Set-Cookie across the redirect chain.
+    jar = http.cookiejar.CookieJar()
+    ctx = ssl.create_default_context()
+    if not verify_tls:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        urllib.request.HTTPCookieProcessor(jar),
+    )
+    diagnostics: dict = {}
+
+    # 1. GET the login page so we can discover field names.
+    req = urllib.request.Request(login_url, headers={"User-Agent": _LOGIN_UA})
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            html = resp.read().decode("utf-8", "replace")
+            diagnostics["login_page_status"] = resp.status
+    except Exception as e:
+        return {"ok": False, "error": f"GET login page failed: {e}",
+                "diagnostics": diagnostics}
+
+    form = _parse_login_form(html, login_url)
+    if not form:
+        return {"ok": False,
+                "error": "no recognisable login form on the login page "
+                         "(no <form> with both text and password inputs)",
+                "diagnostics": diagnostics}
+    diagnostics["form"] = {
+        "action": form["action"],
+        "user_field": form["user_field"],
+        "pass_field": form["pass_field"],
+        "hidden_fields": list(form["hidden"].keys()),
+    }
+
+    # 2. POST credentials. Hidden fields (CSRF tokens, viewstate) preserved.
+    post_data = dict(form["hidden"])
+    post_data[form["user_field"]] = username
+    post_data[form["pass_field"]] = password
+    body = urllib.parse.urlencode(post_data).encode()
+    req = urllib.request.Request(
+        form["action"], data=body, method="POST",
+        headers={
+            "User-Agent": _LOGIN_UA,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": login_url,
+        },
+    )
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            diagnostics["login_post_status"] = resp.status
+            diagnostics["login_post_final_url"] = resp.url
+    except urllib.error.HTTPError as e:
+        diagnostics["login_post_status"] = e.code
+    except Exception as e:
+        return {"ok": False, "error": f"POST login failed: {e}",
+                "diagnostics": diagnostics}
+
+    # 3. Build the Cookie header from the jar — only cookies for the
+    # login URL's host (so we don't leak unrelated third-party cookies).
+    parsed = urllib.parse.urlparse(login_url)
+    target_host = parsed.hostname or ""
+    pieces: list[str] = []
+    for c in jar:
+        if not c.domain:
+            continue
+        cd = c.domain.lstrip(".").lower()
+        if cd == target_host or target_host.endswith("." + cd):
+            pieces.append(f"{c.name}={c.value}")
+    if not pieces:
+        return {"ok": False,
+                "error": ("login completed but no cookies were set for "
+                          f"host {target_host!r}. Wrong credentials, "
+                          "an MFA prompt, or the login uses tokens "
+                          "instead of cookies."),
+                "diagnostics": diagnostics}
+    diagnostics["cookies_set"] = [c.split("=", 1)[0] for c in pieces]
+    return {"ok": True, "cookie": "; ".join(pieces),
+            "diagnostics": diagnostics}
+
+
+def redact_cookie(cookie_header: str) -> str:
+    """Replace each cookie's value with `***` while keeping the names. Used
+    when persisting validation evidence so secrets never land in the DB."""
+    if not cookie_header:
+        return ""
+    out = []
+    for piece in cookie_header.split(";"):
+        piece = piece.strip()
+        if not piece or "=" not in piece:
+            continue
+        name, _, _val = piece.partition("=")
+        out.append(f"{name.strip()}=***")
+    return "; ".join(out)
