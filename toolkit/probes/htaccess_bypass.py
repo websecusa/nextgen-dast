@@ -119,6 +119,42 @@ def _fingerprint(body: bytes) -> str:
     return hashlib.sha256(s).hexdigest()[:16]
 
 
+# Login-page heuristics. Apps that return HTTP 200 with the login form as
+# the body (instead of 302 → /login or 401) are common — the response is
+# substantively different from a 404 page but it's still effectively a
+# deny: the user got nothing they didn't already have. We need to recognise
+# that pattern so the dual-baseline logic doesn't misclassify "200 + login
+# page" as "page is genuinely public".
+import re as _re_login
+
+_LOGIN_TITLE_RE = _re_login.compile(
+    r"<title[^>]*>[^<]*(login|log\s*in|sign\s*in|sign\s*on|authenticate)[^<]*</title>",
+    _re_login.IGNORECASE,
+)
+_LOGIN_PW_INPUT_RE = _re_login.compile(
+    r'<input\b[^>]*\btype\s*=\s*["\']?password["\']?',
+    _re_login.IGNORECASE,
+)
+
+
+def _looks_like_login_page(body: bytes) -> bool:
+    """True if the response body is recognisably a login page rather than
+    actual application content. Strong indicator: a password input field;
+    title-only is corroborating but not sufficient on its own (lots of
+    apps mention 'login' on landing pages without being one)."""
+    if not body or len(body) < 80:
+        return False
+    text = body.decode("utf-8", "replace")[:50000]   # cap parse work
+    # The password-input check is the strongest single signal — almost no
+    # legitimate non-auth page has <input type="password">.
+    if _LOGIN_PW_INPUT_RE.search(text):
+        return True
+    # Title-only fallback: only trust it if the title is very specific.
+    if _LOGIN_TITLE_RE.search(text):
+        return True
+    return False
+
+
 def _size_bucket(n: int) -> str:
     """Coarse bucket so 1042 vs 1071 byte responses both register as ~1KB."""
     if n == 0:                  return "0"
@@ -165,8 +201,8 @@ class HtaccessBypassProbe(Probe):
     def _capture(self, client: SafeClient, method: str, url: str,
                  extra_headers: dict | None = None,
                  cookie_override: str | None = None) -> dict:
-        # SafeClient applies its constructor cookie; for the auth_cookie test
-        # we need to override per-request via the headers dict.
+        # SafeClient applies its constructor cookie; for the anon test we
+        # need to override per-request via the headers dict (Cookie="").
         headers = dict(extra_headers or {})
         if cookie_override is not None:
             headers["Cookie"] = cookie_override
@@ -176,6 +212,9 @@ class HtaccessBypassProbe(Probe):
             "size": r.size,
             "fingerprint": _fingerprint(r.body),
             "size_bucket": _size_bucket(r.size),
+            # Heuristic flag — used by the verdict logic to recognise the
+            # "HTTP 200 + login form as the body" anti-pattern.
+            "is_login_page": _looks_like_login_page(r.body),
         }
 
     def _make_404_url(self, url: str) -> str:
@@ -248,6 +287,12 @@ class HtaccessBypassProbe(Probe):
         baseline = anon_baseline   # variants test the anon surface
 
         # ---- decisions based on the two baselines ----
+        # Check anon-side conditions FIRST. The login-page heuristic in
+        # particular is a definitive answer regardless of what
+        # authenticated requests return: if anonymous traffic is being
+        # served the login form, the path IS protected from anonymous
+        # access — there's nothing to bypass.
+
         if auth_baseline["status"] == 404:
             return Verdict(
                 validated=False, confidence=0.95,
@@ -258,20 +303,35 @@ class HtaccessBypassProbe(Probe):
                 evidence=evidence,
             )
 
-        if (auth_baseline["status"] != 200
-                and auth_baseline["status"] // 100 != 3):
+        # 200 + login-page-body anti-pattern: the app returns HTTP 200 with
+        # the login form as the response when no session is present
+        # (instead of 302 or 401). Treat this as "effectively protected"
+        # — the anonymous user got nothing they didn't already have. Note:
+        # this fires even if auth_baseline returned 403 (e.g. a low-priv
+        # auditor session that's correctly denied a higher-priv feature).
+        if anon_baseline["status"] == 200 and anon_baseline.get("is_login_page"):
             return Verdict(
-                validated=None, confidence=0.5,
-                summary=(f"Inconclusive: authenticated baseline returned "
-                         f"HTTP {auth_baseline['status']}. The probe "
-                         "cannot establish what an authenticated success "
-                         "looks like, so it can't tell whether anonymous "
-                         "variants achieved a bypass."),
+                validated=False, confidence=0.92,
+                summary=(
+                    "Refuted: anonymous requests do return HTTP 200, but "
+                    "the body is the login page (the app uses "
+                    "200+login-form instead of 302 or 401). "
+                    + ("With a valid auditor session the page returns "
+                       f"{auth_baseline['status']} — this is consistent "
+                       "RBAC, not a bypass."
+                       if cookie_present and auth_baseline["status"] != 200 else
+                       "There is no bypass surface to test against.")),
                 evidence=evidence,
+                remediation=(
+                    "Optional hardening: change anonymous responses on "
+                    "protected endpoints from 200+login-form to 302 → "
+                    "/login or 401 Unauthorized. The current behaviour "
+                    "isn't a vulnerability, but it confuses scanners "
+                    "and downstream tools that key off status codes."),
             )
 
         # AUTH=200 and ANON=200 with content distinct from the negative
-        # control: the resource is genuinely public.
+        # control AND not a login page: the resource is genuinely public.
         if anon_baseline["status"] == 200 and not _similar(anon_baseline, neg):
             return Verdict(
                 validated=False, confidence=0.95,
@@ -303,6 +363,22 @@ class HtaccessBypassProbe(Probe):
             evidence["anon_baseline_note"] = (
                 f"unusual anon baseline status {anon_baseline['status']} — "
                 "variants still tested, but interpret with caution"
+            )
+
+        # Now that we've handled the obvious refutations, fall through to
+        # the inconclusive case if the auth baseline didn't establish a
+        # positive reference (no "what does success look like" to compare
+        # variants against).
+        if (auth_baseline["status"] != 200
+                and auth_baseline["status"] // 100 != 3):
+            return Verdict(
+                validated=None, confidence=0.5,
+                summary=(f"Inconclusive: authenticated baseline returned "
+                         f"HTTP {auth_baseline['status']}. The probe "
+                         "cannot establish what an authenticated success "
+                         "looks like, so it can't tell whether anonymous "
+                         "variants achieved a bypass."),
+                evidence=evidence,
             )
 
         # 4. Run all variants. Each gets its own evidence row.
