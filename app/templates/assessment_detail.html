@@ -35,6 +35,14 @@
       </div>
     {% endfor %}
   </div>
+  {% if fp_count and fp_count > 0 %}
+    <p class="muted small" style="margin-top:.6em">
+      Excluded from this rollup:
+      <strong>{{ fp_count }}</strong> finding{% if fp_count != 1 %}s{% endif %}
+      marked as <em>false positive</em>. They remain in the table below
+      for audit; re-open them on the finding-detail page if needed.
+    </p>
+  {% endif %}
 </section>
 
 {% if a.exec_summary %}
@@ -54,11 +62,30 @@
     </tr></thead>
     <tbody>
     {% for f in findings %}
-      <tr>
-        <td><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span></td>
+      {# False-positive rows render dimmed + struck-through, with a clear
+         badge in both the Severity column (so it's visible at a glance) and
+         alongside the title. They stay in the table for audit; the rollup
+         and the PDF report exclude them. #}
+      {% set is_fp = f.status == 'false_positive' %}
+      <tr style="{% if is_fp %}opacity:.55{% endif %}">
+        <td>
+          {% if is_fp %}
+            <span class="badge warn"
+                  title="This finding has been suppressed by an analyst. It does not count toward the severity rollup or the generated PDF report.">
+              False Positive
+            </span><br>
+            <small class="muted" style="text-decoration:line-through">{{ f.severity }}</small>
+          {% else %}
+            <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
+            {% if f.validation_status == 'validated' %}
+              <br><small class="badge" title="Confirmed by a high-fidelity probe">✓ validated</small>
+            {% endif %}
+          {% endif %}
+        </td>
         <td>{{ f.source_tool }}</td>
         <td>
-          <a href="{{ base }}/finding/{{ f.id }}">{{ f.title|truncate(140) }}</a>
+          <a href="{{ base }}/finding/{{ f.id }}"
+             {% if is_fp %}style="text-decoration:line-through"{% endif %}>{{ f.title|truncate(140) }}</a>
           {% if f.seen_count and f.seen_count > 1 %}
             <span class="badge" title="Number of times this finding was reported by the same tool">×{{ f.seen_count }}</span>
           {% endif %}

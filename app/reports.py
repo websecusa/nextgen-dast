@@ -160,14 +160,24 @@ def _gather(assessment_id: int) -> Optional[dict]:
     if not a:
         return None
 
-    findings = db.query(
+    # Reports exclude analyst-suppressed findings. They live in the
+    # findings table for audit, but they don't get a card in the PDF and
+    # don't count toward the cover scorecard / heat map. The query also
+    # picks up `status` so we can show a "X excluded false positives"
+    # line in the report's audit appendix later if needed.
+    all_findings = db.query(
         "SELECT id, source_tool, severity, owasp_category, cwe, cvss, title, "
         "description, evidence_url, evidence_method, remediation, raw_data, "
+        "status, "
         "COALESCE(seen_count, 1) AS seen_count, "
         "COALESCE(validation_status, 'unvalidated') AS validation_status "
         "FROM findings WHERE assessment_id = %s "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (assessment_id,))
+    excluded_fp_count = sum(1 for f in all_findings
+                            if f.get("status") == "false_positive")
+    findings = [f for f in all_findings
+                if f.get("status") != "false_positive"]
 
     # Decode raw_data JSON for each finding (used for reproduction details).
     for f in findings:
@@ -226,6 +236,7 @@ def _gather(assessment_id: int) -> Optional[dict]:
     return {
         "a": a,
         "findings": findings,
+        "excluded_fp_count": excluded_fp_count,
         "sev_counts": sev_counts,
         "risk_score": risk_score,
         "risk_label": risk_label,

@@ -1163,15 +1163,26 @@ def assessment_detail(request: Request, aid: int):
     a = db.query_one("SELECT * FROM assessments WHERE id = %s", (aid,))
     if not a:
         raise HTTPException(404)
+    # Pull `status` and `validation_status` so the table can render the
+    # False-Positive badge and the rollup can exclude suppressed rows.
     findings = db.query(
         "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
         "cwe, cvss, title, description, evidence_url, remediation, "
+        "status, validation_status, "
         "COALESCE(seen_count, 1) AS seen_count "
         "FROM findings WHERE assessment_id = %s "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (aid,))
+    # Severity rollup excludes findings the analyst has marked false
+    # positive — they shouldn't influence the score or the report cover.
+    # The full table still shows them so the analyst can see what was
+    # suppressed and re-open if needed.
     sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
+    fp_count = 0
     for f in findings:
+        if f.get("status") == "false_positive":
+            fp_count += 1
+            continue
         sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
     scan_ids = (a.get("scan_ids") or "").split(",") if a.get("scan_ids") else []
     scan_ids = [s for s in scan_ids if s]
@@ -1179,7 +1190,7 @@ def assessment_detail(request: Request, aid: int):
     return templates.TemplateResponse(
         "assessment_detail.html",
         ctx(request, a=a, findings=findings, sev_counts=sev_counts,
-            scan_ids=scan_ids, reports=reports),
+            fp_count=fp_count, scan_ids=scan_ids, reports=reports),
     )
 
 
