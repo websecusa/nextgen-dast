@@ -34,13 +34,20 @@
         <div style="font-size:1.6em; font-weight:600; margin-top:.3em">{{ sev_counts[sev] }}</div>
       </div>
     {% endfor %}
+    {# Sixth tile: false-positive count. Web view only — the PDF report
+       already excludes suppressed findings from its rollup and shouldn't
+       advertise the suppression count to clients reading the deliverable. #}
+    <div style="flex:1; min-width:120px; text-align:center; padding:.8em; border-radius:6px; border:1px dashed var(--border); opacity:.85"
+         title="Findings the analyst marked as false positive. Excluded from the rollup, the score, and the PDF report — visible here for audit only.">
+      <div class="badge warn" style="font-size:1em; padding:.3em .6em">false positive</div>
+      <div style="font-size:1.6em; font-weight:600; margin-top:.3em">{{ fp_count or 0 }}</div>
+    </div>
   </div>
   {% if fp_count and fp_count > 0 %}
     <p class="muted small" style="margin-top:.6em">
-      Excluded from this rollup:
-      <strong>{{ fp_count }}</strong> finding{% if fp_count != 1 %}s{% endif %}
-      marked as <em>false positive</em>. They remain in the table below
-      for audit; re-open them on the finding-detail page if needed.
+      The <em>false positive</em> tile is excluded from the score and from
+      the generated PDF report. Re-open any row from its finding-detail
+      page to put it back in the rollup.
     </p>
   {% endif %}
 </section>
