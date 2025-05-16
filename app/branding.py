@@ -2,7 +2,7 @@
 # Part of nextgen-dast. See README.md for license and overall architecture.
 """Branding settings — single-row table, plus on-disk logos.
 
-All file-system writes go through here so safety checks are centralised.
+All file-system writes go through here so safety checks are centralized.
 """
 from __future__ import annotations
 

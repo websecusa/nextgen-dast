@@ -2,7 +2,7 @@
 # Part of nextgen-dast. See README.md for license and overall architecture.
 """User-Agent → per-scanner CLI flag mapping.
 
-Centralised here so server.py and scripts/orchestrator.py emit identical
+Centralized here so server.py and scripts/orchestrator.py emit identical
 flags. testssl.sh is intentionally absent — TLS handshakes don't carry an
 HTTP User-Agent header, so the option doesn't apply.
 """

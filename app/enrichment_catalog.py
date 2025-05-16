@@ -128,7 +128,7 @@ BY_TITLE = {
         ),
         "remediation_steps": _steps(
             "Identify the resource being protected and enumerate every "
-            "code path that can reach it. Add a centralised authorization "
+            "code path that can reach it. Add a centralized authorization "
             "check at the controller or middleware layer.",
             "Deny by default. Treat any request that doesn't carry a valid "
             "session/role as unauthenticated regardless of its headers, "
@@ -233,12 +233,12 @@ BY_OWASP = {
             "them needs to be wrong."
         ),
         "impact": (
-            "Unauthorised data access, privilege escalation, or "
+            "Unauthorized data access, privilege escalation, or "
             "destructive actions taken by users who should not have been "
             "able to reach the resource at all."
         ),
         "remediation_long": (
-            "Deny by default. Centralise authorization in the application "
+            "Deny by default. Centralize authorization in the application "
             "layer rather than relying on UI hides, client-side checks, "
             "or proxy/WAF rules. Every request that touches a resource "
             "must pass through one well-tested check that says 'is this "

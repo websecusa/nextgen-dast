@@ -24,7 +24,7 @@ from .safety import AuditLog, Budget, SafetyViolation
 
 @dataclass
 class Verdict:
-    """Standardised return shape every probe produces."""
+    """Standardized return shape every probe produces."""
     ok: bool = True
     validated: Optional[bool] = None
     confidence: float = 0.0
