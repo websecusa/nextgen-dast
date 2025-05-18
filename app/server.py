@@ -1892,13 +1892,31 @@ def finding_challenge(fid: int, cookie: str = Form("")):
                 entry["headers"].pop("Cookie", None)
 
     new_status = _verdict_to_status(verdict)
-    db.execute(
-        "UPDATE findings SET validation_status = %s, "
-        "validation_probe = %s, validation_run_at = NOW(), "
-        "validation_evidence = %s WHERE id = %s",
-        (new_status, probe["name"][:64],
-         json.dumps(verdict, default=str)[:65000], fid),
-    )
+    # When the probe is confident the finding is a false positive, flip
+    # findings.status to 'false_positive' too — the analyst shouldn't have
+    # to click a second button to suppress something the probe already
+    # disproved. (Symmetrically, a 'validated' verdict does NOT auto-flip
+    # status to 'confirmed' — confirmation is intentionally a human step
+    # so the analyst reads the evidence before triaging upward.)
+    new_finding_status = ("false_positive" if new_status == "false_positive"
+                          else None)
+    if new_finding_status:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s, status = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000],
+             new_finding_status, fid),
+        )
+    else:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000], fid),
+        )
     return redirect(f"/finding/{fid}?msg=challenge+result%3A+{new_status}")
 
 
@@ -1926,6 +1944,26 @@ def finding_mark_false_positive(request: Request, fid: int,
         (json.dumps(payload), fid),
     )
     return redirect(f"/finding/{fid}?msg=marked+false+positive")
+
+
+@app.post("/assessment/{aid}/challenge_all")
+def assessment_challenge_all(aid: int):
+    """Bulk-challenge: spawn the standalone runner so it works through every
+    eligible finding (open, unvalidated, severity ≥ low, has a probe
+    matched) without holding the web request open for the duration. The
+    UI's existing /assessment/{id}/status polling reflects progress via
+    the assessments.current_step field."""
+    a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    log_path = LOGS_DIR / f"challenge_all_{aid}.log"
+    log_fh = open(log_path, "ab", buffering=0)
+    subprocess.Popen(
+        ["python", "-m", "scripts.challenge_runner", str(aid)],
+        stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True, cwd="/app",
+    )
+    return redirect(f"/assessment/{aid}?msg=challenge+all+started")
 
 
 @app.post("/finding/{fid}/reopen")

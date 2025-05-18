@@ -59,6 +59,36 @@
 </section>
 {% endif %}
 
+<section class="card">
+  <h2>Validate findings</h2>
+  <p class="muted" style="margin-top:0">
+    Run high-fidelity validation probes against every <strong>open,
+    unvalidated</strong> finding in this assessment that has a toolkit
+    probe mapped to it. Probes use the assessment's stored credentials
+    when available (single login, cookie reused for the whole batch).
+    <strong>Info-severity findings are skipped</strong> — only critical,
+    high, medium, and low rows are challenged.
+  </p>
+  <p class="muted small" style="margin:.2em 0 .8em">
+    Probes are read-only by manifest. A confident
+    <em>false positive</em> verdict automatically suppresses the row
+    (status flips to <code>false_positive</code>, excluded from the
+    severity rollup and the PDF report). Validations don't auto-flip —
+    they're left for an analyst to confirm.
+  </p>
+  <form method="post" action="{{ base }}/assessment/{{ a.id }}/challenge_all"
+        onsubmit="return confirm('Run validation probes against every eligible finding in this assessment?\n\nThis runs in the background. Watch the status line under the assessment header for progress.')">
+    <button type="submit" {% if not is_admin or a.status not in ('done','error','cancelled') %}disabled{% endif %}>
+      Challenge all eligible findings
+    </button>
+    {% if a.status not in ('done','error','cancelled') %}
+      <small class="muted" style="margin-left:.6em">
+        Disabled while the assessment is {{ a.status }}; finish first.
+      </small>
+    {% endif %}
+  </form>
+</section>
+
 <section>
   <h2>Findings ({{ findings|length }})</h2>
   {% if findings %}
