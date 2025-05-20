@@ -253,6 +253,31 @@ TESTSSL_SCAN_SYSTEM_IDS = {
     "sessionresumption_ticket", "sessionresumption_ID", "cert_keySize",
 }
 
+# testssl uses severity=WARN for two genuinely different things:
+#   1. an actual TLS posture warning (weak cipher etc.) — keep these
+#   2. "I couldn't run this test on this server" — drop these, they're
+#      not findings at all. Examples emitted as WARN with these finding
+#      texts on the test target:
+#        NPN     finding: "not possible for TLS 1.3-only hosts"
+#        HSTS_*  finding: "no HSTS header on this hop" (sometimes)
+#   The pattern below catches the "test doesn't apply" class. Anchored
+#   to the start of the finding text so it doesn't gobble legitimate
+#   prose that happens to contain these phrases.
+import re as _re_testssl
+TESTSSL_NOT_APPLICABLE_RE = _re_testssl.compile(
+    r"^\s*("
+    r"not possible for TLS 1\.3|"      # NPN, sometimes ALPN
+    r"not applicable|"
+    r"test not applicable|"
+    r"not tested|"
+    r"couldn't determine|"
+    r"could not determine|"
+    r"check not run|"
+    r"n/a\b"
+    r")",
+    _re_testssl.IGNORECASE,
+)
+
 
 def parse_testssl(scan_dir: Path) -> Iterable[dict]:
     p = scan_dir / "report.json"
@@ -276,14 +301,20 @@ def parse_testssl(scan_dir: Path) -> Iterable[dict]:
         # TLS posture issues.
         if sev_raw in ("FATAL", "WARN") and entry.get("id") in TESTSSL_SCAN_SYSTEM_IDS:
             continue
-        sev = TESTSSL_SEV.get(sev_raw, "low")
-        if not entry.get("finding"):
+        finding_text = (entry.get("finding") or "").strip()
+        if not finding_text:
             continue
+        # "Test doesn't apply on this host" outputs come back as WARN even
+        # though they're not security warnings (e.g. NPN on a TLS 1.3-only
+        # host). Drop these regardless of severity — they're not findings.
+        if TESTSSL_NOT_APPLICABLE_RE.match(finding_text):
+            continue
+        sev = TESTSSL_SEV.get(sev_raw, "low")
         yield {
             "source_tool": "testssl",
             "severity": sev,
             "title": entry.get("id") or "TLS finding",
-            "description": entry.get("finding") or "",
+            "description": finding_text,
             "owasp_category": "A02:2021-Cryptographic_Failures",
             "cwe": (entry.get("cwe") or "").replace("CWE-", "") or None,
             "cvss": entry.get("cvss"),
