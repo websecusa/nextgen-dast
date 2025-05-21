@@ -1558,20 +1558,19 @@ def assessment_report_generate(aid: int):
     return redirect(f"/assessment/{aid}?msg=report+ready:+{path.name}")
 
 
-_REPORT_NAME_RE = re.compile(r"^assessment_\d+_[0-9]{8}-[0-9]{6}\.pdf$")
-
-
+# Filename pattern is enforced both here (request-time) and inside
+# reports.delete_report() (storage-time). reports.REPORT_FILENAME_RE is
+# the single source of truth.
 @app.get("/assessment/{aid}/report/{filename}")
 def assessment_report_download(aid: int, filename: str):
     """Serve a generated report. Strict regex on filename + path-resolve
-    check inside reports.REPORTS_DIR so the route can't be coerced into
-    serving anything outside the reports directory."""
-    if not _REPORT_NAME_RE.match(filename):
+    check inside reports.REPORTS_DIR/<aid>/ so the route can't be coerced
+    into serving anything outside the per-assessment directory."""
+    if not reports_mod.REPORT_FILENAME_RE.match(filename):
         raise HTTPException(400, "invalid report name")
-    if not filename.startswith(f"assessment_{int(aid)}_"):
-        raise HTTPException(403)
-    target = (reports_mod.REPORTS_DIR / filename).resolve()
-    if not str(target).startswith(str(reports_mod.REPORTS_DIR.resolve())):
+    rdir = (reports_mod.REPORTS_DIR / str(int(aid))).resolve()
+    target = (rdir / filename).resolve()
+    if not str(target).startswith(str(rdir)):
         raise HTTPException(403)
     if not target.exists():
         raise HTTPException(404)
@@ -1583,7 +1582,7 @@ def assessment_report_download(aid: int, filename: str):
 def assessment_report_delete(aid: int, filename: str):
     """Remove a generated PDF report file. Same strict filename validation
     as the download route."""
-    if not _REPORT_NAME_RE.match(filename):
+    if not reports_mod.REPORT_FILENAME_RE.match(filename):
         raise HTTPException(400, "invalid report name")
     a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
     if not a:

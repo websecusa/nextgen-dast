@@ -467,6 +467,15 @@
   {% set tools_used = findings|map(attribute='source_tool')|unique|list %}
   {% for t in tools_used %}<li><code>{{ t }}</code></li>{% endfor %}
   <li>mitmproxy (per-scan request/response capture)</li>
+  {# The validation toolkit (probes under /app/toolkit/probes) drives the
+     Challenge / re-test workflow. The probes are short Python scripts
+     orchestrated from Bash and they speak HTTP via curl-equivalent
+     calls (urllib in-process, plus shell-out to curl for any out-of-
+     band checks). Listed individually so the report names everything
+     that touched the target. #}
+  <li>Python (validation toolkit — htaccess_bypass, info_disclosure, sqli_boolean, xss_reflect)</li>
+  <li>curl (validation toolkit HTTP fetch + audit reproductions)</li>
+  <li>bash (orchestration: scripts/run_scan.sh, scripts/orchestrator.py, scripts/challenge_runner.py)</li>
 </ul>
 
 <h3>3.3 Limitations</h3>

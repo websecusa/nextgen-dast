@@ -25,6 +25,57 @@
   {% endif %}
 </p>
 
+{# PDF report card sits at the top so the deliverable is the first
+   thing visible on the assessment page. We keep at most ONE report
+   per assessment — generating replaces the previous one. #}
+<section class="card">
+  <h2>PDF report</h2>
+  {% if a.status not in ('running','queued','deleting') %}
+    {% if is_admin %}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report" style="display:inline">
+        <button type="submit">{% if reports %}Regenerate PDF report{% else %}Generate PDF report{% endif %}</button>
+      </form>
+      <small class="muted" style="margin-left:.6em">
+        Takes 5–15 s. Only one PDF is kept per assessment —
+        regenerating replaces the previous one.
+      </small>
+    {% else %}
+      <p class="muted">Read-only — ask an admin to generate a new report. Existing report is downloadable below.</p>
+    {% endif %}
+  {% else %}
+    <p class="muted">Report generation available once the assessment finishes.</p>
+  {% endif %}
+
+  {% if reports %}
+    <table style="margin-top:.8em">
+      <thead><tr><th>Filename</th><th>Generated</th><th>Size</th><th></th></tr></thead>
+      <tbody>
+      {% for r in reports %}
+        <tr>
+          <td><code>{{ r.filename }}</code></td>
+          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+          <td>{{ (r.size_bytes / 1024) | round(1) }} KB</td>
+          <td>
+            <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">Download</a>
+            {% if is_admin %}
+              &nbsp;·&nbsp;
+              <form method="post"
+                    action="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}/delete"
+                    style="display:inline"
+                    onsubmit="return confirm('Delete report {{ r.filename }}? This cannot be undone.')">
+                <button type="submit" class="warn link">Delete</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted small">No report generated yet.</p>
+  {% endif %}
+</section>
+
 <section class="card">
   <h2>Severity rollup</h2>
   <div style="display:flex; gap:1em; flex-wrap:wrap">
@@ -145,51 +196,6 @@
   </table>
   {% else %}
     <p class="muted">No findings yet — assessment in progress.</p>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h2>PDF report</h2>
-  {% if a.status not in ('running','queued','deleting') %}
-    {% if is_admin %}
-      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report" style="display:inline">
-        <button type="submit">Generate PDF report</button>
-      </form>
-      <small class="muted" style="margin-left:.6em">5–15 s per generation; produces a fresh dated file.</small>
-    {% else %}
-      <p class="muted">Read-only — ask an admin to generate a new report. Existing reports are downloadable below.</p>
-    {% endif %}
-  {% else %}
-    <p class="muted">Report generation available once the assessment finishes.</p>
-  {% endif %}
-
-  {% if reports %}
-    <table style="margin-top:.8em">
-      <thead><tr><th>Filename</th><th>Generated</th><th>Size</th><th></th></tr></thead>
-      <tbody>
-      {% for r in reports %}
-        <tr>
-          <td><code>{{ r.filename }}</code></td>
-          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
-          <td>{{ (r.size_bytes / 1024) | round(1) }} KB</td>
-          <td>
-            <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">Download</a>
-            {% if is_admin %}
-              &nbsp;·&nbsp;
-              <form method="post"
-                    action="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}/delete"
-                    style="display:inline"
-                    onsubmit="return confirm('Delete report {{ r.filename }}? This cannot be undone.')">
-                <button type="submit" class="warn link">Delete</button>
-              </form>
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="muted small">No reports generated yet.</p>
   {% endif %}
 </section>
 

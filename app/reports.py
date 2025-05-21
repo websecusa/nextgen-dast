@@ -345,17 +345,71 @@ def _repro_for(f: dict) -> dict:
     return repro
 
 
+# File-name policy:
+#   /data/reports/<assessment_id>/<safe_fqdn>_<finished_date>_report.pdf
+#
+# Each assessment gets its own subdirectory. We keep at most ONE PDF per
+# assessment — generating a new one purges the old. The filename is
+# user-facing (it's what gets downloaded), so it uses the FQDN + finish
+# date in YYYY-MM-DD form. The subdirectory keeps two assessments on the
+# same FQDN finishing the same day from colliding with each other.
+REPORT_FILENAME_RE = re.compile(
+    r"^[A-Za-z0-9.-]+_\d{4}-\d{2}-\d{2}_report\.pdf$"
+)
+
+
+def _safe_fqdn(s: str) -> str:
+    """Strip everything that isn't a hostname character. Defensive — the
+    DB *should* only have valid FQDNs, but the filename ends up in URLs
+    and on disk so we sanitize at the boundary."""
+    s = (s or "").strip().lower()
+    return re.sub(r"[^a-z0-9.\-]", "", s) or "unknown"
+
+
+def _finished_date(a: dict) -> str:
+    """YYYY-MM-DD of the assessment's finish, falling back to start date,
+    then today's UTC date if neither timestamp is present."""
+    for key in ("finished_at", "started_at", "created_at"):
+        ts = a.get(key)
+        if ts:
+            # ts is a datetime from pymysql, or string if reread from JSON
+            if hasattr(ts, "strftime"):
+                return ts.strftime("%Y-%m-%d")
+            return str(ts)[:10]
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _report_dir(assessment_id: int) -> Path:
+    """Per-assessment subdirectory. Resolved so callers can use it for
+    path-safety checks against REPORTS_DIR."""
+    return REPORTS_DIR / str(int(assessment_id))
+
+
+def report_filename(a: dict) -> str:
+    """Compute the canonical filename for an assessment's PDF report."""
+    return f"{_safe_fqdn(a.get('fqdn'))}_{_finished_date(a)}_report.pdf"
+
+
 def generate(assessment_id: int) -> Optional[Path]:
     data = _gather(assessment_id)
     if not data:
         return None
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    a = data["a"]
+    rdir = _report_dir(assessment_id)
+    rdir.mkdir(parents=True, exist_ok=True)
     tpl = env.get_template("report.html")
     rendered = tpl.render(**data)
 
-    out = REPORTS_DIR / (
-        f"assessment_{assessment_id}_{data['report_id']}.pdf"
-    )
+    out = rdir / report_filename(a)
+    # Purge any prior reports for this assessment — only one PDF is kept
+    # per assessment. Includes anything in the subdirectory (covers the
+    # legacy filename pattern from earlier releases) plus the new path.
+    for stale in rdir.glob("*.pdf"):
+        if stale != out:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     # base_url is needed so WeasyPrint can resolve <img src="..."> against
     # local filesystem paths (the branding logos).
     HTML(string=rendered, base_url=str(REPORTS_DIR.parent)).write_pdf(str(out))
@@ -363,11 +417,12 @@ def generate(assessment_id: int) -> Optional[Path]:
 
 
 def list_reports(assessment_id: int) -> list[dict]:
-    if not REPORTS_DIR.exists():
+    """Returns at most one entry per assessment (we only keep the latest)."""
+    rdir = _report_dir(assessment_id)
+    if not rdir.exists():
         return []
     out = []
-    for p in sorted(REPORTS_DIR.glob(f"assessment_{int(assessment_id)}_*.pdf"),
-                    reverse=True):
+    for p in sorted(rdir.glob("*.pdf"), reverse=True):
         st = p.stat()
         out.append({
             "filename": p.name,
@@ -379,14 +434,13 @@ def list_reports(assessment_id: int) -> list[dict]:
 
 def delete_report(assessment_id: int, filename: str) -> bool:
     """Delete a generated PDF report. Returns True if a file was removed.
-    Validates that the filename belongs to this assessment and stays inside
-    REPORTS_DIR — same guards used by the download route."""
-    if not re.match(r"^assessment_\d+_[0-9]{8}-[0-9]{6}\.pdf$", filename):
+    Validates the filename against the canonical pattern and resolves the
+    target path, refusing anything that escapes the per-assessment dir."""
+    if not REPORT_FILENAME_RE.match(filename):
         return False
-    if not filename.startswith(f"assessment_{int(assessment_id)}_"):
-        return False
-    target = (REPORTS_DIR / filename).resolve()
-    if not str(target).startswith(str(REPORTS_DIR.resolve())):
+    rdir = _report_dir(assessment_id).resolve()
+    target = (rdir / filename).resolve()
+    if not str(target).startswith(str(rdir)):
         return False
     if not target.exists():
         return False
