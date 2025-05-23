@@ -78,6 +78,25 @@
 
 <section class="card">
   <h2>Severity rollup</h2>
+  {# Filter-info toggle. Persists on the assessment row so it affects
+     both the on-screen view AND the next generated PDF. The checkbox
+     auto-submits the form on change so it's a single click. Disabled
+     for non-admins (the form would be rejected anyway). #}
+  <form method="post" action="{{ base }}/assessment/{{ a.id }}/filter_info"
+        style="margin:0 0 .8em 0">
+    <label class="check" style="display:inline-flex; align-items:center; gap:.4em">
+      <input type="checkbox" name="enabled" value="1"
+             {% if filter_info %}checked{% endif %}
+             {% if not is_admin %}disabled{% endif %}
+             onchange="this.form.submit()">
+      <span>Hide info-severity findings on this page and in the PDF</span>
+    </label>
+    {% if filter_info and info_hidden %}
+      <span class="muted small" style="margin-left:.6em">
+        ({{ info_hidden }} info-severity finding{{ '' if info_hidden == 1 else 's' }} currently hidden)
+      </span>
+    {% endif %}
+  </form>
   <div style="display:flex; gap:1em; flex-wrap:wrap">
     {% for sev in ['critical','high','medium','low','info'] %}
       <div style="flex:1; min-width:120px; text-align:center; padding:.8em; border-radius:6px; border:1px solid var(--border)">

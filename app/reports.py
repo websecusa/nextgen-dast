@@ -176,8 +176,20 @@ def _gather(assessment_id: int) -> Optional[dict]:
         (assessment_id,))
     excluded_fp_count = sum(1 for f in all_findings
                             if f.get("status") == "false_positive")
+    # The assessment's filter_info toggle (set via the on-screen
+    # checkbox) suppresses info-severity rows from the report too. We
+    # count the hidden rows for an optional appendix entry but never
+    # render the suppressed findings themselves.
+    filter_info = bool(a.get("filter_info"))
+    excluded_info_count = (
+        sum(1 for f in all_findings
+            if f.get("status") != "false_positive"
+               and f.get("severity") == "info")
+        if filter_info else 0
+    )
     findings = [f for f in all_findings
-                if f.get("status") != "false_positive"]
+                if f.get("status") != "false_positive"
+                   and not (filter_info and f.get("severity") == "info")]
 
     # Decode raw_data JSON for each finding (used for reproduction details).
     for f in findings:
@@ -237,6 +249,7 @@ def _gather(assessment_id: int) -> Optional[dict]:
         "a": a,
         "findings": findings,
         "excluded_fp_count": excluded_fp_count,
+        "excluded_info_count": excluded_info_count,
         "sev_counts": sev_counts,
         "risk_score": risk_score,
         "risk_label": risk_label,

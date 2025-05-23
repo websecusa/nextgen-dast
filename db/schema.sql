@@ -110,6 +110,11 @@ CREATE TABLE IF NOT EXISTS assessments (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 ALTER TABLE assessments ADD COLUMN IF NOT EXISTS user_agent_id INT;
+-- Per-assessment toggle: when set, info-severity findings are filtered
+-- out of the findings table on the assessment page AND out of the
+-- generated PDF report. Defaults to 0 so existing assessments are
+-- unchanged on the next read.
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS filter_info TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS validation_status
   ENUM('unvalidated','validated','false_positive','inconclusive','errored')

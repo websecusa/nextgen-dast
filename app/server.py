@@ -1175,23 +1175,46 @@ def assessment_detail(request: Request, aid: int):
         (aid,))
     # Severity rollup excludes findings the analyst has marked false
     # positive — they shouldn't influence the score or the report cover.
-    # The full table still shows them so the analyst can see what was
-    # suppressed and re-open if needed.
+    # When the assessment has the filter_info toggle on, info-severity
+    # rows are also suppressed from both the table and the rollup.
     sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
     fp_count = 0
+    info_hidden = 0
+    filter_info = bool(a.get("filter_info"))
+    visible: list[dict] = []
     for f in findings:
         if f.get("status") == "false_positive":
             fp_count += 1
             continue
+        if filter_info and f.get("severity") == "info":
+            info_hidden += 1
+            continue
         sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
+        visible.append(f)
     scan_ids = (a.get("scan_ids") or "").split(",") if a.get("scan_ids") else []
     scan_ids = [s for s in scan_ids if s]
     reports = reports_mod.list_reports(aid)
     return templates.TemplateResponse(
         "assessment_detail.html",
-        ctx(request, a=a, findings=findings, sev_counts=sev_counts,
-            fp_count=fp_count, scan_ids=scan_ids, reports=reports),
+        ctx(request, a=a, findings=visible, sev_counts=sev_counts,
+            fp_count=fp_count, info_hidden=info_hidden,
+            filter_info=filter_info,
+            scan_ids=scan_ids, reports=reports),
     )
+
+
+@app.post("/assessment/{aid}/filter_info")
+def assessment_filter_info(aid: int, enabled: Optional[str] = Form(None)):
+    """Persist the 'hide info-severity findings' toggle on the assessment
+    row. Affects both the on-screen view (immediately) and the next
+    generated PDF report. The checkbox auto-submits via JS so this is
+    a one-click toggle."""
+    a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    db.execute("UPDATE assessments SET filter_info = %s WHERE id = %s",
+               (1 if enabled else 0, aid))
+    return redirect(f"/assessment/{aid}")
 
 
 @app.post("/assessment/{aid}/delete")
