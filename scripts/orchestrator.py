@@ -133,6 +133,11 @@ def run_tool(tool: str, target: str, profile: str,
                "-useproxy", proxy_url]
     elif tool == "wapiti":
         rep = sdir / "report"
+        # Wapiti's JSON report writer opens the output path directly with
+        # open(...,"w") and does not create the parent directory. Pre-create
+        # it here so the scan does not crash after several minutes of work
+        # while emitting the final report.
+        rep.mkdir(parents=True, exist_ok=True)
         # Curated module set — drop `buster` (path-bruteforce, wandered to
         # parent domain and crashed a#3) and skip others that are pure noise
         # against modern apps. `-m all` is opt-in via the (future) "deep"
@@ -389,7 +394,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: orchestrator.py <assessment_id>", file=sys.stderr)
-        sys.exit(2)
-    run(int(sys.argv[1]))
+    # main() validates argv and reads the assessment_id itself,
+    # so we just propagate its exit code.
+    sys.exit(main())
