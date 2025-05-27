@@ -1,0 +1,49 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+#
+# Two-container fixture for the enhanced-testing probe harness.
+#
+# 1. juice-shop  — OWASP Juice Shop (https://github.com/juice-shop/juice-shop),
+#                  the industry-standard "intentionally vulnerable" web app.
+#                  MIT-licensed; no commercial restriction. Used as the
+#                  POSITIVE control: every probe must light up against it.
+#
+# 2. clean-ref   — vanilla nginx serving the static fixture under
+#                  fixtures/clean-site/. autoindex is off, no app code.
+#                  Used as the NEGATIVE control: every probe must stay
+#                  silent against it.
+#
+# Bring up:
+#     docker compose -f probe_stack.yml up -d
+# Tear down (and forget the volumes):
+#     docker compose -f probe_stack.yml down -v
+#
+# Each container binds to 127.0.0.1 only — never expose this stack on
+# a public interface; juice-shop is, by design, fully exploitable.
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: enhanced-testing-juice-shop
+    restart: "no"
+    ports:
+      - "127.0.0.1:3010:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3000/rest/admin/application-version || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  clean-ref:
+    image: nginx:alpine
+    container_name: enhanced-testing-clean-ref
+    restart: "no"
+    ports:
+      - "127.0.0.1:3011:80"
+    volumes:
+      - ./fixtures/clean-site:/usr/share/nginx/html:ro
+      - ./fixtures/clean-site/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/ || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 6

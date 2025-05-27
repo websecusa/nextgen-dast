@@ -37,6 +37,7 @@ import db                              # noqa: E402
 import enrichment as enrichment_mod    # noqa: E402
 from findings import parse_scan        # noqa: E402
 import useragent as ua_mod             # noqa: E402
+import consolidation                   # noqa: E402
 
 
 def _resolve_endpoint(endpoint_id: Optional[int]) -> Optional[dict]:
@@ -384,8 +385,22 @@ def main() -> int:
                 update(aid, total_findings=total_findings)
         update(aid, current_step="ingestion complete",
                status="consolidating")
-        # LLM consolidation pass goes here in the next iteration.
-        # For now we simply mark done.
+        # Basic-tier roll-up: ask the LLM to produce an executive summary,
+        # an overall risk score, and a top-priorities list from the
+        # deduplicated findings. Per-flow deep analysis (advanced tier)
+        # will hook in here as well in a follow-up. A failure in this
+        # pass must NOT lose the underlying findings — log the error and
+        # still mark the assessment done so the user can recover.
+        if a.get("llm_tier") in ("basic", "advanced"):
+            update(aid, current_step="consolidating: roll-up + exec summary")
+            try:
+                cres = consolidation.run(aid, enrich_endpoint)
+                if not cres.get("ok"):
+                    update(aid, error_text=(
+                        f"consolidation failed: {cres.get('error')}"
+                    ))
+            except Exception as e:
+                update(aid, error_text=f"consolidation crashed: {e!r}")
         update(aid, status="done", current_step="done", finished_at=now())
     except Exception as e:
         update(aid, status="error", error_text=f"{type(e).__name__}: {e}",

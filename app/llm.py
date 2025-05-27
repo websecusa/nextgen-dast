@@ -21,6 +21,64 @@ from typing import Any, Optional
 
 ANTHROPIC_VERSION = "2023-06-01"
 
+# ---- Cost accounting --------------------------------------------------------
+# Per-million-token prices in USD, keyed by model name as it appears on the
+# llm_endpoints row. Prices are list prices for input / output tokens at the
+# time of writing. Update here when vendor pricing changes — costs computed
+# elsewhere (cost(), assessments.llm_cost_usd) all derive from this map.
+#
+# We deliberately key on prefix matching (claude-opus-4* etc.) so a new minor
+# model version doesn't silently fall through to the unknown-model default.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    # Anthropic
+    "claude-opus-4":     (15.00, 75.00),
+    "claude-sonnet-4":   ( 3.00, 15.00),
+    "claude-haiku-4":    ( 1.00,  5.00),
+    "claude-3-5-sonnet": ( 3.00, 15.00),
+    "claude-3-5-haiku":  ( 0.80,  4.00),
+    # OpenAI (for openai_compat backend)
+    "gpt-4o":            ( 2.50, 10.00),
+    "gpt-4o-mini":       ( 0.15,  0.60),
+}
+# Anthropic prompt-cache discount on cached prefix tokens. Cache writes cost
+# 1.25x the regular input rate; cache reads cost 0.10x. We only model reads
+# here — writes happen on the first call of a 5-minute window and the cost
+# delta is small relative to the savings on subsequent reads.
+CACHE_READ_DISCOUNT = 0.10
+# Minimum number of input tokens a system block must contain for Anthropic
+# to cache it. Shorter prompts won't be cached even if cache_control is set,
+# so we don't bother flagging them.
+ANTHROPIC_CACHE_MIN_TOKENS = 1024
+
+
+def _price_for(model: str) -> tuple[float, float]:
+    """Return (input_per_mtok, output_per_mtok). Falls back to Opus-tier
+    pricing on unknown models so an unexpected endpoint never silently
+    looks free in cost reports — overestimating is the safer failure mode."""
+    if not model:
+        return MODEL_PRICING["claude-opus-4"]
+    for prefix, prices in MODEL_PRICING.items():
+        if model.startswith(prefix):
+            return prices
+    return MODEL_PRICING["claude-opus-4"]
+
+
+def cost(in_tokens: Optional[int], out_tokens: Optional[int],
+         model: str, cached_in_tokens: int = 0) -> float:
+    """Estimate USD cost for a single LLM call.
+
+    cached_in_tokens: subset of in_tokens that hit the prompt cache (Anthropic
+    reports this in usage.cache_read_input_tokens). Those tokens are billed
+    at CACHE_READ_DISCOUNT of the normal input rate."""
+    in_p, out_p = _price_for(model)
+    fresh_in = max(0, (in_tokens or 0) - cached_in_tokens)
+    return round(
+        (fresh_in * in_p / 1_000_000)
+        + (cached_in_tokens * in_p * CACHE_READ_DISCOUNT / 1_000_000)
+        + ((out_tokens or 0) * out_p / 1_000_000),
+        6,
+    )
+
 SYSTEM_PROMPT = """You are a security auditor reviewing an HTTP request/response pair captured from a target web application during authorized DAST testing. Your goal is to identify security issues that a static regex scanner would miss: business-logic flaws, authentication / authorization issues, sensitive data exposure, IDOR, injection (SQLi / XSS / SSRF / SSTI / cmd / NoSQL / LDAP / XXE), broken access control, insecure deserialization, mass assignment, race conditions, OWASP Top 10 patterns, and unusual implementation details.
 
 Respond ONLY with a JSON array of findings. Each element matches this schema:
@@ -76,16 +134,34 @@ def _http_post(url: str, headers: dict, body: dict, timeout: int = 180):
 
 
 def call_anthropic(api_key: str, model: str, system: str,
-                   user_prompt: str, max_tokens: int = 4096) -> dict:
+                   user_prompt: str, max_tokens: int = 4096,
+                   cache_system: bool = False) -> dict:
+    """Call the Anthropic Messages API.
+
+    cache_system: when True, mark the system block with cache_control so
+    repeat calls with the same system prompt (within a 5-minute window) hit
+    the prompt cache at 10% of normal input cost. Only useful when the
+    system prompt is at least ANTHROPIC_CACHE_MIN_TOKENS long — Anthropic
+    silently ignores cache_control on shorter blocks.
+    """
     headers = {
         "x-api-key": api_key,
         "anthropic-version": ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
+    if cache_system:
+        # Structured system field is required to attach cache_control.
+        system_field: Any = [{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    else:
+        system_field = system
     body = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
+        "system": system_field,
         "messages": [{"role": "user", "content": user_prompt}],
     }
     status, text = _http_post("https://api.anthropic.com/v1/messages", headers, body)
@@ -101,6 +177,10 @@ def call_anthropic(api_key: str, model: str, system: str,
         "content": content,
         "in_tokens": usage.get("input_tokens"),
         "out_tokens": usage.get("output_tokens"),
+        # Anthropic reports cache hits/writes separately — surface both so
+        # the caller can compute true cost via cost(..., cached_in_tokens=...).
+        "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+        "cache_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
     }
 
 

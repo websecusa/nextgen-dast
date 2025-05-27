@@ -246,6 +246,12 @@ def start_scan(tool: str, target: str, extra: str = "",
 
     if tool == "wapiti":
         report = sdir / "report"
+        # Defensive — wapiti's html generator does create its output dir, but
+        # other formats (json) write a file with plain open() and fail if the
+        # parent is missing. Pre-creating here keeps both branches uniform and
+        # immune to the "scan ran for an hour, then crashed on report write"
+        # failure mode.
+        report.mkdir(parents=True, exist_ok=True)
         cmd = ["wapiti", "-u", target, "-f", "html", "-o", str(report),
                "--flush-session", "--verbose", "1",
                "--proxy", proxy_url,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import ssl
 import time
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -110,11 +111,22 @@ class SafeClient:
         try:
             opener = self._opener()
             with opener.open(req, timeout=self.timeout) as resp:
-                data = resp.read()
+                # IncompleteRead happens when a server promises a longer
+                # Content-Length than it actually delivers (Juice Shop's
+                # serve-index page does this on /ftp/, for example). The
+                # body we received before the truncation is fine for our
+                # purposes — preserve it via the .partial attribute.
+                try:
+                    data = resp.read()
+                except http.client.IncompleteRead as ir:
+                    data = ir.partial or b""
                 hdrs = dict(resp.headers)
                 status = resp.status
         except urllib.error.HTTPError as e:
-            data = e.read() or b""
+            try:
+                data = e.read() or b""
+            except http.client.IncompleteRead as ir:
+                data = ir.partial or b""
             hdrs = dict(e.headers or {})
             status = e.code
         except urllib.error.URLError as e:
@@ -122,6 +134,12 @@ class SafeClient:
                               note=f"network-error: {e.reason}")
             return Response(status=0, headers={}, body=b"",
                             elapsed_ms=int((time.monotonic() - t0) * 1000))
+        except http.client.IncompleteRead as ir:
+            # Truncated before we even reached resp.read() context.
+            data = ir.partial or b""
+            hdrs, status = {}, 0
+            self.audit.record(method, url, status=None, size=len(data),
+                              note="incomplete-read at connect")
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         self.audit.record(method, url, status=status, size=len(data))
         return Response(status=status, headers=hdrs, body=data,

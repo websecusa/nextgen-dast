@@ -90,6 +90,10 @@ COPY app/ /app/
 COPY scripts/ /app/scripts/
 COPY toolkit/ /app/toolkit/
 COPY db/ /app/db/
+# enhanced_testing/ ships proactive probes that run during the `premium`
+# profile. Shares the toolkit/lib via its own lib/__init__.py shim so
+# probes have a single import path.
+COPY enhanced_testing/ /app/enhanced_testing/
 
 RUN mkdir -p /data/flows /data/logs /data/scans
 
