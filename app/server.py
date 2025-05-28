@@ -387,11 +387,74 @@ def mask_command(cmd: list) -> list:
     return out
 
 
+def reap_zombie_assessments(startup: bool = False) -> int:
+    """Mark as 'error' any in-flight assessments whose worker process is gone.
+
+    A row is considered a zombie when its `worker_pid` no longer exists in this
+    container's PID namespace — typically because the pentest-proxy container
+    was restarted (or OOM-killed) while a scan was mid-flight, leaving the
+    assessment row stuck in 'running' / 'consolidating' forever.
+
+    On startup we additionally reap 'queued' rows: their orchestrator was
+    spawned by a previous instance of this container, so those PIDs are gone
+    too. During steady-state sweeps we leave fresh 'queued' rows alone — the
+    UI may have just inserted one and the orchestrator hasn't claimed its
+    worker_pid yet.
+
+    Returns the number of rows reaped.
+    """
+    if not db.healthy():
+        return 0
+    statuses = ("queued", "running", "consolidating") if startup \
+        else ("running", "consolidating")
+    placeholders = ",".join(["%s"] * len(statuses))
+    rows = db.query(
+        f"SELECT id, status, worker_pid FROM assessments "
+        f"WHERE status IN ({placeholders})",
+        statuses,
+    )
+    reaped = 0
+    for r in rows:
+        pid = r.get("worker_pid")
+        # During steady-state sweeps, only reap rows that actually claimed
+        # a pid. A NULL worker_pid on a 'running' row is unexpected but we
+        # don't want to race the orchestrator's own status update.
+        if pid is None and not startup:
+            continue
+        if pid is not None and psutil.pid_exists(pid):
+            continue  # still alive — leave it
+        msg = ("worker process gone (container restart or crash); "
+               "scan was interrupted and must be re-run")
+        db.execute(
+            "UPDATE assessments SET status='error', error_text=%s, "
+            "finished_at=NOW() WHERE id=%s AND status IN "
+            f"({placeholders})",
+            (msg, r["id"], *statuses),
+        )
+        reaped += 1
+    return reaped
+
+
 @asynccontextmanager
 async def lifespan(app):
-    """FastAPI lifespan — start a background sweeper that cleans up
-    assessments marked status='deleting'. Polls every 60s."""
+    """FastAPI lifespan — runs a one-shot zombie reap at startup, then
+    a background sweeper that (a) drives 'deleting' cleanups and (b)
+    periodically reaps any newly-orphaned in-flight assessments.
+
+    The startup reap matters because detached orchestrator subprocesses are
+    in this container's PID namespace; a container restart kills them but
+    leaves the DB rows stuck in 'running'. The periodic reap catches the
+    rarer case of a worker dying mid-scan while the app stays up.
+    """
     import asyncio
+
+    try:
+        n = reap_zombie_assessments(startup=True)
+        if n:
+            print(f"[startup] reaped {n} zombie assessment(s) from prior run",
+                  flush=True)
+    except Exception as e:
+        print(f"[startup] zombie reap failed: {e!r}", flush=True)
 
     async def sweeper():
         while True:
@@ -402,6 +465,10 @@ async def lifespan(app):
                         cleanup_mod.cleanup_assessment(aid)
                     except Exception:
                         pass
+            except Exception:
+                pass
+            try:
+                reap_zombie_assessments(startup=False)
             except Exception:
                 pass
             await asyncio.sleep(60)
