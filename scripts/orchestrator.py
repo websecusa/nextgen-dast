@@ -27,6 +27,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,13 +279,144 @@ def insert_findings(assessment_id: int, scan_id: str, tool: str,
 
 
 # ---- profile plans ----------------------------------------------------------
+#
+# Each profile is a list of "tool" identifiers run in order. Most are real
+# scanner subprocesses (handled by run_tool); 'enhanced_testing' is a
+# synthetic identifier for the in-process probe-pass dispatched by
+# run_enhanced_testing(). Premium is the only profile that includes it.
 
 def plan_for_profile(profile: str) -> list[str]:
     if profile == "quick":
         return ["testssl", "nuclei"]
     if profile == "thorough":
         return ["testssl", "nuclei", "nikto", "wapiti"]
+    if profile == "premium":
+        # Everything thorough does, plus sqlmap + dalfox + the
+        # high-fidelity probe pass that targets bugs the traditional
+        # tools systematically miss.
+        return ["testssl", "nuclei", "nikto", "wapiti",
+                "sqlmap", "dalfox", "enhanced_testing"]
     return ["testssl", "nuclei", "nikto", "wapiti"]  # standard
+
+
+# ---- enhanced_testing dispatch ---------------------------------------------
+#
+# Walks /app/enhanced_testing/probes/, runs each probe against the target
+# via the Probe `--stdin` JSON entry point, and writes one verdict JSON
+# per probe to <scan_dir>/verdicts/<probe>.json. The findings parser
+# (findings.parse_enhanced_testing) reads those files.
+
+ENHANCED_DIR = Path("/app/enhanced_testing")
+
+# Probes that legitimately need POST/PUT (e.g. login). The safety
+# framework refuses non-GET unless allow_destructive=True. Listing them
+# here is the explicit audit trail of "yes, this probe is allowed to
+# issue non-GET requests; here's why."
+_PROBES_NEEDING_POST = {
+    "auth_default_admin_credentials": "login (POST /rest/user/login)",
+}
+
+
+def _enhanced_probe_files() -> list[Path]:
+    pdir = ENHANCED_DIR / "probes"
+    if not pdir.is_dir():
+        return []
+    return sorted(p for p in pdir.glob("*.py")
+                  if not p.name.startswith("_"))
+
+
+def run_enhanced_testing(target: str, profile: str) -> str:
+    """Run every probe under enhanced_testing/probes against `target`.
+    One verdict file per probe is written under
+    /data/scans/<scan_id>/verdicts/. Returns the synthetic scan_id."""
+    scan_id = new_scan_id()
+    sdir = SCANS_DIR / scan_id
+    (sdir / "verdicts").mkdir(parents=True, exist_ok=True)
+    log = sdir / "output.log"
+    log_fh = open(log, "ab", buffering=0)
+
+    parsed = urllib.parse.urlparse(target) if target else None
+    scope = [parsed.hostname] if (parsed and parsed.hostname) else []
+
+    probes = _enhanced_probe_files()
+    log_fh.write(f"$ enhanced_testing pass against {target} "
+                 f"({len(probes)} probes)\n".encode())
+
+    summary = {"target": target, "probes_run": 0,
+               "validated": 0, "refuted": 0,
+               "inconclusive": 0, "errored": 0,
+               "results": []}
+
+    for probe_path in probes:
+        probe_name = probe_path.stem
+        log_fh.write(f"\n--- {probe_name} ---\n".encode())
+        cfg = {
+            "url": target,
+            "method": "GET",
+            "scope": scope,
+            "max_requests": 60,
+            "max_rps": 5.0,
+            "dry_run": False,
+            "allow_destructive": probe_name in _PROBES_NEEDING_POST,
+        }
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(probe_path), "--stdin"],
+                input=json.dumps(cfg).encode(),
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+            out = proc.stdout.decode("utf-8", "replace")
+            verdict = json.loads(out) if out.strip().startswith("{") else {
+                "ok": False, "error": "non-JSON probe output",
+                "stdout": out[:1000],
+                "stderr": proc.stderr.decode("utf-8", "replace")[:1000],
+            }
+        except Exception as e:
+            verdict = {"ok": False,
+                       "error": f"{type(e).__name__}: {e}"}
+
+        # Write one file per probe so the parser can read them
+        # independently and so the analyst can inspect any single
+        # probe's evidence by name.
+        (sdir / "verdicts" / f"{probe_name}.json").write_text(
+            json.dumps(verdict, indent=2, default=str))
+
+        summary["probes_run"] += 1
+        if not verdict.get("ok", True) or verdict.get("error"):
+            summary["errored"] += 1
+        elif verdict.get("validated") is True:
+            summary["validated"] += 1
+        elif verdict.get("validated") is False:
+            summary["refuted"] += 1
+        else:
+            summary["inconclusive"] += 1
+        summary["results"].append({
+            "probe": probe_name,
+            "validated": verdict.get("validated"),
+            "confidence": verdict.get("confidence"),
+            "summary": (verdict.get("summary") or "")[:200],
+        })
+        log_fh.write(
+            f"  {probe_name}: validated={verdict.get('validated')} "
+            f"conf={verdict.get('confidence')}\n".encode())
+
+    (sdir / "summary.json").write_text(json.dumps(summary, indent=2))
+    meta = {
+        "id": scan_id, "tool": "enhanced_testing",
+        "target": target, "extra": "",
+        "auth_profile": None, "auth_warning": None,
+        "cmd": ["enhanced_testing", target],
+        "pid": None, "status": "finished",
+        "started_at": now(), "finished_at": now(),
+        "exit_code": 0,
+        "probes_run": summary["probes_run"],
+        "validated": summary["validated"],
+    }
+    (sdir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+    log_fh.close()
+    return scan_id
 
 
 # ---- main -------------------------------------------------------------------
@@ -373,6 +505,19 @@ def main() -> int:
             for tool in plan:
                 if tool == "testssl":
                     continue  # already handled
+                if tool == "enhanced_testing":
+                    # Synthetic "tool" — run the in-process probe pass.
+                    # Premium-only; runs once per scheme so probes can
+                    # exercise both http and https surfaces if the
+                    # assessment opted into both.
+                    update(aid, current_step=f"enhanced_testing → {target}")
+                    scan_id = run_enhanced_testing(target, profile)
+                    append_scan_id(aid, scan_id)
+                    added = insert_findings(aid, scan_id, "enhanced_testing",
+                                            endpoint=enrich_endpoint)
+                    total_findings += added
+                    update(aid, total_findings=total_findings)
+                    continue
                 update(aid, current_step=f"{tool} → {target}")
                 use_auth = (tool == "wapiti")  # only wapiti supports our auth
                 scan_id = run_tool(tool, target, profile,

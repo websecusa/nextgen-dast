@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS assessments (
   fqdn VARCHAR(255) NOT NULL,
   scan_http TINYINT(1) NOT NULL DEFAULT 1,
   scan_https TINYINT(1) NOT NULL DEFAULT 1,
-  profile ENUM('quick','standard','thorough') NOT NULL DEFAULT 'standard',
+  profile ENUM('quick','standard','thorough','premium') NOT NULL DEFAULT 'standard',
   llm_tier ENUM('none','basic','advanced') NOT NULL DEFAULT 'basic',
   llm_endpoint_id INT,
   user_agent_id INT,
@@ -115,6 +115,11 @@ ALTER TABLE assessments ADD COLUMN IF NOT EXISTS user_agent_id INT;
 -- generated PDF report. Defaults to 0 so existing assessments are
 -- unchanged on the next read.
 ALTER TABLE assessments ADD COLUMN IF NOT EXISTS filter_info TINYINT(1) NOT NULL DEFAULT 0;
+-- Premium profile: thorough + enhanced_testing probe pass. Existing
+-- profile column was the 3-value ENUM; widen it. ALTER MODIFY is
+-- idempotent for ENUM additions in MariaDB / MySQL.
+ALTER TABLE assessments MODIFY COLUMN profile
+  ENUM('quick','standard','thorough','premium') NOT NULL DEFAULT 'standard';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS seen_count INT NOT NULL DEFAULT 1;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS validation_status
   ENUM('unvalidated','validated','false_positive','inconclusive','errored')

@@ -26,6 +26,7 @@ consolidated report.</p>
         <option value="quick">quick — testssl + nuclei (curated tags). ~5 min.</option>
         <option value="standard" selected>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
         <option value="thorough">thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
+        <option value="premium">premium — everything thorough does + sqlmap + dalfox + the in-house high-fidelity probe pass (auth bypasses, IDOR, info disclosure, CORS, default creds…). Slowest tier; catches what traditional scanners miss.</option>
       </select>
     </label>
 

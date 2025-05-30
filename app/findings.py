@@ -404,6 +404,86 @@ def parse_sqlmap(scan_dir: Path) -> Iterable[dict]:
         }
 
 
+# ---- enhanced_testing -------------------------------------------------------
+#
+# Reads the verdict files written by scripts.orchestrator.run_enhanced_testing
+# (one JSON per probe, under /data/scans/<id>/verdicts/). Each verdict
+# whose `validated` is True becomes a finding row. validated=False or
+# inconclusive verdicts are NOT findings — they're recorded in the
+# scan_dir for audit but don't pollute the assessment's finding list.
+
+# Probe name → severity. The probe's verdict can override via
+# `severity_uplift`, but a sensible default per probe family keeps the
+# wiring honest when the probe forgets to set one.
+ENHANCED_DEFAULT_SEVERITY = {
+    # info-disclosure family — usually medium
+    "info_directory_listing":          "medium",
+    "info_swagger_exposed":            "high",
+    "info_metrics_exposed":            "medium",
+    "info_verbose_error":              "medium",
+    # auth family — high to critical
+    "auth_default_admin_credentials":  "critical",
+    # config family
+    "config_cors_wildcard":            "high",
+}
+
+# Probe name → primary OWASP category. Parallel to the per-probe
+# manifest's `validates` field; we copy it here so the parser doesn't
+# have to read manifests at parse time.
+ENHANCED_OWASP = {
+    "info_directory_listing":          "A05:2021-Security_Misconfiguration",
+    "info_swagger_exposed":            "A05:2021-Security_Misconfiguration",
+    "info_metrics_exposed":            "A05:2021-Security_Misconfiguration",
+    "info_verbose_error":              "A05:2021-Security_Misconfiguration",
+    "auth_default_admin_credentials":  "A07:2021-Identification_and_Authentication_Failures",
+    "config_cors_wildcard":            "A05:2021-Security_Misconfiguration",
+}
+
+
+def parse_enhanced_testing(scan_dir: Path) -> Iterable[dict]:
+    vdir = scan_dir / "verdicts"
+    if not vdir.is_dir():
+        return
+    for vfile in sorted(vdir.glob("*.json")):
+        try:
+            v = json.loads(vfile.read_text(errors="replace"))
+        except Exception:
+            continue
+        if v.get("validated") is not True:
+            continue   # only `validated=True` becomes a finding
+        probe_name = vfile.stem
+        # Pull a useful evidence URL: the probe's evidence either has
+        # a top-level "origin" or a "confirmed" entry with a URL/path.
+        ev = v.get("evidence") or {}
+        evidence_url = ev.get("origin")
+        confirmed = ev.get("confirmed")
+        if isinstance(confirmed, list) and confirmed:
+            c0 = confirmed[0]
+            if isinstance(c0, dict):
+                evidence_url = (c0.get("url") or
+                                (ev.get("origin", "") + (c0.get("path") or "")) or
+                                evidence_url)
+        elif isinstance(confirmed, dict):
+            evidence_url = (confirmed.get("url") or
+                            (ev.get("origin", "") + (confirmed.get("path") or "")) or
+                            evidence_url)
+        sev = (v.get("severity_uplift") or
+               ENHANCED_DEFAULT_SEVERITY.get(probe_name, "medium"))
+        yield {
+            "source_tool": "enhanced_testing",
+            "severity": sev,
+            "title": probe_name,
+            "description": (v.get("summary") or "")[:4000],
+            "owasp_category": ENHANCED_OWASP.get(probe_name),
+            "cwe": None,
+            "cvss": None,
+            "evidence_url": (evidence_url or "")[:1000],
+            "evidence_method": "GET",
+            "remediation": v.get("remediation") or "",
+            "raw_data": v,
+        }
+
+
 # ---- dalfox -----------------------------------------------------------------
 
 def parse_dalfox(scan_dir: Path) -> Iterable[dict]:
@@ -439,6 +519,7 @@ PARSERS = {
     "wapiti":  parse_wapiti,
     "sqlmap":  parse_sqlmap,
     "dalfox":  parse_dalfox,
+    "enhanced_testing": parse_enhanced_testing,
 }
 
 
