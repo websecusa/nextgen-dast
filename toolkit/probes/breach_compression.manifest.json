@@ -9,8 +9,7 @@
     "CWE-326"
   ],
   "matches_titles": [
-    "breach attack",
-    "vulnerable to the breach",
+    "breach",
     "content-encoding header is set",
     "compression side-channel",
     "crime attack"

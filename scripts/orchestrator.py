@@ -205,7 +205,8 @@ def _dedup_key(f: dict) -> tuple:
 
 
 def insert_findings(assessment_id: int, scan_id: str, tool: str,
-                    endpoint: Optional[dict] = None) -> int:
+                    endpoint: Optional[dict] = None,
+                    target: Optional[str] = None) -> int:
     """Group raw parser output by dedup key, insert one row per group with a
     seen_count. Then fold into existing findings already in the DB by
     incrementing seen_count when a row matching the key is already present
@@ -213,10 +214,22 @@ def insert_findings(assessment_id: int, scan_id: str, tool: str,
 
     Each new finding is also enriched (static catalog → LLM → stub) and its
     enrichment_id stamped on the row. The cache means a given finding type
-    is enriched at most once across the whole DB."""
+    is enriched at most once across the whole DB.
+
+    `target` is the scheme://host the scanner ran against. It is used as a
+    last-resort default for `evidence_url` so that downstream validation
+    probes always have a URL to test against. Nikto's "/"-rooted findings,
+    in particular, ship without a URL at all — without this fallback, the
+    Challenge button in the UI would refuse to run any probe on them."""
     sdir = SCANS_DIR / scan_id
     groups: dict[tuple, dict] = {}
     for f in parse_scan(tool, sdir):
+        # Default the evidence URL to the scan target before deduping, so
+        # two findings with the same title but originally-empty URLs
+        # collapse correctly and the inserted row carries something the
+        # validation pipeline can use.
+        if target and not (f.get("evidence_url") or "").strip():
+            f["evidence_url"] = target
         key = _dedup_key(f)
         existing = groups.get(key)
         if existing is None:
@@ -497,7 +510,8 @@ def main() -> int:
                                user_agent=user_agent)
             append_scan_id(aid, scan_id)
             total_findings += insert_findings(aid, scan_id, "testssl",
-                                              endpoint=enrich_endpoint)
+                                              endpoint=enrich_endpoint,
+                                              target=target)
             update(aid, total_findings=total_findings)
 
         for scheme in schemes:
@@ -514,7 +528,8 @@ def main() -> int:
                     scan_id = run_enhanced_testing(target, profile)
                     append_scan_id(aid, scan_id)
                     added = insert_findings(aid, scan_id, "enhanced_testing",
-                                            endpoint=enrich_endpoint)
+                                            endpoint=enrich_endpoint,
+                                            target=target)
                     total_findings += added
                     update(aid, total_findings=total_findings)
                     continue
@@ -525,7 +540,8 @@ def main() -> int:
                                    user_agent=user_agent)
                 append_scan_id(aid, scan_id)
                 added = insert_findings(aid, scan_id, tool,
-                                        endpoint=enrich_endpoint)
+                                        endpoint=enrich_endpoint,
+                                        target=target)
                 total_findings += added
                 update(aid, total_findings=total_findings)
         update(aid, current_step="ingestion complete",
