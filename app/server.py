@@ -1191,7 +1191,7 @@ def assess_start(
     fqdn = re.sub(r"^https?://", "", fqdn).split("/", 1)[0]
     if not fqdn:
         raise HTTPException(400, "fqdn required")
-    if profile not in ("quick", "standard", "thorough"):
+    if profile not in ("quick", "standard", "thorough", "premium"):
         raise HTTPException(400, "invalid profile")
     if llm_tier not in ("none", "basic", "advanced"):
         raise HTTPException(400, "invalid llm_tier")
