@@ -58,16 +58,57 @@ LOGIN_PATHS = (
     "/auth/login",
 )
 
-# (email_template, password) — keep TINY. The agent that nominated this
-# probe specifically called out admin@juice-sh.op/admin123 as the
-# documented Juice Shop default. Add more entries cautiously; each one
-# is a request budget cost across each candidate path.
+# Generic-backbone catalogue. These pairs are documented industry
+# defaults that have been responsible for billions of dollars of
+# losses: stale appliance setups, forgotten dev accounts, default
+# CMS installs, "we'll change it later" deploys. Each pair adds one
+# POST per login path tested.
+#
+# Sourced from CIRT.net default-password DB + the OWASP Top-10
+# default-credential examples + per-vendor research. Vendor-specific
+# pairs (cisco/cisco, weblogic/weblogic1, etc.) live in the SEPARATE
+# auth_vendor_default_credentials probe — that one fingerprints the
+# stack first to avoid hammering 80 cred pairs at every host.
+#
+# Safety controls:
+#  - the probe stops on first success; subsequent pairs are skipped.
+#  - if any login path returns 429 or `Retry-After`, the probe aborts
+#    that path and moves on rather than risk lockout cascades.
+#  - the {host} template is substituted at runtime so admin@<target>
+#    works without a hard-coded domain.
 DEFAULT_CREDENTIALS = (
+    # --- Juice Shop / known seeded ---
     ("admin@juice-sh.op", "admin123"),
-    ("admin@{host}",      "admin123"),    # {host} substituted at probe time
+    # --- email-shaped, generic ---
+    ("admin@{host}",      "admin123"),
+    ("admin@{host}",      "admin"),
+    ("admin@{host}",      "password"),
     ("admin@admin.com",   "admin"),
+    ("admin@example.com", "admin"),
+    ("admin@example.com", "password"),
+    # --- bare-username, generic ---
     ("admin",             "admin"),
+    ("admin",             "password"),
+    ("admin",             "admin123"),
+    ("admin",             "changeme"),
+    ("admin",             "letmein"),
+    ("admin",             "Admin@123"),
+    ("admin",             ""),               # empty password
+    ("administrator",     "administrator"),
     ("administrator",     "password"),
+    ("administrator",     "admin"),
+    # --- root variants (rare on web apps but devastating when present) ---
+    ("root",              "root"),
+    ("root",              "toor"),
+    ("root",              "password"),
+    ("root",              ""),
+    # --- developer / staging leftovers ---
+    ("test",              "test"),
+    ("test",              "test123"),
+    ("guest",             "guest"),
+    ("demo",              "demo"),
+    ("user",              "user"),
+    ("user",              "password"),
 )
 
 # Role-claim names that indicate administrative authority. Different
@@ -163,9 +204,19 @@ class DefaultAdminCredentialsProbe(Probe):
         attempts: list[dict] = []
         confirmed: dict | None = None
 
+        # Lockout-awareness: if a path responds 429 or sends a
+        # `Retry-After`, abort that path immediately. Hammering after a
+        # rate-limit kick can extend lockouts to hours and (worse) lock
+        # out a real admin who happens to be using the same endpoint.
+        # We back off the whole path rather than just the cred — the
+        # rate-limit applies to the endpoint, not the user.
+        path_aborted: set[str] = set()
+
         for path in login_paths:
             url = urljoin(origin, path)
             for email, pw in creds:
+                if path in path_aborted:
+                    break
                 # one POST per (path, cred) pair. The body shape that
                 # works for ~all Express/Rails/Django login endpoints
                 # is JSON with email+password keys.
@@ -179,6 +230,14 @@ class DefaultAdminCredentialsProbe(Probe):
                     "login_path": path, "email": email,
                     "status": r.status, "size": r.size,
                 }
+                # Rate-limit signal — abort this path so we don't pile
+                # on while the server is already telling us to back off.
+                if r.status == 429 or r.headers.get("Retry-After") \
+                        or r.headers.get("retry-after"):
+                    row["aborted_reason"] = "rate-limited (429 / Retry-After)"
+                    attempts.append(row)
+                    path_aborted.add(path)
+                    break
                 if r.status == 200 and r.body:
                     try:
                         doc = json.loads(r.text)

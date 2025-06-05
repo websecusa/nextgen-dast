@@ -423,6 +423,7 @@ ENHANCED_DEFAULT_SEVERITY = {
     "info_verbose_error":              "medium",
     # auth family — high to critical
     "auth_default_admin_credentials":  "critical",
+    "auth_vendor_default_credentials": "critical",
     # config family
     "config_cors_wildcard":            "high",
 }
@@ -436,6 +437,7 @@ ENHANCED_OWASP = {
     "info_metrics_exposed":            "A05:2021-Security_Misconfiguration",
     "info_verbose_error":              "A05:2021-Security_Misconfiguration",
     "auth_default_admin_credentials":  "A07:2021-Identification_and_Authentication_Failures",
+    "auth_vendor_default_credentials": "A07:2021-Identification_and_Authentication_Failures",
     "config_cors_wildcard":            "A05:2021-Security_Misconfiguration",
 }
 

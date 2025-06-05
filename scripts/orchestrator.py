@@ -326,7 +326,11 @@ ENHANCED_DIR = Path("/app/enhanced_testing")
 # here is the explicit audit trail of "yes, this probe is allowed to
 # issue non-GET requests; here's why."
 _PROBES_NEEDING_POST = {
-    "auth_default_admin_credentials": "login (POST /rest/user/login)",
+    "auth_default_admin_credentials":  "generic-default login attempts (POST)",
+    "auth_vendor_default_credentials": "vendor-specific login attempts "
+                                       "(POST/Basic auth across Tomcat, "
+                                       "WordPress, Jenkins, Grafana, "
+                                       "phpMyAdmin, JBoss, Adminer, Kibana)",
 }
 
 
