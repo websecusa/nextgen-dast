@@ -164,6 +164,20 @@ def run_tool(tool: str, target: str, profile: str,
                "--output-dir", str(sdir / "sqlmap"),
                "--level", "2", "--risk", "2", "--smart",
                "--proxy", proxy_url]
+    elif tool == "dalfox":
+        # dalfox is XSS-focused; speedy single-URL crawl + payload fuzz.
+        # JSON output to report.json so findings.parse_dalfox can ingest it.
+        # --silence suppresses the banner; --no-spinner keeps the log clean.
+        # --skip-bav and --skip-mining-dom keep the scan bounded against
+        # large SPAs (Juice Shop's bundle.js takes a long time to mine).
+        cmd = ["dalfox", "url", target,
+               "--format", "json",
+               "--output", str(sdir / "report.json"),
+               "--silence", "--no-spinner",
+               "--proxy", proxy_url,
+               "--skip-bav", "--skip-mining-dom",
+               "--worker", "10",
+               "--timeout", "10"]
     else:
         raise ValueError(f"unknown tool {tool}")
 
