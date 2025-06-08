@@ -421,9 +421,15 @@ ENHANCED_DEFAULT_SEVERITY = {
     "info_swagger_exposed":            "high",
     "info_metrics_exposed":            "medium",
     "info_verbose_error":              "medium",
+    "info_key_material_exposed":       "critical",
     # auth family — high to critical
     "auth_default_admin_credentials":  "critical",
     "auth_vendor_default_credentials": "critical",
+    "auth_sql_login_bypass":           "critical",
+    "auth_nosql_login_bypass":         "critical",
+    "auth_jwt_alg_none":               "critical",
+    # path-traversal / file-disclosure
+    "path_traversal_extension_bypass": "high",
     # config family
     "config_cors_wildcard":            "high",
 }
@@ -438,6 +444,11 @@ ENHANCED_OWASP = {
     "info_verbose_error":              "A05:2021-Security_Misconfiguration",
     "auth_default_admin_credentials":  "A07:2021-Identification_and_Authentication_Failures",
     "auth_vendor_default_credentials": "A07:2021-Identification_and_Authentication_Failures",
+    "auth_sql_login_bypass":           "A03:2021-Injection",
+    "auth_nosql_login_bypass":         "A03:2021-Injection",
+    "auth_jwt_alg_none":               "A07:2021-Identification_and_Authentication_Failures",
+    "info_key_material_exposed":       "A02:2021-Cryptographic_Failures",
+    "path_traversal_extension_bypass": "A01:2021-Broken_Access_Control",
     "config_cors_wildcard":            "A05:2021-Security_Misconfiguration",
 }
 

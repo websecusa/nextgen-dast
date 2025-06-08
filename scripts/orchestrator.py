@@ -345,6 +345,8 @@ _PROBES_NEEDING_POST = {
                                        "(POST/Basic auth across Tomcat, "
                                        "WordPress, Jenkins, Grafana, "
                                        "phpMyAdmin, JBoss, Adminer, Kibana)",
+    "auth_sql_login_bypass":           "SQL injection on login form (POST)",
+    "auth_nosql_login_bypass":         "NoSQL operator-injection on login (POST)",
 }
 
 
