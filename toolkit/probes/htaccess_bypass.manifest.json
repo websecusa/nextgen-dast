@@ -27,8 +27,8 @@
   "request_budget_max": 30,
   "args": {
     "--url": "Target URL the scanner reported (required)",
-    "--cookie": "Cookie header to send unauthenticated comparison against",
-    "--baseline-404": "Optional URL of a guaranteed-404 path on this host, used as the negative-control fingerprint",
-    "--threshold": "Levenshtein-like body similarity (0-1) above which two responses are 'the same'. Default 0.85"
+    "--cookie": "Cookie header sent on EVERY request (auth + anon baselines + variants). Use this when the orchestrator's challenge route resolves a session cookie via auth.form_login_cookie() and the probe should test under that authenticated context.",
+    "--auth-cookie": "Optional separate cookie used ONLY to compare bypass responses against an authenticated baseline (alternative to --cookie when you want to test the bypass anonymously but still know what an auth-success looks like).",
+    "--baseline-404": "Optional URL of a guaranteed-404 path on this host, used as the negative-control fingerprint. If omitted, the probe synthesises one by appending a random suffix to the URL's directory."
   }
 }
