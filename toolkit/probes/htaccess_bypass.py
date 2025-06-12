@@ -191,7 +191,7 @@ class HtaccessBypassProbe(Probe):
         parser.add_argument("--baseline-404",
                             help="URL of a path that should 404 on this host. "
                                  "Used as a negative control. If omitted, "
-                                 "the probe synthesises one.")
+                                 "the probe synthesizes one.")
         parser.add_argument("--auth-cookie",
                             help="Cookie that grants legitimate access. When "
                                  "given, we additionally compare bypass "
