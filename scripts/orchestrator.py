@@ -178,6 +178,32 @@ def run_tool(tool: str, target: str, profile: str,
                "--skip-bav", "--skip-mining-dom",
                "--worker", "10",
                "--timeout", "10"]
+    elif tool == "ffuf":
+        # Content discovery — find admin panels, .git/.env leaks, backup
+        # files, etc. that crawlers miss because they're not linked. Uses
+        # the curated common.txt wordlist baked into the image at
+        # /opt/wordlists/web-content.txt.
+        #
+        # Filtering: -mc 200,301,302,401,403 keeps real-content-or-protected
+        # responses; -fs 0 drops empty bodies. -ac (auto-calibrate) learns
+        # the host's wildcard 200 fingerprint and filters those out so a
+        # site that returns 200 for everything doesn't flood findings.
+        # Rate-limited to be polite (40 req/s) and capped at 4 minutes so
+        # ffuf can't run away on a slow target.
+        target_ffuf = target.rstrip("/") + "/FUZZ"
+        cmd = ["ffuf", "-u", target_ffuf,
+               "-w", "/opt/wordlists/web-content.txt",
+               "-of", "json",
+               "-o", str(sdir / "report.json"),
+               "-mc", "200,301,302,401,403",
+               "-fs", "0",
+               "-ac",
+               "-t", "20",
+               "-rate", "40",
+               "-timeout", "10",
+               "-maxtime", "240",
+               "-x", proxy_url,
+               "-s"]
     else:
         raise ValueError(f"unknown tool {tool}")
 
@@ -316,12 +342,16 @@ def plan_for_profile(profile: str) -> list[str]:
     if profile == "quick":
         return ["testssl", "nuclei"]
     if profile == "thorough":
-        return ["testssl", "nuclei", "nikto", "wapiti"]
+        # ffuf runs first so its discovered paths can inform later passes
+        # (ferent tooling reads the same scan_dir). Even when nothing else
+        # consumes them, the discovered admin/backup/dotfile paths are
+        # high-signal findings on their own.
+        return ["ffuf", "testssl", "nuclei", "nikto", "wapiti"]
     if profile == "premium":
         # Everything thorough does, plus sqlmap + dalfox + the
         # high-fidelity probe pass that targets bugs the traditional
         # tools systematically miss.
-        return ["testssl", "nuclei", "nikto", "wapiti",
+        return ["ffuf", "testssl", "nuclei", "nikto", "wapiti",
                 "sqlmap", "dalfox", "enhanced_testing"]
     return ["testssl", "nuclei", "nikto", "wapiti"]  # standard
 

@@ -523,6 +523,97 @@ def parse_dalfox(scan_dir: Path) -> Iterable[dict]:
         }
 
 
+# ---- ffuf -------------------------------------------------------------------
+#
+# ffuf is a content-discovery fuzzer. Each "result" in its JSON is a path
+# the wordlist found on the target. We emit one finding per path; severity
+# is bumped from the default `info` for paths that match well-known
+# sensitive patterns (.git, .env, admin panels, backups, etc.) so the
+# consolidation phase doesn't have to re-derive that signal from the URL.
+
+# Patterns are matched against the LAST path segment (case-insensitive).
+# Order matters — first match wins, so put the most-severe categories
+# first. Each entry: (compiled regex, severity, title, owasp, cwe).
+_FFUF_SENSITIVE = [
+    # Source-control / dotfile leakage — direct exposure of the
+    # repository or app secrets is critical.
+    (re.compile(r"^\.(git|svn|hg|bzr|env|htpasswd|aws|ssh|npmrc|netrc)\b", re.I),
+     "critical",
+     "Sensitive dotfile/source-control directory exposed",
+     "A05:2021-Security_Misconfiguration", "538"),
+    # Backup files and database dumps.
+    (re.compile(r"\.(bak|backup|old|orig|swp|save|dump|sql|tar|zip|tgz|rar|7z)$", re.I),
+     "high",
+     "Backup or archive file exposed",
+     "A05:2021-Security_Misconfiguration", "530"),
+    # Admin / management consoles.
+    (re.compile(r"(^|/)(admin|administrator|adminer|phpmyadmin|wp-admin|"
+                r"manager|console|dashboard|server-status|server-info|"
+                r"jenkins|grafana|kibana)(/|$)", re.I),
+     "high",
+     "Administrative interface exposed",
+     "A05:2021-Security_Misconfiguration", "284"),
+    # Configuration files served as static content.
+    (re.compile(r"(^|/)(config|conf|settings|web\.config|app\.config|"
+                r"\.htaccess|robots\.txt|sitemap\.xml)(/|$)", re.I),
+     "medium",
+     "Configuration or metadata file exposed",
+     "A05:2021-Security_Misconfiguration", "200"),
+]
+
+
+def _ffuf_classify(url: str) -> tuple[str, str, str, str]:
+    """Classify a discovered path. Returns (severity, title, owasp, cwe).
+    Falls back to a generic info-level finding for paths that don't match
+    any sensitive-pattern category."""
+    # Match against the URL's path component. Strip query/fragment so a
+    # benign /search?q=admin doesn't trip the admin classifier.
+    try:
+        path = url.split("?", 1)[0].split("#", 1)[0]
+    except Exception:
+        path = url
+    for pattern, sev, title, owasp, cwe in _FFUF_SENSITIVE:
+        if pattern.search(path):
+            return sev, title, owasp, cwe
+    return ("info",
+            "Discovered path (content discovery)",
+            "A05:2021-Security_Misconfiguration",
+            "200")
+
+
+def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
+    p = scan_dir / "report.json"
+    if not p.exists():
+        return
+    try:
+        data = json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return
+    # ffuf JSON shape: {"results": [{"url": "...", "status": 301, ...}, ...]}
+    for it in data.get("results", []) or []:
+        url = it.get("url") or ""
+        if not url:
+            continue
+        status = it.get("status")
+        sev, title, owasp, cwe = _ffuf_classify(url)
+        # 401/403 are interesting (something IS there, gated) — keep them
+        # but never let an info-level path with a 401/403 status escape
+        # without that signal in the description.
+        gating = ""
+        if status in (401, 403):
+            gating = f" (HTTP {status} — protected, but exists)"
+        yield {
+            "source_tool": "ffuf",
+            "severity": sev,
+            "title": title,
+            "description": f"{url}{gating}",
+            "owasp_category": owasp,
+            "cwe": cwe,
+            "evidence_url": url,
+            "raw_data": it,
+        }
+
+
 # ---- dispatcher -------------------------------------------------------------
 
 PARSERS = {
@@ -532,6 +623,7 @@ PARSERS = {
     "wapiti":  parse_wapiti,
     "sqlmap":  parse_sqlmap,
     "dalfox":  parse_dalfox,
+    "ffuf":    parse_ffuf,
     "enhanced_testing": parse_enhanced_testing,
 }
 

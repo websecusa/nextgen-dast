@@ -68,6 +68,20 @@ RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
     && chmod +x /usr/local/bin/dalfox \
     && rm /tmp/dalfox.tar.gz
 
+# ffuf — fast web fuzzer (Go binary). Used for content discovery
+# (paths) in the thorough/premium profiles; a curated SecLists wordlist
+# is baked alongside so a registry-image deploy works offline.
+ARG FFUF_VERSION=2.1.0
+RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
+    && curl -sSL -o /tmp/ffuf.tar.gz \
+        "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_${ARCH}.tar.gz" \
+    && tar -xzf /tmp/ffuf.tar.gz -C /usr/local/bin/ ffuf \
+    && chmod +x /usr/local/bin/ffuf \
+    && rm /tmp/ffuf.tar.gz \
+    && mkdir -p /opt/wordlists \
+    && curl -sSL -o /opt/wordlists/web-content.txt \
+        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt"
+
 RUN pip install \
         "mitmproxy==11.1.3" \
         "wapiti3==3.2.4" \
