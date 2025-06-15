@@ -69,8 +69,11 @@ RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
     && rm /tmp/dalfox.tar.gz
 
 # ffuf — fast web fuzzer (Go binary). Used for content discovery
-# (paths) in the thorough/premium profiles; a curated SecLists wordlist
-# is baked alongside so a registry-image deploy works offline.
+# (paths) in the thorough/premium profiles. The wordlist is vendored
+# at toolkit/wordlists/web-content.txt (see toolkit/wordlists/SOURCES.md
+# for provenance) and copied into /opt/wordlists/ below so a fully
+# air-gapped rebuild from this checkout works without network access
+# beyond the ffuf binary itself.
 ARG FFUF_VERSION=2.1.0
 RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
     && curl -sSL -o /tmp/ffuf.tar.gz \
@@ -78,9 +81,8 @@ RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
     && tar -xzf /tmp/ffuf.tar.gz -C /usr/local/bin/ ffuf \
     && chmod +x /usr/local/bin/ffuf \
     && rm /tmp/ffuf.tar.gz \
-    && mkdir -p /opt/wordlists \
-    && curl -sSL -o /opt/wordlists/web-content.txt \
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt"
+    && mkdir -p /opt/wordlists
+COPY toolkit/wordlists/web-content.txt /opt/wordlists/web-content.txt
 
 RUN pip install \
         "mitmproxy==11.1.3" \
