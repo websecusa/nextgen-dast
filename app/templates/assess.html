@@ -5,15 +5,17 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Assess a target</h1>
-<p class="muted">Enter an FQDN. We'll run the per-profile tool set against
-both <code>http://</code> and <code>https://</code>, capture every probe, and
-(in the next iteration) hand the results to the LLM tier you choose for a
-consolidated report.</p>
+<p class="muted">Enter an FQDN, optionally with a port (e.g.
+<code>app.example.com:8443</code>). We'll run the per-profile tool set
+against the schemes you select, capture every probe, and hand the results
+to the LLM tier you choose for a consolidated report. For non-standard
+ports, check only the scheme that actually listens on that port.</p>
 
 <section class="card">
   <form method="post" action="{{ base }}/assess">
     <label>FQDN
-      <input name="fqdn" required placeholder="example.com  /  app.example.com"
+      <input name="fqdn" required
+             placeholder="example.com  /  app.example.com  /  app.example.com:8443"
              autofocus>
     </label>
     <div style="display:flex; gap:1.5em">
