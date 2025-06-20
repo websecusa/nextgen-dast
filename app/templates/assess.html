@@ -18,6 +18,15 @@ ports, check only the scheme that actually listens on that port.</p>
              placeholder="example.com  /  app.example.com  /  app.example.com:8443"
              autofocus>
     </label>
+    {# Optional application identifier — free-form text. Lets the caller
+       tag this assessment against their internal CMDB / Service Now /
+       app catalog ID so finished assessments can be cross-referenced
+       back to the application of record. Indexed in the DB; surfaced
+       on the assessment detail page and on the API responses. #}
+    <label>Application ID <small class="muted">(optional)</small>
+      <input name="application_id" maxlength="128"
+             placeholder="e.g. APP-1234 or your internal catalog ID">
+    </label>
     <div style="display:flex; gap:1.5em">
       <label class="check"><input type="checkbox" name="scan_http" checked> http://</label>
       <label class="check"><input type="checkbox" name="scan_https" checked> https://</label>
@@ -34,8 +43,11 @@ ports, check only the scheme that actually listens on that port.</p>
 
     <label>LLM tier
       <select name="llm_tier">
-        <option value="none">none — scanners only, no LLM</option>
-        <option value="basic" selected>basic — roll-up + executive summary (~$5–10 / scan)</option>
+        {# Default selection is `none`. Pulling in the LLM is opt-in so a
+           caller never accrues LLM cost (or sends scan output off-box)
+           without explicitly choosing a tier. #}
+        <option value="none" selected>none — scanners only, no LLM</option>
+        <option value="basic">basic — roll-up + executive summary (~$5–10 / scan)</option>
         <option value="advanced">advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
       </select>
     </label>

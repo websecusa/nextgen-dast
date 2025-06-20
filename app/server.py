@@ -28,6 +28,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+import api as api_mod
 import auth as auth_mod
 import branding as branding_mod
 import cleanup as cleanup_mod
@@ -484,10 +485,18 @@ app = FastAPI(title="Pentest Proxy", root_path=ROOT_PATH, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 templates = Jinja2Templates(directory="/app/templates")
 
+# RESTful API (token-auth + IP whitelist). See app/api.py for the full
+# surface description. Mounted at /api/v1; the auth middleware below
+# whitelists /api/ so the router enforces its own token-based auth
+# instead of the cookie-based session check used by the web UI.
+app.include_router(api_mod.router)
+
 
 # ---- auth middleware --------------------------------------------------------
 # Public paths (no login required). Everything else requires a valid session.
-PUBLIC_PATHS = ("/login", "/health", "/static", "/branding/logo")
+# /api/v1 is also listed here because the API surface enforces its OWN token-
+# based authentication (see app/api.py); the session cookie does not apply.
+PUBLIC_PATHS = ("/login", "/health", "/static", "/branding/logo", "/api")
 ADMIN_PATHS = ("/admin",)
 # Routes a readonly user is allowed to POST to (otherwise POST/DELETE/PUT
 # require admin role).
@@ -1176,7 +1185,7 @@ def assess_page(request: Request):
 def assess_start(
     fqdn: str = Form(...),
     profile: str = Form("standard"),
-    llm_tier: str = Form("basic"),
+    llm_tier: str = Form("none"),
     llm_endpoint_id: str = Form(""),
     user_agent_id: str = Form(""),
     scan_http: Optional[str] = Form(None),
@@ -1184,6 +1193,7 @@ def assess_start(
     creds_username: str = Form(""),
     creds_password: str = Form(""),
     login_url: str = Form(""),
+    application_id: str = Form(""),
 ):
     llm_endpoint_id_i = _opt_int(llm_endpoint_id)
     user_agent_id_i = _opt_int(user_agent_id)
@@ -1195,12 +1205,18 @@ def assess_start(
         raise HTTPException(400, "invalid profile")
     if llm_tier not in ("none", "basic", "advanced"):
         raise HTTPException(400, "invalid llm_tier")
+    # Trim and length-cap the optional caller-supplied application_id. We
+    # don't enforce a format because every customer's CMDB taxonomy is
+    # different — they put in whatever string identifies the app on their
+    # side. Empty string normalises to NULL so the column index stays clean.
+    application_id = (application_id or "").strip()[:128] or None
 
     aid = db.execute(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
-            user_agent_id, creds_username, creds_password, login_url, status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
+            user_agent_id, creds_username, creds_password, login_url,
+            application_id, status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
         (fqdn,
          1 if scan_http else 0,
          1 if scan_https else 0,
@@ -1208,7 +1224,8 @@ def assess_start(
          user_agent_id_i,
          creds_username or None,
          creds_password or None,
-         login_url or None),
+         login_url or None,
+         application_id),
     )
     # spawn detached orchestrator
     log_path = LOGS_DIR / f"orchestrator_{aid}.log"
@@ -1223,8 +1240,8 @@ def assess_start(
 
 @app.get("/assessments", response_class=HTMLResponse)
 def assessments_list(request: Request):
-    rows = (db.query("SELECT id, fqdn, profile, llm_tier, status, "
-                     "total_findings, created_at, finished_at "
+    rows = (db.query("SELECT id, fqdn, application_id, profile, llm_tier, "
+                     "status, total_findings, created_at, finished_at "
                      "FROM assessments ORDER BY id DESC LIMIT 100")
             if db.healthy() else [])
     return templates.TemplateResponse("assessments.html",
@@ -1633,6 +1650,78 @@ def admin_toolkit_page(request: Request):
         "admin/toolkit.html",
         ctx(request, probes=toolkit_mod.list_probes()),
     )
+
+
+# API tokens -----------------------------------------------------------------
+#
+# Issuance/revocation page for the OUI-format REST API tokens. The actual
+# enforcement (header parsing, IP whitelisting, last-used tracking) lives
+# in app/api.py; this is just the management surface so an admin can mint
+# and retire keys without dropping into SQL.
+
+@app.get("/admin/api-tokens", response_class=HTMLResponse)
+def admin_api_tokens_page(request: Request, msg: str = "",
+                          new_token: str = ""):
+    """List existing tokens. `new_token`, when present, is the
+    just-minted plaintext value; we render it once (and only once) so
+    the operator can copy it. It's never persisted server-side beyond
+    the SHA-256 hash."""
+    return templates.TemplateResponse(
+        "admin/api_tokens.html",
+        ctx(request, tokens=api_mod.list_tokens(),
+            msg=msg, new_token=new_token),
+    )
+
+
+@app.post("/admin/api-tokens")
+def admin_api_tokens_create(request: Request,
+                            label: str = Form(""),
+                            allowed_ips: str = Form(""),
+                            notes: str = Form("")):
+    """Mint a new token. Returns straight to the listing page with
+    `new_token` set to the freshly-minted plaintext so the operator
+    can copy it once. Refuses to issue a token without at least one
+    whitelisted IP — fail-closed by design (a token usable from
+    everywhere is too dangerous to mint by accident)."""
+    me = current_user(request) or {}
+    parsed = api_mod.parse_allowed_ips(allowed_ips)
+    if not parsed:
+        return redirect("/admin/api-tokens?msg=allowed_ips+required+%28token+would+be+unusable%29")
+    _tid, plaintext = api_mod.create_token(
+        label=label, allowed_ips=allowed_ips,
+        created_by_user_id=me.get("id"), notes=notes,
+    )
+    return redirect(f"/admin/api-tokens?new_token={plaintext}&msg=token+created+%E2%80%94+copy+it+now")
+
+
+@app.post("/admin/api-tokens/{tid}/disable")
+def admin_api_tokens_disable(tid: int):
+    api_mod.update_token(tid, disabled=True)
+    return redirect("/admin/api-tokens?msg=token+disabled")
+
+
+@app.post("/admin/api-tokens/{tid}/enable")
+def admin_api_tokens_enable(tid: int):
+    api_mod.update_token(tid, disabled=False)
+    return redirect("/admin/api-tokens?msg=token+enabled")
+
+
+@app.post("/admin/api-tokens/{tid}/update")
+def admin_api_tokens_update(tid: int,
+                            label: str = Form(""),
+                            allowed_ips: str = Form(""),
+                            notes: str = Form("")):
+    """Patch label / IP whitelist / notes on an existing token. The
+    token secret itself is never editable; revoke + reissue if
+    rotation is needed."""
+    api_mod.update_token(tid, label=label, allowed_ips=allowed_ips, notes=notes)
+    return redirect("/admin/api-tokens?msg=token+updated")
+
+
+@app.post("/admin/api-tokens/{tid}/delete")
+def admin_api_tokens_delete(tid: int):
+    api_mod.delete_token(tid)
+    return redirect("/admin/api-tokens?msg=token+deleted")
 
 
 # Reports ---------------------------------------------------------------------

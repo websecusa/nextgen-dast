@@ -43,11 +43,15 @@
     <a href="{{ base }}/llm">LLM</a>
     <a href="{{ base }}/user-agents">UAs</a>
     {% if is_admin %}<a href="{{ base }}/admin">Admin</a>{% endif %}
-    <span class="status {% if proxy_running %}on{% else %}off{% endif %}">
-      mitmproxy: {% if proxy_running %}running{% else %}stopped{% endif %}
-    </span>
+    {# The mitmproxy running/stopped pill used to live here. It was
+       redundant with the dedicated /proxy page (which is the canonical
+       place to start, stop, and inspect mitmproxy) and added visual
+       noise to the global navigation. Removed by request. #}
     {% if user %}
-      <span class="status" style="margin-left:.6em">
+      {# margin-left:auto pushes the signed-in pill to the far right of
+         the nav, taking over the role the (now removed) mitmproxy
+         status pill used to play. #}
+      <span class="status" style="margin-left:auto">
         <code>{{ user.username }}</code> · {{ user.role }}
         <form method="post" action="{{ base }}/logout" style="display:inline; margin-left:.6em">
           <button type="submit" style="padding:.1em .5em; font-size:.85em">Sign out</button>

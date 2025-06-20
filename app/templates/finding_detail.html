@@ -5,10 +5,14 @@
 {% extends "base.html" %}
 {% block content %}
 <p><a href="{{ base }}/assessment/{{ f.assessment_id }}">← Assessment #{{ f.assessment_id }}</a></p>
-<h1>
-  <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
-  {{ f.title }}
-</h1>
+{# Severity is rendered above the title, larger and color-coded so it
+   reads first. Color comes from the per-severity CSS variables already
+   defined in the dark theme; size override is inline because <h1>
+   defaults override the .sev font-size set in style.css. #}
+<div class="sev sev-{{ f.severity }}"
+     style="font-size:1.6em; line-height:1; margin-bottom:.15em;
+            letter-spacing:.06em">{{ f.severity }}</div>
+<h1 style="font-size:1.15em; font-weight:700; margin-top:0">{{ f.title }}</h1>
 <p class="muted">
   {{ f.source_tool }}
   {% if f.owasp_category %}· <strong>{{ f.owasp_category }}</strong>{% endif %}

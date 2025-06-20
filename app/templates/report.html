@@ -121,8 +121,32 @@
   .sev-critical, .sev-high, .sev-medium, .sev-low, .sev-info {
          color: {{ pdf.body }}; }
 
+  /* On individual finding cards the severity is the lead signal — read
+     it before the title. Render it noticeably larger than the title and
+     in the per-severity palette so it pops without depending on the
+     left border alone. We scope these overrides to .finding so the
+     smaller inline .sev usage in the heat-map / executive summary
+     keeps its compact form. */
+  .finding .sev-label { display: block; font-size: 14pt;
+                        font-weight: 800; letter-spacing: .06em;
+                        text-transform: uppercase; line-height: 1;
+                        margin-bottom: .15em; }
+  .finding .sev-label.sev-critical { color: {{ pdf.sev_critical }}; }
+  .finding .sev-label.sev-high     { color: {{ pdf.sev_high }}; }
+  .finding .sev-label.sev-medium   { color: {{ pdf.sev_medium }}; }
+  .finding .sev-label.sev-low      { color: {{ pdf.sev_low }}; }
+  .finding .sev-label.sev-info     { color: {{ pdf.sev_info }}; }
+  /* Title sits below the severity, in body color, smaller than the
+     severity by design so the eye lands on the severity first. */
+  .finding .finding-title { font-size: 11pt; font-weight: 700;
+                            color: {{ pdf.body }}; }
+
   /* ---- Modern scorecard ---------------------------------------------- */
-  .scorecard { display: flex; gap: 1em; align-items: stretch;
+  /* `gap` between flex items + an explicit margin-left on the right
+     column give the prose room to breathe next to the grade tile.
+     Without this the body copy hugs the tile border and looks cramped
+     in print, especially on the Overall-grade row. */
+  .scorecard { display: flex; gap: 1.6em; align-items: stretch;
                page-break-inside: avoid; margin: 1.2em 0 1.6em; }
   .scorecard .grade-tile { flex: 0 0 2.4in; padding: 1em 1.2em;
                             border-radius: 8pt; border: 2pt solid #dde2eb;
@@ -134,7 +158,7 @@
                                    line-height: 1; margin: 0; }
   .scorecard .grade-tile .score { font-size: 11pt; color: #555;
                                    margin-top: .4em; }
-  .scorecard .right { flex: 1; padding: .2em 0; }
+  .scorecard .right { flex: 1; padding: .2em 0 .2em .6em; }
   .scorecard .sev-row { display: flex; gap: .4em; margin-top: .3em; }
   .scorecard .sev-row .pip { flex: 1; border: 1px solid #dde2eb;
                               border-radius: 4pt; padding: .5em;
@@ -498,8 +522,10 @@
 
 {% for f in findings %}
 <div class="finding sev-{{ f.severity }}">
-  <h3>
-    <span class="sev sev-{{ f.severity }}">{{ f.severity }}</span>
+  {# Severity is the lead signal: render it on its own line above the
+     title, in the per-severity color, larger than the title text. #}
+  <span class="sev-label sev-{{ f.severity }}">{{ f.severity }}</span>
+  <h3 class="finding-title">
     {{ f.title }}
     {% if f.seen_count and f.seen_count > 1 %}
       <span class="muted small">(seen {{ f.seen_count }}×)</span>

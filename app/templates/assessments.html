@@ -13,13 +13,14 @@
 {% if assessments %}
 <table>
   <thead><tr>
-    <th>ID</th><th>Target</th><th>Profile</th><th>LLM</th>
+    <th>ID</th><th>App</th><th>Target</th><th>Profile</th><th>LLM</th>
     <th>Status</th><th>Findings</th><th>Started</th><th>Finished</th><th></th>
   </tr></thead>
   <tbody>
   {% for a in assessments %}
     <tr>
       <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
+      <td>{% if a.application_id %}<code>{{ a.application_id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td><code>{{ a.fqdn }}</code></td>
       <td><span class="badge">{{ a.profile }}</span></td>
       <td>{{ a.llm_tier }}</td>

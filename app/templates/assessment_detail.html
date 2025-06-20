@@ -8,6 +8,12 @@
 <p>
   <span class="badge">{{ a.profile }}</span>
   <span class="badge">LLM: {{ a.llm_tier }}</span>
+  {# Surface the caller-supplied application identifier next to the
+     other run metadata so reports / handoffs can be cross-referenced
+     against the customer's app catalog. Hidden when not provided. #}
+  {% if a.application_id %}
+    <span class="badge" title="Caller-supplied application identifier">App: {{ a.application_id }}</span>
+  {% endif %}
   <span class="badge {{ a.status }}" id="status">{{ a.status }}</span>
   &nbsp;
   <span class="muted" id="step">{{ a.current_step or "" }}</span>

@@ -87,7 +87,11 @@ Risk score anchors:
   60-79  = exploitable weaknesses present, requires urgent remediation
   80-100 = critical issues likely to lead to compromise; treat as incident
 
-Top priorities should be 3-5 items. Order them by what to fix first. Output only the JSON object."""
+Top priorities should be 3-5 items. Order them by what to fix first.
+
+Punctuation: do NOT use em-dashes ("--", "—") or en-dashes ("–"). Use commas, colons, semicolons, or two separate sentences instead. Use US English spelling (e.g. "artifact", not "artefact").
+
+Output only the JSON object."""
 
 
 CONSOLIDATE_USER_TEMPLATE = """Target: {fqdn}
@@ -225,6 +229,33 @@ def _parse_llm_payload(content: str) -> Optional[dict]:
     return None
 
 
+def _strip_dashes(text: str) -> str:
+    """Replace em-dashes / en-dashes / double-hyphen-as-dash with commas in
+    LLM-produced narrative text. The system prompt forbids these, but
+    models occasionally relapse, so we sanitise the output as well.
+
+    Rules:
+      * U+2014 (em-dash, "—") and U+2013 (en-dash, "–") become ", ",
+        consuming any whitespace that surrounded the dash so we don't
+        leave " , " straddling the punctuation.
+      * The two-character ASCII "--" becomes ", " ONLY when surrounded by
+        word characters (so it doesn't eat list-item dashes or option
+        flags inside example commands the LLM might quote).
+      * Stray double spaces produced by the substitution are collapsed.
+    """
+    if not text:
+        return text
+    # Em / en dash with optional surrounding whitespace -> ", "
+    out = re.sub(r"\s*[—–]\s*", ", ", text)
+    out = re.sub(r"(?<=\w)\s*--\s*(?=\w)", ", ", out)
+    # Collapse runs of whitespace introduced by the substitution. We
+    # preserve newlines so paragraph breaks survive.
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    # ", ," from chained substitutions collapses to a single comma.
+    out = re.sub(r",\s*,", ",", out)
+    return out
+
+
 def _validate_payload(payload: dict) -> dict:
     """Coerce / clamp untrusted LLM output to the expected shape and ranges."""
     score_raw = payload.get("risk_score")
@@ -234,7 +265,7 @@ def _validate_payload(payload: dict) -> dict:
         score = 0
     score = max(0, min(100, score))
 
-    summary = (payload.get("exec_summary") or "").strip()
+    summary = _strip_dashes((payload.get("exec_summary") or "").strip())
     priorities_raw = payload.get("top_priorities") or []
     priorities: list[dict] = []
     if isinstance(priorities_raw, list):
@@ -242,8 +273,8 @@ def _validate_payload(payload: dict) -> dict:
             if not isinstance(p, dict):
                 continue
             priorities.append({
-                "title": (p.get("title") or "").strip()[:200],
-                "rationale": (p.get("rationale") or "").strip()[:500],
+                "title": _strip_dashes((p.get("title") or "").strip())[:200],
+                "rationale": _strip_dashes((p.get("rationale") or "").strip())[:500],
                 "owasp_category": (p.get("owasp_category") or "").strip()[:64],
             })
     return {

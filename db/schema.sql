@@ -156,6 +156,46 @@ UPDATE users SET role='admin' WHERE is_admin = 1 AND role = 'readonly';
 ALTER TABLE assessments MODIFY COLUMN status
   ENUM('queued','running','consolidating','done','error','cancelled','deleting')
   NOT NULL DEFAULT 'queued';
+-- Optional caller-supplied application identifier. Free-form so it can carry
+-- the customer's CMDB / Service Now / internal app catalog ID without us
+-- having to model their taxonomy. Indexed so the assessments list page can
+-- filter by it cheaply.
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS application_id VARCHAR(128);
+ALTER TABLE assessments ADD INDEX IF NOT EXISTS idx_application_id (application_id);
+
+-- ---------------------------------------------------------------------------
+-- REST API tokens
+--
+-- Token format presented to the client is OUI-style: 12 hex octets separated
+-- by colons (e.g. 4E:47:44:A1:B2:C3:D4:E5:F6:07:18:29). The first three
+-- octets are the fixed NGD vendor prefix (4E:47:44 = "NGD"); the remaining
+-- nine octets carry 72 bits of random secret. We store ONLY the SHA-256 hash
+-- of the canonical (uppercase, colon-separated) token so a DB read does not
+-- yield usable credentials. The `prefix` column stores the first six octets
+-- (vendor OUI + first 3 random) so the UI can display "4E:47:44:A1:B2:C3:…"
+-- next to the token row without revealing the secret half.
+--
+-- `allowed_ips` is a comma-separated list of IPs / CIDR ranges. An empty
+-- list means *no source can use this token* (fail-closed) — the issuer
+-- must explicitly whitelist a caller. The API code parses it on every
+-- request and rejects 403 if the source IP doesn't match any entry.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  label VARCHAR(128) NOT NULL,
+  prefix VARCHAR(32) NOT NULL,
+  token_hash CHAR(64) NOT NULL,
+  allowed_ips TEXT NOT NULL,
+  disabled TINYINT(1) NOT NULL DEFAULT 0,
+  last_used_at DATETIME,
+  last_used_ip VARCHAR(64),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by_user_id INT NULL,
+  notes TEXT,
+  KEY idx_token_hash (token_hash),
+  CONSTRAINT fk_apitoken_user FOREIGN KEY (created_by_user_id)
+    REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS findings (
   id INT AUTO_INCREMENT PRIMARY KEY,

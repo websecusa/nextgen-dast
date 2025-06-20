@@ -1,0 +1,1135 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+"""
+RESTful API for nextgen-dast.
+
+Surface
+=======
+Mounted at /api/v1 (under the optional UI_ROOT_PATH prefix).
+
+  POST /api/v1/scans              create an assessment, returns the new scan_id
+  GET  /api/v1/scans              list recent assessments
+  GET  /api/v1/scans/{id}         status + summary of one assessment
+  GET  /api/v1/scans/{id}/results findings, JSON or CSV (?format=csv)
+  GET  /api/v1/openapi.json       OpenAPI 3.0 service definition
+  GET  /api/v1/postman.json       Postman v2.1 collection
+  GET  /api/v1/docs               Swagger UI playground for the API
+  GET  /api/v1/health             liveness probe (no auth)
+
+Authentication
+==============
+Token-based. Tokens are presented in the `Authorization: Bearer <token>`
+header (also accepted: `X-API-Token: <token>`).
+
+Token format is OUI-style (12 hex octets, colon-separated):
+
+    4E:47:44:A1:B2:C3:D4:E5:F6:07:18:29
+    \\______/ \\___________________________/
+       |                |
+       NGD vendor       72 bits of random secret
+       prefix (fixed)
+
+The first three octets ("4E:47:44" = ASCII "NGD") identify the issuing
+product, the remaining nine octets carry the random secret. We store
+ONLY the SHA-256 hash of the canonical (uppercase, colon-separated)
+token plus the first six octets in the clear, so a DB read never yields
+a usable credential.
+
+IP whitelisting
+===============
+Every token row carries an `allowed_ips` list. The list is comma-
+separated and accepts plain IPs (`203.0.113.4`) and CIDR ranges
+(`10.0.0.0/8`). Empty list = fail-closed (no callers permitted). The
+client's source IP must match at least one entry, or the request is
+rejected 403. The client IP is taken from the connection's
+`request.client.host` after consulting the standard reverse-proxy
+headers (`X-Forwarded-For`, `X-Real-IP`) if the deployment puts a
+trusted proxy in front of uvicorn.
+"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import ipaddress
+import json
+import os
+import re
+import secrets
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
+from pydantic import BaseModel, Field
+
+import db
+
+
+# ---------------------------------------------------------------------------
+# Token format helpers
+# ---------------------------------------------------------------------------
+
+# Three-octet vendor prefix burned into every token issued by this product.
+# 4E 47 44 = ASCII "NGD" (nextgen-dast). Choosing a printable ASCII triplet
+# makes tokens self-identifying when seen in logs / proxy traces.
+NGD_OUI_PREFIX = "4E:47:44"
+
+# Total octet count in the token (3 vendor + 9 secret = 12). Each octet
+# is two hex chars separated by colons, so the canonical string length is
+# 12*2 + 11 = 35 characters.
+TOKEN_OCTETS = 12
+TOKEN_SECRET_OCTETS = TOKEN_OCTETS - 3
+
+TOKEN_RE = re.compile(
+    r"^[0-9A-F]{2}(?::[0-9A-F]{2}){" + str(TOKEN_OCTETS - 1) + r"}$"
+)
+
+
+def generate_token() -> str:
+    """Mint a fresh OUI-format API token. Returned in the canonical
+    UPPER:HEX:OCTET format. The first three octets are always the NGD
+    vendor prefix; the remaining nine octets carry 72 bits of secret
+    drawn from `secrets.token_bytes`, which uses the OS CSPRNG."""
+    secret = secrets.token_bytes(TOKEN_SECRET_OCTETS)
+    secret_str = ":".join(f"{b:02X}" for b in secret)
+    return f"{NGD_OUI_PREFIX}:{secret_str}"
+
+
+def normalize_token(raw: str) -> Optional[str]:
+    """Accept tokens regardless of case and of whether the caller used
+    colons, hyphens, or no separators. Returns the canonical
+    UPPERCASE:COLON form, or None if the input cannot be coerced into
+    `TOKEN_OCTETS` valid hex octets.
+    """
+    if not raw:
+        return None
+    s = raw.strip().upper()
+    # Strip any "Bearer " prefix the caller may have left in.
+    if s.lower().startswith("bearer "):
+        s = s[7:].strip().upper()
+    # Allow either separator, or none.
+    s = s.replace("-", "").replace(":", "").replace(" ", "")
+    if len(s) != TOKEN_OCTETS * 2:
+        return None
+    if not re.fullmatch(r"[0-9A-F]+", s):
+        return None
+    canonical = ":".join(s[i:i + 2] for i in range(0, len(s), 2))
+    return canonical if TOKEN_RE.match(canonical) else None
+
+
+def hash_token(token_canonical: str) -> str:
+    """SHA-256 hex digest of the canonical token. Stored in api_tokens.
+    token_hash so the secret never sits in the DB in plaintext."""
+    return hashlib.sha256(token_canonical.encode("ascii")).hexdigest()
+
+
+def token_prefix(token_canonical: str) -> str:
+    """Return the first six octets of a canonical token (vendor prefix
+    + first 3 random octets). Stored in api_tokens.prefix and shown in
+    the management UI so an admin can identify a token at a glance
+    without needing the secret half."""
+    parts = token_canonical.split(":")
+    return ":".join(parts[:6])
+
+
+# ---------------------------------------------------------------------------
+# IP whitelist helpers
+# ---------------------------------------------------------------------------
+
+def parse_allowed_ips(raw: str) -> list[str]:
+    """Split a comma/whitespace-separated allowed-ips field into a clean
+    list. Each entry is validated as either a single IP address or a
+    CIDR range. Invalid entries are dropped (they cannot match anything
+    anyway)."""
+    if not raw:
+        return []
+    out: list[str] = []
+    for piece in re.split(r"[,\s]+", raw.strip()):
+        if not piece:
+            continue
+        try:
+            ipaddress.ip_network(piece, strict=False)
+        except ValueError:
+            continue
+        out.append(piece)
+    return out
+
+
+def ip_allowed(client_ip: str, allowed: list[str]) -> bool:
+    """True if `client_ip` matches at least one entry in `allowed`. An
+    empty `allowed` list always returns False (fail-closed). Any
+    malformed entries are skipped silently."""
+    if not allowed or not client_ip:
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for entry in allowed:
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue
+        if ip_obj in net:
+            return True
+    return False
+
+
+def real_client_ip(request: Request) -> str:
+    """Resolve the caller's source IP. Honors X-Forwarded-For (first
+    address) and X-Real-IP only if the immediate connection is from
+    127.0.0.1 — i.e. a trusted local reverse proxy. Direct internet
+    callers can't spoof their IP this way because the immediate hop
+    won't be loopback."""
+    direct = request.client.host if request.client else ""
+    if direct in ("127.0.0.1", "::1"):
+        xff = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if xff:
+            return xff
+        xri = request.headers.get("x-real-ip", "").strip()
+        if xri:
+            return xri
+    return direct
+
+
+# ---------------------------------------------------------------------------
+# Token authentication
+# ---------------------------------------------------------------------------
+
+def authenticate_request(request: Request,
+                         authorization: Optional[str],
+                         x_api_token: Optional[str]) -> dict:
+    """Resolve the bearer token + caller IP into an api_tokens row.
+    Raises HTTPException(401/403) on any failure. On success returns the
+    full token row and updates last_used_{at,ip} so admins can see
+    which keys are live."""
+    # Accept either header. Authorization wins because it is the
+    # convention; X-API-Token is provided as a convenience for clients
+    # that can't override Authorization (e.g. some chained proxies).
+    raw = ""
+    if authorization:
+        raw = authorization.strip()
+    elif x_api_token:
+        raw = x_api_token.strip()
+    if not raw:
+        raise HTTPException(401, "missing API token")
+    canonical = normalize_token(raw)
+    if not canonical:
+        raise HTTPException(401, "malformed API token")
+    if not canonical.startswith(NGD_OUI_PREFIX + ":"):
+        # Fast reject for tokens that don't carry the NGD vendor prefix.
+        raise HTTPException(401, "token vendor prefix not recognised")
+    row = db.query_one(
+        "SELECT * FROM api_tokens WHERE token_hash = %s LIMIT 1",
+        (hash_token(canonical),))
+    if not row or row.get("disabled"):
+        raise HTTPException(401, "invalid or disabled API token")
+    allowed = parse_allowed_ips(row.get("allowed_ips") or "")
+    client_ip = real_client_ip(request)
+    if not ip_allowed(client_ip, allowed):
+        # Per the requirements: a token is ONLY usable from its
+        # whitelisted IPs. The error names the IP so the operator can
+        # add it cleanly without trial and error.
+        raise HTTPException(403,
+            f"source IP {client_ip!r} is not whitelisted for this token")
+    db.execute(
+        "UPDATE api_tokens SET last_used_at = %s, last_used_ip = %s "
+        "WHERE id = %s",
+        (datetime.now(timezone.utc).replace(tzinfo=None),
+         client_ip[:64], row["id"]),
+    )
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Token management (used by the admin UI in server.py)
+# ---------------------------------------------------------------------------
+
+def list_tokens() -> list[dict]:
+    """Return all tokens for the management page. Never returns the
+    secret half (it's not stored). `prefix` is sufficient to identify a
+    row visually."""
+    return db.query(
+        "SELECT id, label, prefix, allowed_ips, disabled, "
+        "last_used_at, last_used_ip, created_at, notes "
+        "FROM api_tokens ORDER BY id DESC")
+
+
+def create_token(label: str, allowed_ips: str,
+                 created_by_user_id: Optional[int] = None,
+                 notes: str = "") -> tuple[int, str]:
+    """Mint and persist a new token. Returns (id, plaintext_token). The
+    plaintext is only available at this moment, ever; the caller MUST
+    show it to the operator immediately and then forget it."""
+    label = (label or "").strip()[:128] or "unnamed"
+    allowed = parse_allowed_ips(allowed_ips or "")
+    token = generate_token()
+    tid = db.execute(
+        "INSERT INTO api_tokens "
+        "(label, prefix, token_hash, allowed_ips, created_by_user_id, notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (label, token_prefix(token), hash_token(token),
+         ",".join(allowed), created_by_user_id, (notes or "").strip()[:2000]),
+    )
+    return tid, token
+
+
+def update_token(token_id: int, *, allowed_ips: Optional[str] = None,
+                 disabled: Optional[bool] = None,
+                 label: Optional[str] = None,
+                 notes: Optional[str] = None) -> None:
+    """Patch a token row. Each field is optional; pass only what changes."""
+    sets: list[str] = []
+    params: list[Any] = []
+    if allowed_ips is not None:
+        sets.append("allowed_ips = %s")
+        params.append(",".join(parse_allowed_ips(allowed_ips)))
+    if disabled is not None:
+        sets.append("disabled = %s")
+        params.append(1 if disabled else 0)
+    if label is not None:
+        sets.append("label = %s")
+        params.append((label or "").strip()[:128] or "unnamed")
+    if notes is not None:
+        sets.append("notes = %s")
+        params.append((notes or "").strip()[:2000])
+    if not sets:
+        return
+    params.append(int(token_id))
+    db.execute(f"UPDATE api_tokens SET {', '.join(sets)} WHERE id = %s",
+               params)
+
+
+def delete_token(token_id: int) -> None:
+    db.execute("DELETE FROM api_tokens WHERE id = %s", (int(token_id),))
+
+
+# ---------------------------------------------------------------------------
+# Pydantic request / response models
+# ---------------------------------------------------------------------------
+
+class CreateScanRequest(BaseModel):
+    """Body of POST /api/v1/scans. `fqdn` is the only required field;
+    everything else mirrors defaults from the web /assess form."""
+    fqdn: str = Field(..., examples=["app.example.com",
+                                     "app.example.com:8443"])
+    application_id: Optional[str] = Field(
+        None, max_length=128,
+        description="Caller-supplied identifier for the application "
+                    "under test (free-form, e.g. CMDB ID).",
+        examples=["APP-1234"])
+    profile: str = Field(
+        "standard",
+        description="Scan profile: quick | standard | thorough | premium",
+        examples=["standard"])
+    llm_tier: str = Field(
+        "none",
+        description="LLM analysis tier: none | basic | advanced",
+        examples=["none"])
+    scan_http: bool = Field(True, description="Probe http:// URLs")
+    scan_https: bool = Field(True, description="Probe https:// URLs")
+    llm_endpoint_id: Optional[int] = Field(
+        None, description="Specific LLM endpoint id (else default)")
+    user_agent_id: Optional[int] = Field(
+        None, description="User-Agent profile id (else default)")
+    creds_username: Optional[str] = Field(
+        None, description="Application username for authenticated scan")
+    creds_password: Optional[str] = Field(
+        None, description="Application password for authenticated scan")
+    login_url: Optional[str] = Field(
+        None, description="Form-POST login URL (used with creds)")
+
+
+class CreateScanResponse(BaseModel):
+    """Echoed back from POST /api/v1/scans."""
+    scan_id: int
+    fqdn: str
+    application_id: Optional[str] = None
+    status: str
+    profile: str
+    llm_tier: str
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
+
+router = APIRouter(prefix="/api/v1", tags=["nextgen-dast"])
+
+LOGS_DIR = Path("/data/logs")
+
+
+def _opt_int(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _normalize_fqdn(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = re.sub(r"^https?://", "", s).split("/", 1)[0]
+    return s
+
+
+def _serialize_assessment(a: dict) -> dict:
+    """Coerce a DB row into a JSON-serialisable dict. datetime fields
+    become ISO 8601 strings; integer / null fields pass through."""
+    out: dict[str, Any] = {}
+    for k, v in a.items():
+        if hasattr(v, "isoformat"):
+            out[k] = v.isoformat()
+        elif isinstance(v, (bytes, bytearray)):
+            out[k] = v.decode("utf-8", "replace")
+        else:
+            out[k] = v
+    return out
+
+
+def _public_assessment_fields(a: dict) -> dict:
+    """Whitelisted subset of the assessments row exposed to API callers.
+    We deliberately omit credentials and worker pids."""
+    s = _serialize_assessment(a)
+    keep = ("id", "fqdn", "application_id", "scan_http", "scan_https",
+            "profile", "llm_tier", "status", "current_step",
+            "scan_ids", "total_findings", "risk_score",
+            "exec_summary", "llm_cost_usd", "llm_in_tokens",
+            "llm_out_tokens", "error_text",
+            "created_at", "started_at", "finished_at")
+    return {k: s.get(k) for k in keep}
+
+
+def _spawn_orchestrator(aid: int) -> None:
+    """Detached orchestrator subprocess, identical to the web /assess
+    flow. Stdout/stderr land in /data/logs/orchestrator_<id>.log so the
+    caller can inspect them after the fact."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOGS_DIR / f"orchestrator_{aid}.log"
+    log_fh = open(log_path, "ab", buffering=0)
+    subprocess.Popen(
+        ["python", "-m", "scripts.orchestrator", str(aid)],
+        stdout=log_fh, stderr=subprocess.STDOUT,
+        start_new_session=True, cwd="/app",
+    )
+
+
+# ---- Auth dependency -------------------------------------------------------
+#
+# We use a small helper (not a FastAPI dependency) so the route bodies stay
+# readable and so the same middleware exposes both header names in the
+# OpenAPI definition.
+
+def _require_token(request: Request,
+                   authorization: Optional[str],
+                   x_api_token: Optional[str]) -> dict:
+    return authenticate_request(request, authorization, x_api_token)
+
+
+# ---- Routes ----------------------------------------------------------------
+
+@router.get("/health", summary="Liveness probe (no auth)")
+def api_health():
+    return {"ok": True, "service": "nextgen-dast", "version": "2.1.1"}
+
+
+@router.post("/scans", response_model=CreateScanResponse,
+             status_code=201, summary="Create a new scan")
+def api_create_scan(
+    body: CreateScanRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Queue a new assessment. The orchestrator runs detached, so this
+    endpoint returns immediately with the scan id. Poll
+    `GET /api/v1/scans/{id}` for status, then
+    `GET /api/v1/scans/{id}/results` once the status is `done`."""
+    _require_token(request, authorization, x_api_token)
+    fqdn = _normalize_fqdn(body.fqdn)
+    if not fqdn:
+        raise HTTPException(400, "fqdn required")
+    if body.profile not in ("quick", "standard", "thorough", "premium"):
+        raise HTTPException(400, "invalid profile")
+    if body.llm_tier not in ("none", "basic", "advanced"):
+        raise HTTPException(400, "invalid llm_tier")
+    application_id = (body.application_id or "").strip()[:128] or None
+    aid = db.execute(
+        """INSERT INTO assessments
+           (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
+            user_agent_id, creds_username, creds_password, login_url,
+            application_id, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
+        (fqdn,
+         1 if body.scan_http else 0,
+         1 if body.scan_https else 0,
+         body.profile, body.llm_tier,
+         _opt_int(body.llm_endpoint_id),
+         _opt_int(body.user_agent_id),
+         (body.creds_username or None),
+         (body.creds_password or None),
+         (body.login_url or None),
+         application_id),
+    )
+    _spawn_orchestrator(aid)
+    row = db.query_one(
+        "SELECT id, fqdn, application_id, status, profile, llm_tier, "
+        "created_at FROM assessments WHERE id = %s", (aid,))
+    return JSONResponse(status_code=201, content={
+        "scan_id": row["id"],
+        "fqdn": row["fqdn"],
+        "application_id": row.get("application_id"),
+        "status": row["status"],
+        "profile": row["profile"],
+        "llm_tier": row["llm_tier"],
+        "created_at": row["created_at"].isoformat()
+            if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+    })
+
+
+@router.get("/scans", summary="List recent scans")
+def api_list_scans(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    application_id: Optional[str] = Query(
+        None, description="Filter by caller-supplied application_id"),
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Return up to `limit` recent assessments (newest first). Optional
+    `application_id` filter so a caller can scope to scans they
+    submitted for a particular application."""
+    _require_token(request, authorization, x_api_token)
+    where = ""
+    params: list[Any] = []
+    if application_id:
+        where = "WHERE application_id = %s"
+        params.append(application_id.strip()[:128])
+    params.append(int(limit))
+    rows = db.query(
+        f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
+        f"total_findings, risk_score, created_at, started_at, finished_at "
+        f"FROM assessments {where} ORDER BY id DESC LIMIT %s",
+        params)
+    return {"scans": [_serialize_assessment(r) for r in rows]}
+
+
+@router.get("/scans/{scan_id}", summary="Status of one scan")
+def api_get_scan(
+    scan_id: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    _require_token(request, authorization, x_api_token)
+    a = db.query_one("SELECT * FROM assessments WHERE id = %s", (scan_id,))
+    if not a:
+        raise HTTPException(404, f"no scan with id {scan_id}")
+    return _public_assessment_fields(a)
+
+
+def _findings_for(scan_id: int) -> list[dict]:
+    return db.query(
+        "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
+        "cwe, cvss, title, description, evidence_url, evidence_method, "
+        "remediation, status, "
+        "COALESCE(validation_status, 'unvalidated') AS validation_status, "
+        "COALESCE(seen_count, 1) AS seen_count, "
+        "created_at "
+        "FROM findings WHERE assessment_id = %s "
+        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
+        (scan_id,))
+
+
+@router.get("/scans/{scan_id}/results",
+            summary="Findings for a scan, JSON or CSV")
+def api_scan_results(
+    scan_id: int,
+    request: Request,
+    format: str = Query("json", pattern="^(json|csv)$"),
+    include_false_positives: bool = Query(
+        False, description="Include findings the analyst marked as false positives"),
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Pull every finding produced by the assessment. Supports `format=json`
+    (default) and `format=csv`. CSV is RFC 4180-compliant: comma
+    delimiter, double-quote quoting, CRLF line endings."""
+    _require_token(request, authorization, x_api_token)
+    a = db.query_one("SELECT id, fqdn, application_id, profile, status, "
+                     "total_findings, finished_at "
+                     "FROM assessments WHERE id = %s", (scan_id,))
+    if not a:
+        raise HTTPException(404, f"no scan with id {scan_id}")
+    rows = _findings_for(scan_id)
+    if not include_false_positives:
+        rows = [r for r in rows if r.get("status") != "false_positive"]
+
+    if format == "csv":
+        buf = io.StringIO()
+        # The same header set, in the same order, gets emitted regardless
+        # of how many findings exist, so the CSV is loadable into BI
+        # tools without sniffing.
+        cols = ["scan_id", "application_id", "finding_id", "severity",
+                "source_tool", "owasp_category", "cwe", "cvss", "title",
+                "evidence_url", "evidence_method", "validation_status",
+                "status", "seen_count", "remediation", "description",
+                "created_at"]
+        writer = csv.writer(buf, dialect="excel")
+        writer.writerow(cols)
+        for f in rows:
+            writer.writerow([
+                a["id"], a.get("application_id") or "",
+                f["id"], f["severity"], f["source_tool"],
+                f.get("owasp_category") or "", f.get("cwe") or "",
+                f.get("cvss") or "", f.get("title") or "",
+                f.get("evidence_url") or "", f.get("evidence_method") or "",
+                f.get("validation_status") or "", f.get("status") or "",
+                f.get("seen_count") or 1, f.get("remediation") or "",
+                (f.get("description") or "").replace("\r", " ").replace("\n", " "),
+                f["created_at"].isoformat() if hasattr(f.get("created_at"), "isoformat")
+                    else str(f.get("created_at") or ""),
+            ])
+        filename = f"scan-{scan_id}-results.csv"
+        return PlainTextResponse(
+            buf.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    return {
+        "scan": _public_assessment_fields(a),
+        "findings": [_serialize_assessment(r) for r in rows],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Service definitions: OpenAPI + Postman
+# ---------------------------------------------------------------------------
+
+def _api_base_url(request: Request) -> str:
+    """Build the externally-visible base URL for the API. Honors the
+    UI_ROOT_PATH prefix (e.g. `/test`) so the OpenAPI / Postman
+    definitions are clickable straight from the playground."""
+    root = os.environ.get("UI_ROOT_PATH", "").rstrip("/")
+    scheme = request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    return f"{scheme}://{host}{root}"
+
+
+@router.get("/openapi.json", summary="OpenAPI 3.0 service definition")
+def api_openapi(request: Request):
+    """Self-contained OpenAPI 3.0 doc. We build it by hand (rather than
+    relying on FastAPI's auto-generator on the parent app) so we can
+    guarantee the file describes ONLY the /api/v1 surface and nothing
+    on the web UI side. No auth required to fetch the definition; the
+    operator may want to wire it into Postman/Swagger before they have
+    a token."""
+    base = _api_base_url(request)
+    return _openapi_doc(base)
+
+
+@router.get("/postman.json", summary="Postman v2.1 collection")
+def api_postman(request: Request):
+    """Postman collection mirroring the OpenAPI doc. Importable into
+    Postman Desktop or postman.com directly. Sets the `apiToken`
+    collection variable so the operator only edits one place to use
+    every request."""
+    base = _api_base_url(request)
+    return _postman_collection(base)
+
+
+@router.get("/docs", response_class=HTMLResponse,
+            summary="Swagger UI playground")
+def api_docs(request: Request):
+    """Swagger UI hosted from this service. Pulls the OpenAPI doc from
+    `./openapi.json` (relative path) so it works correctly under the
+    UI_ROOT_PATH prefix without server-side knowledge of the prefix.
+
+    Swagger UI assets are pulled from cdn.jsdelivr.net. If your
+    deployment is air-gapped, vendor the assets next to `style.css` and
+    swap the two URLs below."""
+    return HTMLResponse(_swagger_ui_html())
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI document builder
+# ---------------------------------------------------------------------------
+
+def _openapi_doc(base_url: str) -> dict:
+    """Hand-rolled OpenAPI 3.0.3 document. Mirrors the routes above."""
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "nextgen-dast API",
+            "version": "2.1.1",
+            "description":
+                "RESTful interface to nextgen-dast. All endpoints other "
+                "than /health require an OUI-format token in the "
+                "`Authorization: Bearer …` header. Tokens are restricted "
+                "to a whitelist of source IPs configured by the issuing "
+                "admin.",
+            "contact": {
+                "name": "Tim Rice",
+                "email": "tim.j.rice@hackrange.com",
+            },
+        },
+        "servers": [{"url": base_url, "description": "this deployment"}],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "OUI",
+                    "description":
+                        "12-octet OUI-format token, e.g. "
+                        "`4E:47:44:A1:B2:C3:D4:E5:F6:07:18:29`. "
+                        "Issued via the /admin/api-tokens page.",
+                },
+                "xApiToken": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Token",
+                    "description": "Alternative to Authorization: Bearer.",
+                },
+            },
+            "schemas": _openapi_schemas(),
+        },
+        "security": [{"bearerAuth": []}, {"xApiToken": []}],
+        "paths": _openapi_paths(),
+    }
+
+
+def _openapi_schemas() -> dict:
+    return {
+        "CreateScanRequest": {
+            "type": "object",
+            "required": ["fqdn"],
+            "properties": {
+                "fqdn":             {"type": "string",
+                                     "example": "app.example.com"},
+                "application_id":   {"type": "string", "maxLength": 128,
+                                     "example": "APP-1234",
+                                     "description":
+                                         "Optional caller-supplied app "
+                                         "identifier (CMDB ID, etc.)."},
+                "profile":          {"type": "string",
+                                     "enum": ["quick", "standard",
+                                              "thorough", "premium"],
+                                     "default": "standard"},
+                "llm_tier":         {"type": "string",
+                                     "enum": ["none", "basic", "advanced"],
+                                     "default": "none"},
+                "scan_http":        {"type": "boolean", "default": True},
+                "scan_https":       {"type": "boolean", "default": True},
+                "llm_endpoint_id":  {"type": "integer", "nullable": True},
+                "user_agent_id":    {"type": "integer", "nullable": True},
+                "creds_username":   {"type": "string", "nullable": True},
+                "creds_password":   {"type": "string", "nullable": True,
+                                     "format": "password"},
+                "login_url":        {"type": "string", "nullable": True,
+                                     "format": "uri"},
+            },
+        },
+        "CreateScanResponse": {
+            "type": "object",
+            "properties": {
+                "scan_id":        {"type": "integer"},
+                "fqdn":           {"type": "string"},
+                "application_id": {"type": "string", "nullable": True},
+                "status":         {"type": "string"},
+                "profile":        {"type": "string"},
+                "llm_tier":       {"type": "string"},
+                "created_at":     {"type": "string", "format": "date-time"},
+            },
+        },
+        "ScanStatus": {
+            "type": "object",
+            "properties": {
+                "id":                {"type": "integer"},
+                "fqdn":              {"type": "string"},
+                "application_id":    {"type": "string", "nullable": True},
+                "status":            {"type": "string",
+                                      "enum": ["queued", "running",
+                                               "consolidating", "done",
+                                               "error", "cancelled",
+                                               "deleting"]},
+                "current_step":      {"type": "string", "nullable": True},
+                "profile":           {"type": "string"},
+                "llm_tier":          {"type": "string"},
+                "scan_ids":          {"type": "string", "nullable": True},
+                "total_findings":    {"type": "integer", "nullable": True},
+                "risk_score":        {"type": "integer", "nullable": True},
+                "exec_summary":      {"type": "string", "nullable": True},
+                "llm_cost_usd":      {"type": "number", "nullable": True},
+                "llm_in_tokens":     {"type": "integer", "nullable": True},
+                "llm_out_tokens":    {"type": "integer", "nullable": True},
+                "error_text":        {"type": "string", "nullable": True},
+                "created_at":        {"type": "string", "format": "date-time"},
+                "started_at":        {"type": "string", "format": "date-time",
+                                      "nullable": True},
+                "finished_at":       {"type": "string", "format": "date-time",
+                                      "nullable": True},
+            },
+        },
+        "Finding": {
+            "type": "object",
+            "properties": {
+                "id":                {"type": "integer"},
+                "source_tool":       {"type": "string"},
+                "source_scan_id":    {"type": "string"},
+                "severity":          {"type": "string",
+                                      "enum": ["critical", "high",
+                                               "medium", "low", "info"]},
+                "owasp_category":    {"type": "string", "nullable": True},
+                "cwe":               {"type": "string", "nullable": True},
+                "cvss":              {"type": "string", "nullable": True},
+                "title":             {"type": "string"},
+                "description":       {"type": "string", "nullable": True},
+                "evidence_url":      {"type": "string", "nullable": True},
+                "evidence_method":   {"type": "string", "nullable": True},
+                "remediation":       {"type": "string", "nullable": True},
+                "status":            {"type": "string"},
+                "validation_status": {"type": "string"},
+                "seen_count":        {"type": "integer"},
+                "created_at":        {"type": "string", "format": "date-time"},
+            },
+        },
+        "ScanResults": {
+            "type": "object",
+            "properties": {
+                "scan":     {"$ref": "#/components/schemas/ScanStatus"},
+                "findings": {"type": "array",
+                             "items": {"$ref": "#/components/schemas/Finding"}},
+            },
+        },
+        "ScanList": {
+            "type": "object",
+            "properties": {
+                "scans": {"type": "array",
+                          "items": {"$ref": "#/components/schemas/ScanStatus"}},
+            },
+        },
+        "Error": {
+            "type": "object",
+            "properties": {
+                "detail": {"type": "string"},
+            },
+        },
+    }
+
+
+def _openapi_paths() -> dict:
+    err_responses = {
+        "401": {"description": "missing or invalid token",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Error"}}}},
+        "403": {"description": "source IP not whitelisted for this token",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Error"}}}},
+        "404": {"description": "no such scan",
+                "content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Error"}}}},
+    }
+    return {
+        "/api/v1/health": {
+            "get": {
+                "summary": "Liveness probe (no auth required)",
+                "security": [],
+                "responses": {
+                    "200": {"description": "ok",
+                            "content": {"application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "ok": {"type": "boolean"},
+                                        "service": {"type": "string"},
+                                        "version": {"type": "string"},
+                                    },
+                                }}}},
+                },
+            },
+        },
+        "/api/v1/scans": {
+            "post": {
+                "summary": "Create a new scan",
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/CreateScanRequest"}}},
+                },
+                "responses": {
+                    "201": {"description": "scan queued",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/CreateScanResponse"}}}},
+                    **err_responses,
+                },
+            },
+            "get": {
+                "summary": "List recent scans",
+                "parameters": [
+                    {"name": "limit", "in": "query",
+                     "schema": {"type": "integer", "default": 50,
+                                "minimum": 1, "maximum": 500}},
+                    {"name": "application_id", "in": "query",
+                     "schema": {"type": "string"},
+                     "description": "Filter by application_id"},
+                ],
+                "responses": {
+                    "200": {"description": "scan list",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/ScanList"}}}},
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/scans/{scan_id}": {
+            "get": {
+                "summary": "Status of one scan",
+                "parameters": [
+                    {"name": "scan_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                ],
+                "responses": {
+                    "200": {"description": "status",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/ScanStatus"}}}},
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/scans/{scan_id}/results": {
+            "get": {
+                "summary": "Findings for a scan, JSON or CSV",
+                "parameters": [
+                    {"name": "scan_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                    {"name": "format", "in": "query",
+                     "schema": {"type": "string",
+                                "enum": ["json", "csv"], "default": "json"}},
+                    {"name": "include_false_positives", "in": "query",
+                     "schema": {"type": "boolean", "default": False}},
+                ],
+                "responses": {
+                    "200": {
+                        "description": "findings",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ScanResults"}},
+                            "text/csv": {
+                                "schema": {"type": "string",
+                                           "format": "binary"}},
+                        },
+                    },
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/openapi.json": {
+            "get": {
+                "summary": "OpenAPI 3.0 service definition",
+                "security": [],
+                "responses": {"200": {"description": "openapi doc"}},
+            },
+        },
+        "/api/v1/postman.json": {
+            "get": {
+                "summary": "Postman v2.1 collection",
+                "security": [],
+                "responses": {"200": {"description": "postman collection"}},
+            },
+        },
+        "/api/v1/docs": {
+            "get": {
+                "summary": "Swagger UI playground",
+                "security": [],
+                "responses": {"200": {"description": "html"}},
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Postman collection builder
+# ---------------------------------------------------------------------------
+
+def _postman_collection(base_url: str) -> dict:
+    """Postman v2.1 collection. Importing this in Postman creates one
+    folder with five requests; the operator only needs to set the
+    `apiToken` collection variable to be ready to call every endpoint."""
+    coll_id = "4e474400-2111-4dad-9eef-nextgendast21"
+    auth_block = {
+        "type": "bearer",
+        "bearer": [
+            {"key": "token", "value": "{{apiToken}}", "type": "string"},
+        ],
+    }
+    def url(path: str, query: Optional[list[dict]] = None) -> dict:
+        full = f"{base_url}{path}"
+        item = {"raw": full, "host": [base_url],
+                "path": [p for p in path.lstrip("/").split("/") if p]}
+        if query:
+            item["query"] = query
+            item["raw"] = full + "?" + "&".join(
+                f"{q['key']}={q.get('value','')}" for q in query)
+        return item
+
+    return {
+        "info": {
+            "_postman_id": coll_id,
+            "name": "nextgen-dast 2.1.1",
+            "description": (
+                "RESTful interface to the nextgen-dast scanner. Set "
+                "the `apiToken` collection variable to your OUI-format "
+                "token, then run any request. Tokens are restricted "
+                "to whitelisted source IPs by the issuing admin."),
+            "schema":
+                "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        },
+        "auth": auth_block,
+        "variable": [
+            {"key": "apiToken",
+             "value": "4E:47:44:00:00:00:00:00:00:00:00:00",
+             "type": "string"},
+            {"key": "baseUrl", "value": base_url, "type": "string"},
+        ],
+        "item": [
+            {
+                "name": "Health (no auth)",
+                "request": {
+                    "method": "GET", "auth": {"type": "noauth"},
+                    "header": [], "url": url("/api/v1/health"),
+                },
+            },
+            {
+                "name": "Create scan",
+                "request": {
+                    "method": "POST", "header": [
+                        {"key": "Content-Type", "value": "application/json"}],
+                    "body": {
+                        "mode": "raw",
+                        "raw": json.dumps({
+                            "fqdn": "app.example.com",
+                            "application_id": "APP-1234",
+                            "profile": "standard",
+                            "llm_tier": "none",
+                            "scan_http": True,
+                            "scan_https": True,
+                        }, indent=2),
+                        "options": {"raw": {"language": "json"}},
+                    },
+                    "url": url("/api/v1/scans"),
+                },
+            },
+            {
+                "name": "List scans",
+                "request": {
+                    "method": "GET", "header": [],
+                    "url": url("/api/v1/scans",
+                               [{"key": "limit", "value": "20"}]),
+                },
+            },
+            {
+                "name": "Get scan status",
+                "request": {
+                    "method": "GET", "header": [],
+                    "url": url("/api/v1/scans/1"),
+                    "description":
+                        "Replace the trailing 1 with the scan_id "
+                        "echoed by Create scan.",
+                },
+            },
+            {
+                "name": "Scan results (JSON)",
+                "request": {
+                    "method": "GET", "header": [],
+                    "url": url("/api/v1/scans/1/results",
+                               [{"key": "format", "value": "json"}]),
+                },
+            },
+            {
+                "name": "Scan results (CSV)",
+                "request": {
+                    "method": "GET", "header": [],
+                    "url": url("/api/v1/scans/1/results",
+                               [{"key": "format", "value": "csv"}]),
+                },
+            },
+            {
+                "name": "OpenAPI definition (no auth)",
+                "request": {
+                    "method": "GET", "auth": {"type": "noauth"},
+                    "header": [], "url": url("/api/v1/openapi.json"),
+                },
+            },
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Swagger UI playground
+# ---------------------------------------------------------------------------
+
+def _swagger_ui_html() -> str:
+    """Static HTML page that loads Swagger UI from a CDN and points it
+    at our OpenAPI doc. The "Try it out" button on each operation does
+    the live API call straight from this page, satisfying the
+    requirement for an in-product playground.
+
+    Why a CDN? The image already runs WeasyPrint + every scanner; we
+    don't need to ship 400 KB of swagger-ui-dist in addition. Replace
+    the two CDN URLs with `/static/...` after vendoring if your
+    deployment is air-gapped."""
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>nextgen-dast API playground</title>
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .topbar { display: none; }
+    /* Slim header strip so the operator knows what they're looking at. */
+    .ngd-banner {
+      background: #1b232b; color: #d8dee5;
+      padding: .8em 1.2em; font: 600 14px/1.4 -apple-system, system-ui,
+        "Segoe UI", sans-serif;
+    }
+    .ngd-banner small { color: #8a96a3; font-weight: 400; margin-left: .8em; }
+    .ngd-banner a { color: #5fb3d7; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="ngd-banner">
+    nextgen-dast 2.1.1 API
+    <small>Live playground.
+      <a href="openapi.json">openapi.json</a> ·
+      <a href="postman.json">postman.json</a></small>
+  </div>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+  <script>
+    // Load the OpenAPI doc by relative URL so the prefix-mounted /test
+    // deployment keeps working without server-side knowledge of the
+    // mount path.
+    window.ui = SwaggerUIBundle({
+      url: 'openapi.json',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      tryItOutEnabled: true,
+      persistAuthorization: true,
+    });
+  </script>
+</body>
+</html>
+"""
