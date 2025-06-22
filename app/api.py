@@ -651,14 +651,22 @@ def api_postman(request: Request):
 @router.get("/docs", response_class=HTMLResponse,
             summary="Swagger UI playground")
 def api_docs(request: Request):
-    """Swagger UI hosted from this service. Pulls the OpenAPI doc from
-    `./openapi.json` (relative path) so it works correctly under the
-    UI_ROOT_PATH prefix without server-side knowledge of the prefix.
+    """Swagger UI playground served from this image.
 
-    Swagger UI assets are pulled from cdn.jsdelivr.net. If your
-    deployment is air-gapped, vendor the assets next to `style.css` and
-    swap the two URLs below."""
-    return HTMLResponse(_swagger_ui_html())
+    Asset strategy:
+      * The Swagger UI CSS + JS bundle are vendored into the docker
+        image at build time (see Dockerfile) and served from
+        /static/swagger-ui/. No outbound internet or third-party CDN
+        is required at runtime, which matters for air-gapped or CSP-
+        locked deployments where loading from cdn.jsdelivr.net would
+        leave the page blank.
+      * The OpenAPI doc URL is computed server-side from UI_ROOT_PATH
+        so the relative-URL trap (page at `/docs` resolving against
+        `/docs/` if the user appended a trailing slash) cannot blank
+        the page.
+    """
+    root = (os.environ.get("UI_ROOT_PATH") or "").rstrip("/")
+    return HTMLResponse(_swagger_ui_html(root))
 
 
 # ---------------------------------------------------------------------------
@@ -1079,56 +1087,95 @@ def _postman_collection(base_url: str) -> dict:
 # Swagger UI playground
 # ---------------------------------------------------------------------------
 
-def _swagger_ui_html() -> str:
-    """Static HTML page that loads Swagger UI from a CDN and points it
-    at our OpenAPI doc. The "Try it out" button on each operation does
-    the live API call straight from this page, satisfying the
-    requirement for an in-product playground.
+def _swagger_ui_html(root_path: str = "") -> str:
+    """Static HTML page that mounts Swagger UI against our OpenAPI doc.
 
-    Why a CDN? The image already runs WeasyPrint + every scanner; we
-    don't need to ship 400 KB of swagger-ui-dist in addition. Replace
-    the two CDN URLs with `/static/...` after vendoring if your
-    deployment is air-gapped."""
-    return """<!doctype html>
+    Both the CSS and the JS are loaded from `/static/swagger-ui/` —
+    the assets are vendored into the image at build time, so the page
+    works on hosts with no outbound internet and on deployments whose
+    Content-Security-Policy blocks third-party CDNs (which is the most
+    common reason this page renders blank).
+
+    `root_path` is the UI_ROOT_PATH prefix (e.g. `/test`). Both the
+    asset URLs and the OpenAPI doc URL are absolute so they resolve
+    correctly regardless of whether the operator visited the docs URL
+    with or without a trailing slash.
+    """
+    css = f"{root_path}/static/swagger-ui/swagger-ui.css"
+    js = f"{root_path}/static/swagger-ui/swagger-ui-bundle.js"
+    openapi_url = f"{root_path}/api/v1/openapi.json"
+    postman_url = f"{root_path}/api/v1/postman.json"
+    # The <noscript> + #fallback block guarantees the operator never
+    # sees a stark blank page: even if the bundle fails to load (CSP,
+    # 404, AV interception), the links to the raw OpenAPI / Postman
+    # files and a curl-able health probe remain usable.
+    return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <title>nextgen-dast API playground</title>
-  <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">
+  <link rel="stylesheet" href="{css}">
   <style>
-    body { margin: 0; background: #fafafa; }
-    .topbar { display: none; }
-    /* Slim header strip so the operator knows what they're looking at. */
-    .ngd-banner {
+    body {{ margin: 0; background: #fafafa; }}
+    .topbar {{ display: none; }}
+    .ngd-banner {{
       background: #1b232b; color: #d8dee5;
       padding: .8em 1.2em; font: 600 14px/1.4 -apple-system, system-ui,
         "Segoe UI", sans-serif;
-    }
-    .ngd-banner small { color: #8a96a3; font-weight: 400; margin-left: .8em; }
-    .ngd-banner a { color: #5fb3d7; text-decoration: none; }
+    }}
+    .ngd-banner small {{ color: #8a96a3; font-weight: 400; margin-left: .8em; }}
+    .ngd-banner a {{ color: #5fb3d7; text-decoration: none; }}
+    /* Always-visible fallback. Hidden once Swagger UI inits successfully. */
+    #fallback {{ max-width: 720px; margin: 2em auto; padding: 1.2em 1.6em;
+                 font: 14px/1.5 -apple-system, system-ui, sans-serif;
+                 color: #1f2630; background: #fff;
+                 border: 1px solid #dde2eb; border-radius: 6px; }}
+    #fallback h2 {{ margin-top: 0; font-size: 1.05em; }}
+    #fallback code {{ background: #f3f5f8; padding: 1px 4px; border-radius: 3px; }}
   </style>
 </head>
 <body>
   <div class="ngd-banner">
     nextgen-dast 2.1.1 API
     <small>Live playground.
-      <a href="openapi.json">openapi.json</a> ·
-      <a href="postman.json">postman.json</a></small>
+      <a href="{openapi_url}">openapi.json</a> ·
+      <a href="{postman_url}">postman.json</a></small>
   </div>
+
   <div id="swagger-ui"></div>
-  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+
+  <div id="fallback">
+    <h2>Swagger UI did not load</h2>
+    <p>The interactive playground failed to initialize. Common causes:
+      strict Content-Security-Policy blocking <code>/static/swagger-ui/*</code>,
+      an antivirus rewriting JS, or the static-files mount being
+      offline.</p>
+    <p>You can still drive the API directly:</p>
+    <ul>
+      <li><a href="{openapi_url}">OpenAPI 3.0 definition</a> (machine-readable)</li>
+      <li><a href="{postman_url}">Postman v2.1 collection</a> (import into Postman)</li>
+      <li><code>curl -H "Authorization: Bearer YOUR-TOKEN" {openapi_url.replace('/openapi.json', '/health')}</code></li>
+    </ul>
+    <p>Issue tokens at <a href="{root_path}/admin/api-tokens">{root_path}/admin/api-tokens</a>.</p>
+  </div>
+
+  <script src="{js}"></script>
   <script>
-    // Load the OpenAPI doc by relative URL so the prefix-mounted /test
-    // deployment keeps working without server-side knowledge of the
-    // mount path.
-    window.ui = SwaggerUIBundle({
-      url: 'openapi.json',
-      dom_id: '#swagger-ui',
-      deepLinking: true,
-      tryItOutEnabled: true,
-      persistAuthorization: true,
-    });
+    // Hide the fallback once Swagger UI has rendered. If the bundle
+    // failed to load (network / CSP), the script tag above doesn't
+    // execute and the fallback stays visible.
+    (function () {{
+      if (typeof SwaggerUIBundle !== 'function') return;
+      var fb = document.getElementById('fallback');
+      if (fb) fb.style.display = 'none';
+      window.ui = SwaggerUIBundle({{
+        url: {json.dumps(openapi_url)},
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        tryItOutEnabled: true,
+        persistAuthorization: true,
+      }});
+    }})();
   </script>
 </body>
 </html>

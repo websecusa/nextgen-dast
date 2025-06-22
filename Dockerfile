@@ -98,8 +98,26 @@ RUN pip install \
         "pydyf==0.10.0" \
         "pypdf==5.1.0"
 
+# Swagger UI assets, vendored into the image so the API playground at
+# /api/v1/docs works on hosts that have no outbound internet access (or
+# whose CSP blocks third-party CDNs). We pin the version so the bundle
+# layer caches and the page behaves identically across rebuilds.
+ARG SWAGGER_UI_VERSION=5.17.14
+RUN mkdir -p /opt/swagger-ui \
+    && curl -sSL -o /opt/swagger-ui/swagger-ui.css \
+        "https://cdn.jsdelivr.net/npm/swagger-ui-dist@${SWAGGER_UI_VERSION}/swagger-ui.css" \
+    && curl -sSL -o /opt/swagger-ui/swagger-ui-bundle.js \
+        "https://cdn.jsdelivr.net/npm/swagger-ui-dist@${SWAGGER_UI_VERSION}/swagger-ui-bundle.js"
+
 WORKDIR /app
 COPY app/ /app/
+
+# Place the vendored Swagger UI bundle into the static-assets directory
+# served by uvicorn (mounted at /static in server.py). One layer, copied
+# late so a swagger-ui version bump doesn't bust the python deps cache.
+RUN mkdir -p /app/static/swagger-ui \
+    && cp /opt/swagger-ui/swagger-ui.css /app/static/swagger-ui/swagger-ui.css \
+    && cp /opt/swagger-ui/swagger-ui-bundle.js /app/static/swagger-ui/swagger-ui-bundle.js
 # scripts/, toolkit/, and db/ used to be host-mounted at runtime. Bake them
 # into the image so a registry-image deployment works without a working copy
 # of the source on disk.
