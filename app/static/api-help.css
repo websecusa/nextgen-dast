@@ -1,0 +1,139 @@
+/*
+ * Author: Tim Rice <tim.j.rice@hackrange.com>
+ * Part of nextgen-dast. See README.md for license and overall architecture.
+ *
+ * Styling for the field-help icons + modal grafted onto Swagger UI in the
+ * /api/v1/docs playground. Loaded by api/_swagger_ui_html() alongside
+ * api-help.js. Kept self-contained (no dependence on the dark dashboard
+ * theme) because Swagger UI ships its own light theme.
+ */
+
+/* Circle "?" icon injected next to a known field name. Sized to match
+   Swagger UI's parameter-name typography so it doesn't shove the row
+   layout around when added. */
+.ngd-help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #3b89c7;
+  color: #fff;
+  border: 0;
+  cursor: pointer;
+  font: 700 11px/1 -apple-system, system-ui, "Segoe UI", sans-serif;
+  margin-left: 6px;
+  padding: 0;
+  vertical-align: middle;
+  text-decoration: none;
+  transition: background-color .12s ease;
+}
+.ngd-help-btn:hover,
+.ngd-help-btn:focus {
+  background: #275f8f;
+  outline: none;
+}
+
+/* Modal: full-viewport overlay, centered card. Hidden by default via
+   the [hidden] attribute on the wrapper. */
+#ngd-help-modal { position: fixed; inset: 0; z-index: 9999;
+                   display: flex; align-items: center; justify-content: center; }
+#ngd-help-modal[hidden] { display: none; }
+
+.ngd-modal-backdrop { position: absolute; inset: 0;
+                       background: rgba(15, 20, 25, .55); }
+
+.ngd-modal-card {
+  position: relative;
+  background: #fff;
+  max-width: 640px;
+  width: 92%;
+  max-height: 80vh;
+  overflow: auto;
+  border-radius: 8px;
+  padding: 1.4em 1.6em 1.6em;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, .35);
+  font: 14px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
+  color: #1f2630;
+}
+
+.ngd-modal-close {
+  position: absolute;
+  top: .4em;
+  right: .65em;
+  background: none;
+  border: 0;
+  font-size: 1.6em;
+  line-height: 1;
+  cursor: pointer;
+  color: #6c757d;
+  padding: .1em .35em;
+}
+.ngd-modal-close:hover { color: #1f2630; }
+
+.ngd-modal-title {
+  margin: 0 0 .15em;
+  font-size: 1.15em;
+  color: #1f2630;
+}
+.ngd-modal-fieldname {
+  font: 500 .82em/1 ui-monospace, Menlo, monospace;
+  color: #6c757d;
+  margin-bottom: .9em;
+}
+
+.ngd-modal-body p { margin: .55em 0; }
+.ngd-modal-body code {
+  background: #f3f5f8;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: .92em;
+}
+
+.ngd-help-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: .8em 0 1.1em;
+}
+.ngd-help-table th,
+.ngd-help-table td {
+  padding: .45em .65em;
+  text-align: left;
+  border-bottom: 1px solid #e8ecef;
+  vertical-align: top;
+}
+.ngd-help-table th {
+  background: #f3f5f8;
+  font-size: .82em;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #555;
+  font-weight: 700;
+}
+.ngd-help-table td:first-child { white-space: nowrap; }
+
+.ngd-help-empty {
+  background: #fdf3f3;
+  border: 1px solid #f0d2d2;
+  color: #8c2222;
+  padding: .55em .8em;
+  border-radius: 4px;
+  margin: .6em 0;
+}
+
+.ngd-help-section-title {
+  font-weight: 700;
+  font-size: .9em;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #6c757d;
+  margin: 1em 0 .2em;
+}
+
+.ngd-help-notes {
+  margin: .4em 0 0;
+  padding-left: 1.2em;
+  color: #555;
+}
+.ngd-help-notes li { margin: .2em 0; }

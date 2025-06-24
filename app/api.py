@@ -442,6 +442,76 @@ def api_health():
     return {"ok": True, "service": "nextgen-dast", "version": "2.1.1"}
 
 
+@router.get("/lookups",
+            summary="Live id->label maps + enum descriptions (no auth)")
+def api_lookups():
+    """Help-modal data source for the playground.
+
+    Returns the live id->label maps for the integer-typed FK fields
+    (`llm_endpoint_id`, `user_agent_id`) plus the static enum tables
+    (`profile`, `llm_tier`, `format`). The playground at /api/v1/docs
+    fetches this on load so the help modal can show
+    "id 3 = anthropic-claude-opus-4-7" instead of forcing the operator
+    to guess valid integers.
+
+    No auth required: the data here is operational metadata (labels,
+    not secrets, no API keys). Mirrors the no-auth posture of /docs
+    and /openapi.json so the playground works before the operator has
+    minted a token.
+    """
+    llm_endpoints: list[dict] = []
+    user_agents: list[dict] = []
+    if db.healthy():
+        for r in db.query(
+                "SELECT id, name, model, backend, is_default "
+                "FROM llm_endpoints ORDER BY is_default DESC, name"):
+            tag = " (default)" if r.get("is_default") else ""
+            llm_endpoints.append({
+                "id": r["id"],
+                "label": f"{r['name']} — {r['model']} [{r['backend']}]{tag}",
+                "name": r["name"],
+                "model": r["model"],
+                "backend": r["backend"],
+                "is_default": bool(r.get("is_default")),
+            })
+        for r in db.query(
+                "SELECT id, label, is_default FROM user_agents "
+                "ORDER BY is_default DESC, label"):
+            tag = " (default)" if r.get("is_default") else ""
+            user_agents.append({
+                "id": r["id"],
+                "label": f"{r['label']}{tag}",
+                "is_default": bool(r.get("is_default")),
+            })
+    return {
+        "llm_endpoints": llm_endpoints,
+        "user_agents": user_agents,
+        "profiles": [
+            {"value": "quick",
+             "label": "~5 min — testssl + nuclei (curated tags)"},
+            {"value": "standard",
+             "label": "~30-60 min — testssl + nuclei + nikto + wapiti default"},
+            {"value": "thorough",
+             "label": "hours — standard + wapiti -m all + sqlmap on detected forms"},
+            {"value": "premium",
+             "label": "slowest — thorough + sqlmap + dalfox + in-house high-fidelity probe pass"},
+        ],
+        "llm_tiers": [
+            {"value": "none",
+             "label": "scanners only, no LLM, no extra cost"},
+            {"value": "basic",
+             "label": "rollup + executive summary (~$5-10 / scan)"},
+            {"value": "advanced",
+             "label": "per-flow deep analysis + rollup (~$50-100 / scan)"},
+        ],
+        "formats": [
+            {"value": "json", "label": "structured JSON (default)"},
+            {"value": "csv",
+             "label": "RFC 4180 CSV (comma delimiter, CRLF line endings)"},
+        ],
+    }
+
+
 @router.post("/scans", response_model=CreateScanResponse,
              status_code=201, summary="Create a new scan")
 def api_create_scan(
@@ -502,18 +572,38 @@ def api_list_scans(
     limit: int = Query(50, ge=1, le=500),
     application_id: Optional[str] = Query(
         None, description="Filter by caller-supplied application_id"),
+    fqdn: Optional[str] = Query(
+        None,
+        description="Filter by target FQDN. Substring match (case-insensitive); "
+                    "use the bare host (and optional :port). Any leading "
+                    "http:// or https:// is stripped before matching.",
+        examples=["app.example.com", "127.0.0.1:10001"]),
     authorization: Optional[str] = Header(None),
     x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
 ):
-    """Return up to `limit` recent assessments (newest first). Optional
-    `application_id` filter so a caller can scope to scans they
-    submitted for a particular application."""
+    """Return up to `limit` recent assessments (newest first).
+
+    Optional filters:
+      * `application_id` — exact match on the caller-supplied identifier.
+      * `fqdn` — case-insensitive substring match on the target hostname,
+        so the same call works for both `app.example.com` and
+        `app.example.com:8443`.
+    """
     _require_token(request, authorization, x_api_token)
-    where = ""
+    where_parts: list[str] = []
     params: list[Any] = []
     if application_id:
-        where = "WHERE application_id = %s"
+        where_parts.append("application_id = %s")
         params.append(application_id.strip()[:128])
+    if fqdn:
+        # Match the same normalisation as POST /scans: drop scheme,
+        # lowercase. Use LIKE so callers can pass a hostname without
+        # the port and still match port-suffixed rows.
+        f = re.sub(r"^https?://", "", fqdn.strip().lower()).split("/", 1)[0]
+        if f:
+            where_parts.append("LOWER(fqdn) LIKE %s")
+            params.append(f"%{f[:255]}%")
+    where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
     params.append(int(limit))
     rows = db.query(
         f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
@@ -867,6 +957,22 @@ def _openapi_paths() -> dict:
                 },
             },
         },
+        "/api/v1/lookups": {
+            "get": {
+                "summary": "Live id->label maps + enum value tables",
+                "description":
+                    "Returns the id->label mapping for the integer-typed "
+                    "fields (`llm_endpoint_id`, `user_agent_id`) and the "
+                    "static enum value tables for `profile`, `llm_tier`, "
+                    "and `format`. Powers the help modal in /api/v1/docs. "
+                    "No auth required.",
+                "security": [],
+                "responses": {
+                    "200": {"description": "lookup tables",
+                            "content": {"application/json": {}}},
+                },
+            },
+        },
         "/api/v1/scans": {
             "post": {
                 "summary": "Create a new scan",
@@ -890,7 +996,17 @@ def _openapi_paths() -> dict:
                                 "minimum": 1, "maximum": 500}},
                     {"name": "application_id", "in": "query",
                      "schema": {"type": "string"},
-                     "description": "Filter by application_id"},
+                     "description":
+                         "Exact match on the caller-supplied "
+                         "application_id."},
+                    {"name": "fqdn", "in": "query",
+                     "schema": {"type": "string",
+                                "example": "app.example.com"},
+                     "description":
+                         "Case-insensitive substring match on the "
+                         "target FQDN. Pass the bare host (with "
+                         "optional :port). Leading http:// or https:// "
+                         "is stripped before matching."},
                 ],
                 "responses": {
                     "200": {"description": "scan list",
@@ -1103,6 +1219,12 @@ def _swagger_ui_html(root_path: str = "") -> str:
     """
     css = f"{root_path}/static/swagger-ui/swagger-ui.css"
     js = f"{root_path}/static/swagger-ui/swagger-ui-bundle.js"
+    # Field-help layer (circle "?" icons + modal). Adds per-field
+    # tooltips that explain enum values, sample inputs, and live
+    # id->label tables for the integer FK fields. Loaded after
+    # Swagger UI so it can decorate the rendered DOM.
+    help_css = f"{root_path}/static/api-help.css"
+    help_js = f"{root_path}/static/api-help.js"
     openapi_url = f"{root_path}/api/v1/openapi.json"
     postman_url = f"{root_path}/api/v1/postman.json"
     # The <noscript> + #fallback block guarantees the operator never
@@ -1115,6 +1237,7 @@ def _swagger_ui_html(root_path: str = "") -> str:
   <meta charset="utf-8">
   <title>nextgen-dast API playground</title>
   <link rel="stylesheet" href="{css}">
+  <link rel="stylesheet" href="{help_css}">
   <style>
     body {{ margin: 0; background: #fafafa; }}
     .topbar {{ display: none; }}
@@ -1177,6 +1300,7 @@ def _swagger_ui_html(root_path: str = "") -> str:
       }});
     }})();
   </script>
+  <script src="{help_js}"></script>
 </body>
 </html>
 """
