@@ -648,12 +648,26 @@ def api_scan_results(
     format: str = Query("json", pattern="^(json|csv)$"),
     include_false_positives: bool = Query(
         False, description="Include findings the analyst marked as false positives"),
+    include_info: bool = Query(
+        True,
+        description="Include info-severity findings. Defaults to true. "
+                    "Set false to mirror what an assessment with the "
+                    "'hide info-severity findings' toggle on would emit."),
     authorization: Optional[str] = Header(None),
     x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
 ):
     """Pull every finding produced by the assessment. Supports `format=json`
     (default) and `format=csv`. CSV is RFC 4180-compliant: comma
-    delimiter, double-quote quoting, CRLF line endings."""
+    delimiter, double-quote quoting, CRLF line endings.
+
+    Filters:
+      * `include_false_positives` — default false; matches the score
+        rollup and the PDF report.
+      * `include_info` — default true; set false to suppress the
+        info-severity rows (the same suppression the per-assessment
+        'hide info-severity findings' toggle applies to the on-screen
+        view and the generated PDF).
+    """
     _require_token(request, authorization, x_api_token)
     a = db.query_one("SELECT id, fqdn, application_id, profile, status, "
                      "total_findings, finished_at "
@@ -663,6 +677,8 @@ def api_scan_results(
     rows = _findings_for(scan_id)
     if not include_false_positives:
         rows = [r for r in rows if r.get("status") != "false_positive"]
+    if not include_info:
+        rows = [r for r in rows if r.get("severity") != "info"]
 
     if format == "csv":
         buf = io.StringIO()
@@ -1041,7 +1057,16 @@ def _openapi_paths() -> dict:
                      "schema": {"type": "string",
                                 "enum": ["json", "csv"], "default": "json"}},
                     {"name": "include_false_positives", "in": "query",
-                     "schema": {"type": "boolean", "default": False}},
+                     "schema": {"type": "boolean", "default": False},
+                     "description":
+                         "Include findings the analyst marked as "
+                         "false positive. Default false."},
+                    {"name": "include_info", "in": "query",
+                     "schema": {"type": "boolean", "default": True},
+                     "description":
+                         "Include info-severity findings. Default "
+                         "true. Set false to mirror the per-assessment "
+                         "'hide info-severity findings' toggle."},
                 ],
                 "responses": {
                     "200": {

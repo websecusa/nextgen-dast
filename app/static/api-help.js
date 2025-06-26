@@ -152,6 +152,19 @@
         "positive. Default false, matching the behavior of the score " +
         "rollup and the generated PDF report.",
     },
+    include_info: {
+      title: "include_info — include info-severity rows",
+      summary:
+        "When true (default), info-severity findings are included in " +
+        "the response. Set false to suppress them, mirroring the " +
+        "per-assessment 'hide info-severity findings' toggle that the " +
+        "web UI and the PDF report honor.",
+      notes: [
+        "Info severity is high-volume / low-signal noise from scanners " +
+          "(e.g. fingerprinted server banners). Suppressing it yields a " +
+          "much shorter actionable list.",
+      ],
+    },
     limit: {
       title: "limit — max scans to return",
       summary:
