@@ -457,7 +457,30 @@ async def lifespan(app):
     except Exception as e:
         print(f"[startup] zombie reap failed: {e!r}", flush=True)
 
+    # One-shot orphan sweep at startup. Catches storage left behind by
+    # pre-fix builds whose cleanup did not know about reports / challenge
+    # logs, plus any scan dirs / logs whose owning assessment was deleted
+    # while this container was down.
+    try:
+        s = cleanup_mod.sweep_orphans()
+        n_r = len(s.get("reports_removed") or [])
+        n_l = len(s.get("logs_removed") or [])
+        n_s = len(s.get("scans_removed") or [])
+        if n_r or n_l or n_s:
+            print(f"[startup] orphan sweep: {n_r} report dir(s), "
+                  f"{n_l} log file(s), {n_s} scan dir(s) cleaned up",
+                  flush=True)
+    except Exception as e:
+        print(f"[startup] orphan sweep failed: {e!r}", flush=True)
+
+    # Orphan sweep runs every Nth pass of the 60-second sweeper. Hourly
+    # is plenty; the per-deletion path already cleans everything for a
+    # normal /assessment/{id}/delete, so this only catches old leaks
+    # (pre-fix) and manual-DELETE / crash-mid-cleanup cases.
+    ORPHAN_SWEEP_EVERY = 60   # passes (= once an hour at 60s/pass)
+
     async def sweeper():
+        nonlocal_pass = {"n": 0}
         while True:
             try:
                 ids = cleanup_mod.find_pending()
@@ -472,6 +495,12 @@ async def lifespan(app):
                 reap_zombie_assessments(startup=False)
             except Exception:
                 pass
+            nonlocal_pass["n"] += 1
+            if nonlocal_pass["n"] % ORPHAN_SWEEP_EVERY == 0:
+                try:
+                    cleanup_mod.sweep_orphans()
+                except Exception:
+                    pass
             await asyncio.sleep(60)
 
     task = asyncio.create_task(sweeper())
