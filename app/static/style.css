@@ -1,105 +1,376 @@
+/*
+ * Author: Tim Rice <tim.j.rice@hackrange.com>
+ * Part of nextgen-dast. See README.md for license and overall architecture.
+ *
+ * Modern dark theme: near-black canvas, slightly raised cards with soft
+ * borders + radius, pill buttons, and a left sidebar layout. Severity
+ * colors are themed via CSS custom properties set per-deployment in
+ * base.html so the branding admin can override without touching this file.
+ */
+
 :root {
-  --bg: #0f1419;
-  --panel: #1b232b;
-  --panel-2: #232c36;
-  --border: #2c3845;
-  --text: #d8dee5;
-  --muted: #8a96a3;
-  --accent: #5fb3d7;
-  --green: #7bc47f;
-  --red: #e67373;
-  --yellow: #e0c46c;
+  /* Canvas + surfaces. The two-step "panel above bg" pattern gives cards
+     a subtle lift without leaning on heavy shadows. */
+  --bg:        #0a0b0d;
+  --panel:     #14161a;
+  --panel-2:   #1b1e23;
+  --elevated:  #1f242b;
+  --border:    rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .12);
+
+  /* Text */
+  --text:      #e6e8ec;
+  --text-soft: #c2c7cf;
+  --muted:     #7a828d;
+  --muted-2:   #5b6168;
+
+  /* Brand + accents — overridden per-deployment via the branding system. */
+  --accent:    #5fb3d7;
+  --accent-2:  #4a9fc4;
+  --green:     #61c08f;
+  --red:       #e87060;
+  --yellow:    #e4b757;
+  --orange:    #e08a4f;
+
+  /* Layout */
+  --sidebar-w: 240px;
+  --radius-card:   14px;
+  --radius-input:  10px;
+  --radius-pill:   9999px;
 }
+
 * { box-sizing: border-box; }
-body {
+
+html, body {
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
-  margin: 0; padding: 0;
-  font-size: 14px; line-height: 1.45;
+  font-family: -apple-system, system-ui, "Segoe UI", "Inter", sans-serif;
+  margin: 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  font-feature-settings: "ss01", "cv11"; /* nicer numerals where supported */
+  -webkit-font-smoothing: antialiased;
 }
-header {
-  border-bottom: 1px solid var(--border);
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+code, pre {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: .92em;
+}
+
+/* ---- App shell: sidebar + main --------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 100vh;
+}
+
+aside.sidebar {
   background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 1.2em 0.9em 1em;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
-nav {
-  display: flex; gap: 1.2em; align-items: center;
-  padding: .8em 1.2em; max-width: 1200px; margin: 0 auto;
+aside.sidebar .brand {
+  display: flex; align-items: center; gap: .55em;
+  padding: .2em .4em .6em;
+  font-weight: 700;
+  color: var(--text);
+  font-size: 1.05em;
+  letter-spacing: -.01em;
 }
-nav .brand { font-weight: 700; color: var(--accent); margin-right: 1em; font-size: 1.1em; }
-nav a { color: var(--text); text-decoration: none; }
-nav a:hover { color: var(--accent); }
-nav .status { margin-left: auto; padding: .2em .6em; border-radius: 4px; font-size: .9em; }
-nav .status.on { background: rgba(123,196,127,.15); color: var(--green); }
-nav .status.off { background: rgba(230,115,115,.15); color: var(--red); }
+aside.sidebar .brand img { height: 1.5em; width: auto; }
 
-main { max-width: 1200px; margin: 0 auto; padding: 1.5em 1.2em; }
-footer { border-top: 1px solid var(--border); padding: 1em; text-align: center; color: var(--muted); }
+aside.sidebar .cta {
+  display: flex; align-items: center; justify-content: center; gap: .4em;
+  background: var(--accent);
+  color: #07111a;
+  font-weight: 700;
+  border-radius: var(--radius-pill);
+  padding: .55em 1em;
+  margin: .35em .25em 1.2em;
+  text-decoration: none;
+  transition: background-color .12s ease;
+}
+aside.sidebar .cta:hover { background: var(--accent-2); color: #07111a;
+                           text-decoration: none; }
 
-h1 { font-weight: 600; margin: 0 0 .8em; }
-h2 { font-weight: 600; margin: 0 0 .6em; font-size: 1.05em; color: var(--accent); }
+aside.sidebar .nav-section {
+  font-size: .72em;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted-2);
+  padding: 1em .8em .35em;
+}
+
+aside.sidebar nav { display: flex; flex-direction: column; gap: 1px; }
+aside.sidebar nav a {
+  display: flex; align-items: center; gap: .6em;
+  padding: .5em .8em;
+  border-radius: 8px;
+  color: var(--text-soft);
+  font-size: .92em;
+  font-weight: 500;
+  transition: background-color .12s, color .12s;
+}
+aside.sidebar nav a:hover {
+  background: var(--panel-2);
+  color: var(--text);
+  text-decoration: none;
+}
+aside.sidebar nav a.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+aside.sidebar nav a .icon {
+  width: 16px; height: 16px;
+  flex: 0 0 16px;
+  opacity: .85;
+}
+aside.sidebar nav a.active .icon,
+aside.sidebar nav a:hover .icon { opacity: 1; }
+
+aside.sidebar .sidebar-footer {
+  margin-top: auto;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 1px;
+}
+aside.sidebar .user-pill {
+  display: flex; align-items: center; gap: .55em;
+  padding: .55em .8em;
+  margin-top: .3em;
+  font-size: .9em;
+  color: var(--text-soft);
+}
+aside.sidebar .user-pill .avatar {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #07111a;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .82em;
+}
+aside.sidebar .user-pill .username { font-weight: 600; color: var(--text); }
+aside.sidebar .user-pill .role { font-size: .78em; color: var(--muted); }
+aside.sidebar form.signout { margin: .25em .25em 0; }
+aside.sidebar form.signout button {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-soft);
+  font-weight: 500;
+  border-radius: 8px;
+  padding: .35em .6em;
+  font-size: .82em;
+  cursor: pointer;
+}
+aside.sidebar form.signout button:hover {
+  border-color: var(--text-soft);
+  color: var(--text);
+}
+aside.sidebar .build-tag {
+  font-size: .72em;
+  color: var(--muted-2);
+  padding: .8em .8em 0;
+  letter-spacing: .04em;
+}
+
+/* Mobile: collapse sidebar to top bar. */
+@media (max-width: 800px) {
+  .app { grid-template-columns: 1fr; }
+  aside.sidebar {
+    position: relative;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: .8em;
+  }
+  aside.sidebar nav { flex-direction: row; flex-wrap: wrap; }
+  aside.sidebar .sidebar-footer { display: none; }
+}
+
+/* ---- Main column ---------------------------------------------------- */
+
+main.main {
+  padding: 1.6em 1.8em 2.4em;
+  max-width: 1400px;
+}
+main.main h1 {
+  font-weight: 700;
+  font-size: 1.7em;
+  letter-spacing: -.015em;
+  margin: 0 0 .6em;
+  color: var(--text);
+}
+main.main h2 {
+  font-weight: 600;
+  font-size: 1em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin: 0 0 .8em;
+}
+main.main h3 { font-weight: 600; font-size: 1em; color: var(--text); margin: 0 0 .4em; }
+
+/* Classification banner (when set) */
+.classification-banner {
+  background: var(--red);
+  color: #fff;
+  text-align: center;
+  font-weight: 700;
+  padding: .25em;
+  font-size: .8em;
+  letter-spacing: .08em;
+}
+
+/* ---- Cards ---------------------------------------------------------- */
 
 section, .card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1em 1.2em;
+  border-radius: var(--radius-card);
+  padding: 1.2em 1.4em;
   margin-bottom: 1.2em;
 }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
-@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-
-a { color: var(--accent); }
-
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: .5em .6em; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { font-weight: 600; color: var(--muted); font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
-td.url { font-family: ui-monospace, Menlo, monospace; font-size: .85em; word-break: break-all; max-width: 50ch; }
-
-form { display: flex; flex-direction: column; gap: .6em; }
-label { display: flex; flex-direction: column; gap: .2em; }
-label.check { flex-direction: row; align-items: center; gap: .4em; }
-input, select, button {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); padding: .5em .6em;
-  border-radius: 4px; font-size: 14px; font-family: inherit;
+section.bare, .card.bare {
+  background: transparent; border: 0; padding: 0;
 }
-input:focus, select:focus { outline: 1px solid var(--accent); }
-button {
-  cursor: pointer; background: var(--accent); color: #0a1218;
-  font-weight: 600; border: none; padding: .55em 1em;
+.card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: .8em;
 }
-button:disabled { opacity: .5; cursor: not-allowed; }
+.card-header h2 { margin: 0; }
+
+.grid       { display: grid; gap: 1.1em; grid-template-columns: 1fr 1fr; }
+.grid-3     { display: grid; gap: 1.1em; grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 1100px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 800px)  { .grid, .grid-3 { grid-template-columns: 1fr; } }
+
+/* ---- Tables --------------------------------------------------------- */
+
+table { width: 100%; border-collapse: collapse; font-size: .92em; }
+th, td {
+  padding: .55em .7em;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: .76em;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+tbody tr:hover { background: rgba(255,255,255,.02); }
+td.url {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: .85em;
+  word-break: break-all;
+  max-width: 50ch;
+}
+
+/* ---- Forms / inputs ------------------------------------------------- */
+
+form { display: flex; flex-direction: column; gap: .7em; }
+label { display: flex; flex-direction: column; gap: .25em; font-size: .9em;
+        color: var(--text-soft); }
+label.check { flex-direction: row; align-items: center; gap: .5em; }
+
+input, select, textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: .55em .7em;
+  border-radius: var(--radius-input);
+  font-size: 14px;
+  font-family: inherit;
+  transition: border-color .12s, background-color .12s;
+}
+input:hover, select:hover, textarea:hover { border-color: var(--muted); }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--elevated);
+}
+textarea { font-family: ui-monospace, Menlo, monospace; min-height: 5em; }
+
+button, .button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #07111a;
+  font-weight: 600;
+  border: 0;
+  padding: .55em 1.1em;
+  font-size: 14px;
+  font-family: inherit;
+  border-radius: var(--radius-input);
+  transition: background-color .12s, opacity .12s;
+}
+button:hover, .button:hover { background: var(--accent-2); }
+button:disabled { opacity: .45; cursor: not-allowed; }
 button.warn { background: var(--red); color: #fff; }
+button.warn:hover { background: #d35a4a; }
+button.ghost, .button.ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-weight: 500;
+}
+button.ghost:hover, .button.ghost:hover {
+  background: var(--panel-2);
+  border-color: var(--muted);
+}
+button.link, .button.link {
+  background: transparent; padding: 0; color: var(--accent); font-weight: 500;
+  border: 0;
+}
 
-dl { display: grid; grid-template-columns: max-content 1fr; gap: .3em 1em; margin: 0; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .35em 1em; margin: 0; }
 dt { color: var(--muted); }
 dd { margin: 0; word-break: break-all; }
 
-code, pre { font-family: ui-monospace, Menlo, monospace; }
-pre.log {
-  background: #0a1218; border: 1px solid var(--border); border-radius: 4px;
-  padding: .8em; overflow: auto; max-height: 60vh;
-  font-size: 12px; white-space: pre-wrap; word-break: break-all;
-}
+/* ---- Status pills + badges ----------------------------------------- */
 
-.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: .8em; font-weight: 600; }
-.badge.red { background: rgba(230,115,115,.18); color: var(--red); }
-.badge.running { background: rgba(95,179,215,.18); color: var(--accent); }
-.badge.finished { background: rgba(123,196,127,.18); color: var(--green); }
-.badge.killed { background: rgba(224,196,108,.18); color: var(--yellow); }
-.badge.cancelled { background: rgba(138,150,163,.18); color: var(--muted); }
-.badge.deleting { background: rgba(230,115,115,.18); color: var(--red); }
-.badge.queued { background: rgba(138,150,163,.18); color: var(--muted); }
-.badge.consolidating { background: rgba(95,179,215,.18); color: var(--accent); }
-.badge.done { background: rgba(123,196,127,.18); color: var(--green); }
-.badge.error { background: rgba(230,115,115,.30); color: var(--red); }
-/* Severity rendering — text-only, no colored background. The word
-   itself is the primary signal so color-blind users still read the
-   correct severity even when color is muted by their display. */
-.sev, .badge.sev-critical, .badge.sev-high, .badge.sev-medium,
-.badge.sev-low, .badge.sev-info {
+.badge {
+  display: inline-flex; align-items: center; gap: .35em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: .76em;
+  font-weight: 600;
+  background: var(--panel-2);
+  color: var(--text-soft);
+  border: 1px solid var(--border);
+  letter-spacing: .01em;
+}
+.badge.warn      { background: rgba(228,183,87,.12); color: var(--yellow); border-color: transparent; }
+.badge.red       { background: rgba(232,112,96,.13); color: var(--red); border-color: transparent; }
+.badge.running   { background: rgba(95,179,215,.13); color: var(--accent); border-color: transparent; }
+.badge.queued    { background: rgba(122,130,141,.16); color: var(--muted); border-color: transparent; }
+.badge.consolidating { background: rgba(95,179,215,.13); color: var(--accent); border-color: transparent; }
+.badge.done,
+.badge.finished  { background: rgba(97,192,143,.14); color: var(--green); border-color: transparent; }
+.badge.error     { background: rgba(232,112,96,.18); color: var(--red); border-color: transparent; }
+.badge.cancelled,
+.badge.killed,
+.badge.deleting  { background: rgba(122,130,141,.16); color: var(--muted); border-color: transparent; }
+
+/* Severity rendering — text + dot, not blocky background, so screen-reader
+   users still get the word and color-blind users still get the label. */
+.sev,
+.badge.sev-critical, .badge.sev-high, .badge.sev-medium,
+.badge.sev-low,      .badge.sev-info {
   background: transparent;
+  border: 0;
   padding: 0 .15em;
   font-weight: 700;
   font-size: .82em;
@@ -112,6 +383,79 @@ pre.log {
 .sev-low,      .badge.sev-low      { color: var(--sev-low); }
 .sev-info,     .badge.sev-info     { color: var(--sev-info); }
 
+/* Severity dot used in the dashboard / pip rows. */
+.sev-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: .35em;
+}
+.sev-dot.sev-critical { background: var(--sev-critical); }
+.sev-dot.sev-high     { background: var(--sev-high); }
+.sev-dot.sev-medium   { background: var(--sev-medium); }
+.sev-dot.sev-low      { background: var(--sev-low); }
+.sev-dot.sev-info     { background: var(--sev-info); }
+
+/* ---- Dashboard primitives ------------------------------------------ */
+
+.kpi-strip {
+  display: flex; align-items: center; gap: 1.6em;
+  padding: 1em 1.4em;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  margin-bottom: 1.2em;
+  flex-wrap: wrap;
+}
+.kpi {
+  display: flex; align-items: baseline; gap: .55em;
+  font-size: .95em;
+  color: var(--text-soft);
+}
+.kpi .v { font-size: 1.45em; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+.kpi .lbl { font-size: .85em; color: var(--muted); }
+.kpi .delta.up   { color: var(--red); }
+.kpi .delta.down { color: var(--green); }
+
+/* Pip row used inside cards (severity counts, time-to-fix tiles, etc.) */
+.pip-row { display: flex; gap: .55em; flex-wrap: wrap; }
+.pip {
+  flex: 1; min-width: 88px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .55em .7em;
+  text-align: left;
+}
+.pip .lbl { font-size: .72em; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .07em; margin-bottom: .15em; }
+.pip .n { font-size: 1.45em; font-weight: 700; color: var(--text); line-height: 1; }
+.pip .sub { font-size: .78em; color: var(--muted); margin-top: .2em; }
+
 .muted { color: var(--muted); }
-.ok { color: var(--green); }
-.err { color: var(--red); }
+.small { font-size: .85em; }
+.ok    { color: var(--green); }
+.err   { color: var(--red); }
+
+/* Logs / pre blocks */
+pre.log {
+  background: #06070a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .9em 1em;
+  overflow: auto;
+  max-height: 60vh;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Footer (rarely used now — main info lives in the sidebar). */
+footer {
+  border-top: 1px solid var(--border);
+  padding: 1em;
+  text-align: center;
+  color: var(--muted);
+  font-size: .82em;
+}

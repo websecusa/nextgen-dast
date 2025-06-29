@@ -601,12 +601,187 @@ def ctx(request: Request, **extra) -> dict:
     }
 
 
+def _dashboard_data() -> dict:
+    """Aggregate the metrics shown on the / overview page.
+
+    Returns a dict with severity counts, finished-assessment metrics, a
+    findings-by-day series for the trend chart (last 30 days), the
+    top-risk targets, the unresolved-by-age breakdown, and a recent-
+    activity list. All queries skip false-positive findings so the
+    dashboard mirrors what the report cover would say.
+
+    Falls back to a zeroed-out dict when the DB isn't reachable so the
+    page still renders during a database outage."""
+    from datetime import date, timedelta
+    empty = {
+        "kpi": {"open": 0, "delta_7d": 0, "validated": 0, "false_positive": 0,
+                "targets": 0, "assessments": 0, "last_scan": None,
+                "risk_score": None, "sev": {s: 0 for s in
+                    ("critical", "high", "medium", "low", "info")}},
+        "trend": {"days": [], "series": {s: [] for s in
+                  ("critical", "high", "medium", "low", "info")}},
+        "targets": [], "ages": {">30 days": {}, ">60 days": {}, ">90 days": {}},
+        "recent": [],
+    }
+    if not db.healthy():
+        return empty
+
+    # Severity counts (excluding analyst-suppressed false positives) over
+    # the entire history. Cheap on small deployments; if this ever grows
+    # we'll add WHERE created_at > NOW() - INTERVAL 90 DAY.
+    sev = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
+    for r in db.query(
+            "SELECT severity, COUNT(*) AS n FROM findings "
+            "WHERE status != 'false_positive' GROUP BY severity"):
+        sev[r["severity"]] = int(r["n"] or 0)
+    open_total = sum(sev.values())
+
+    # 7-day delta: open findings created in the last 7 days vs the prior
+    # 7-day window. Negative means we're trending down (good).
+    last7 = db.query_one(
+        "SELECT COUNT(*) AS n FROM findings WHERE status != 'false_positive' "
+        "AND created_at > NOW() - INTERVAL 7 DAY")["n"] or 0
+    prev7 = db.query_one(
+        "SELECT COUNT(*) AS n FROM findings WHERE status != 'false_positive' "
+        "AND created_at > NOW() - INTERVAL 14 DAY "
+        "AND created_at <= NOW() - INTERVAL 7 DAY")["n"] or 0
+    if prev7 > 0:
+        delta_pct = round(100 * (last7 - prev7) / prev7)
+    elif last7 > 0:
+        delta_pct = 100
+    else:
+        delta_pct = 0
+
+    validated = db.query_one(
+        "SELECT COUNT(*) AS n FROM findings WHERE validation_status='validated'"
+    )["n"] or 0
+    fp = db.query_one(
+        "SELECT COUNT(*) AS n FROM findings WHERE status='false_positive'"
+    )["n"] or 0
+
+    targets_total = db.query_one(
+        "SELECT COUNT(DISTINCT fqdn) AS n FROM assessments")["n"] or 0
+    assessments_total = db.query_one(
+        "SELECT COUNT(*) AS n FROM assessments WHERE status='done'")["n"] or 0
+    last_row = db.query_one(
+        "SELECT MAX(finished_at) AS last_at FROM assessments WHERE status='done'")
+    last_at = last_row.get("last_at") if last_row else None
+
+    # Average risk_score across the most recent assessment per target (so
+    # one host with 50 scans doesn't dominate the average).
+    overall_risk = None
+    rows = db.query(
+        "SELECT a.risk_score FROM assessments a "
+        "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
+        "      WHERE status='done' GROUP BY fqdn) t "
+        "  ON a.id = t.mid "
+        "WHERE a.risk_score IS NOT NULL")
+    scores = [int(r["risk_score"]) for r in rows if r.get("risk_score") is not None]
+    if scores:
+        overall_risk = round(sum(scores) / len(scores))
+
+    # Findings-by-day for the last 30 days, broken down by severity.
+    # We fill the dates client-side from the days array, so missing days
+    # show as zero rather than collapsing the X-axis.
+    days = [(date.today() - timedelta(days=i)).isoformat()
+            for i in range(29, -1, -1)]
+    sev_chart_order = ("critical", "high", "medium", "low", "info")
+    series = {s: [0] * len(days) for s in sev_chart_order}
+    day_idx = {d: i for i, d in enumerate(days)}
+    for r in db.query(
+            "SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
+            "FROM findings WHERE status != 'false_positive' "
+            "  AND created_at > NOW() - INTERVAL 30 DAY "
+            "GROUP BY DATE(created_at), severity"):
+        d = r["d"].isoformat() if hasattr(r["d"], "isoformat") else str(r["d"])
+        if d in day_idx and r["severity"] in series:
+            series[r["severity"]][day_idx[d]] = int(r["n"] or 0)
+
+    # Pre-compute the SVG geometry for the trend chart so the template
+    # doesn't have to fight with Jinja's sandbox over list mutation.
+    # We render bands from low->critical so critical sits on top
+    # visually. Each band's polygon walks the top-edge points left to
+    # right then the bottom-edge points right to left.
+    chart_w, chart_h, n_pts = 1000.0, 200.0, len(days)
+    step = chart_w / max(1, n_pts - 1)
+    max_total = 0
+    for i in range(n_pts):
+        t = sum(series[s][i] for s in sev_chart_order)
+        if t > max_total:
+            max_total = t
+    bottoms = [0.0] * n_pts
+    bands: list[dict] = []
+    if max_total > 0:
+        for sev_name in ("info", "low", "medium", "high", "critical"):
+            tops = [bottoms[i] + series[sev_name][i] for i in range(n_pts)]
+            top_points = [(round(i * step, 2),
+                           round(chart_h - (tops[i] / max_total) * chart_h, 2))
+                          for i in range(n_pts)]
+            bot_points = [(round(i * step, 2),
+                           round(chart_h - (bottoms[i] / max_total) * chart_h, 2))
+                          for i in range(n_pts - 1, -1, -1)]
+            poly = " ".join(f"{x},{y}" for x, y in top_points + bot_points)
+            bands.append({"sev": sev_name, "points": poly})
+            bottoms = tops
+
+    # Top 6 targets ranked by their most recent risk_score.
+    targets = db.query(
+        "SELECT a.fqdn, a.application_id, a.risk_score, a.id, "
+        "       a.total_findings, a.finished_at "
+        "FROM assessments a "
+        "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
+        "      WHERE status='done' GROUP BY fqdn) t "
+        "  ON a.id = t.mid "
+        "ORDER BY COALESCE(a.risk_score, 0) DESC, a.finished_at DESC "
+        "LIMIT 6")
+
+    # Unresolved findings broken down by age bucket. Skips false
+    # positives so the matrix matches what the PDF report would show.
+    sev_order = ("critical", "high", "medium", "low", "info")
+    ages = {">30 days": {s: 0 for s in sev_order},
+            ">60 days": {s: 0 for s in sev_order},
+            ">90 days": {s: 0 for s in sev_order}}
+    for bucket, bound in (("90 days", 90), ("60 days", 60), ("30 days", 30)):
+        rows = db.query(
+            "SELECT severity, COUNT(*) AS n FROM findings "
+            "WHERE status != 'false_positive' "
+            "  AND status NOT IN ('fixed') "
+            "  AND created_at < NOW() - INTERVAL %s DAY "
+            "GROUP BY severity",
+            (bound,))
+        for r in rows:
+            ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
+
+    recent = db.query(
+        "SELECT id, fqdn, application_id, status, total_findings, "
+        "       risk_score, profile, created_at, finished_at "
+        "FROM assessments ORDER BY id DESC LIMIT 6")
+
+    return {
+        "kpi": {
+            "open": open_total,
+            "delta_7d": delta_pct,
+            "validated": validated,
+            "false_positive": fp,
+            "targets": targets_total,
+            "assessments": assessments_total,
+            "last_scan": last_at,
+            "risk_score": overall_risk,
+            "sev": sev,
+        },
+        "trend": {"days": days, "series": series,
+                  "bands": bands, "max_total": max_total,
+                  "w": chart_w, "h": chart_h},
+        "targets": targets,
+        "ages": ages,
+        "recent": recent,
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    flows = read_flows(20)
-    scans = list_scans()[:10]
-    return templates.TemplateResponse("index.html",
-                                      ctx(request, flows=flows, scans=scans))
+    data = _dashboard_data()
+    return templates.TemplateResponse("index.html", ctx(request, **data))
 
 
 # Proxy ------------------------------------------------------------------------

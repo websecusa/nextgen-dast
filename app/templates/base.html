@@ -1,18 +1,29 @@
 {#
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
+
+  App shell. Single page chrome that every other template extends.
+
+  Layout: left vertical sidebar (brand, primary CTA, grouped nav, user
+  pill at the bottom) + main content column. The sidebar is sticky so
+  it stays visible while long pages scroll.
+
+  Active-link highlighting compares request.url.path against the entry
+  href; wins for prefix matches so /assessment/<id> still highlights
+  the Assessments item.
 #}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>{% block title %}{{ brand.company_name or "Pentest Proxy" }}{% endblock %}</title>
+  <title>{% block title %}{{ brand.company_name or "nextgen-dast" }}{% endblock %}</title>
   <link rel="stylesheet" href="{{ base }}/static/style.css">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
-      --accent: {{ web.primary }};
-      --green:  {{ web.accent }};
+      --accent:   {{ web.primary }};
+      --accent-2: {{ web.accent }};
+      --green:    {{ web.accent }};
       --sev-critical: {{ web.sev_critical }};
       --sev-high:     {{ web.sev_high }};
       --sev-medium:   {{ web.sev_medium }};
@@ -24,56 +35,97 @@
 </head>
 <body>
 {% if brand and brand.classification %}
-<div style="background: {{ brand.classification_color or '#e67373' }}; color: #fff; text-align: center; font-weight: 700; padding: .25em; font-size: .85em; letter-spacing: .08em">{{ brand.classification }}</div>
+<div class="classification-banner"
+     style="background: {{ brand.classification_color or '#e87060' }}">
+  {{ brand.classification }}
+</div>
 {% endif %}
-<header>
-  <nav>
-    <a href="{{ base }}/" class="brand" style="display:flex;align-items:center;gap:.5em">
+
+{# ----- helper macros --------------------------------------------------- #}
+{# Active-link helper: highlight the nav item whose href matches the
+   current path. Exact match for the dashboard ("/"); prefix match for
+   the rest so /assessment/123 still lights up "Assessments". #}
+{% macro nav_class(target) -%}
+  {% set p = request.url.path -%}
+  {% if base and p.startswith(base) %}{% set p = p[base|length:] or '/' %}{% endif -%}
+  {% if (target == '/' and p == '/') or (target != '/' and p.startswith(target)) -%}
+    active
+  {%- endif %}
+{%- endmacro %}
+
+{# Inline SVG icons. Stroke-only so they pick up the current text color. #}
+{% macro icon(name) -%}
+{% if name == 'home' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 12 4l9 8"/><path d="M5 10v10h14V10"/></svg>
+{% elif name == 'play' %}<svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+{% elif name == 'list' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+{% elif name == 'shield' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v6c0 4.5-3.5 8-8 8s-8-3.5-8-8V7z"/></svg>
+{% elif name == 'flow' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M14 6l4 4M4 12h10M14 12l4 4M4 18h10"/></svg>
+{% elif name == 'scan' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V4h3M21 7V4h-3M3 17v3h3M21 17v3h-3M7 12h10"/></svg>
+{% elif name == 'lock' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0v4"/></svg>
+{% elif name == 'sparkles' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg>
+{% elif name == 'browser' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>
+{% elif name == 'cog' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1A2 2 0 1 1 4.3 17l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1A2 2 0 1 1 7 4.3l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1A2 2 0 1 1 19.7 7l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+{% elif name == 'key' %}<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="4"/><path d="M12 12h10M18 12v3M22 12v3"/></svg>
+{% endif %}
+{%- endmacro %}
+
+<div class="app">
+  <aside class="sidebar">
+    <a href="{{ base }}/" class="brand">
       {% if brand and brand.header_logo_filename %}
-        <img src="{{ base }}/branding/logo/header" alt="" style="height:1.6em;width:auto">
+        <img src="{{ base }}/branding/logo/header" alt="">
       {% endif %}
-      {{ brand.company_name or "pentest-proxy" }}
+      <span>{{ brand.company_name or "nextgen-dast" }}</span>
     </a>
-    <a href="{{ base }}/assess"><strong>Assess</strong></a>
-    <a href="{{ base }}/assessments">Assessments</a>
-    <a href="{{ base }}/proxy">Proxy</a>
-    <a href="{{ base }}/flows">Flows</a>
-    <a href="{{ base }}/scan">Scan</a>
-    <a href="{{ base }}/auth">Auth</a>
-    <a href="{{ base }}/llm">LLM</a>
-    <a href="{{ base }}/user-agents">UAs</a>
-    {% if is_admin %}<a href="{{ base }}/admin">Admin</a>{% endif %}
-    {# The mitmproxy running/stopped pill used to live here. It was
-       redundant with the dedicated /proxy page (which is the canonical
-       place to start, stop, and inspect mitmproxy) and added visual
-       noise to the global navigation. Removed by request. #}
-    {% if user %}
-      {# margin-left:auto pushes the signed-in pill to the far right of
-         the nav, taking over the role the (now removed) mitmproxy
-         status pill used to play. #}
-      <span class="status" style="margin-left:auto">
-        <code>{{ user.username }}</code> · {{ user.role }}
-        <form method="post" action="{{ base }}/logout" style="display:inline; margin-left:.6em">
-          <button type="submit" style="padding:.1em .5em; font-size:.85em">Sign out</button>
-        </form>
-      </span>
+
+    <a href="{{ base }}/assess" class="cta">
+      {{ icon('play') }} New assessment
+    </a>
+
+    <div class="nav-section">Platform</div>
+    <nav>
+      <a href="{{ base }}/"            class="{{ nav_class('/') }}">{{ icon('home') }}<span>Overview</span></a>
+      <a href="{{ base }}/assessments" class="{{ nav_class('/assessment') }}">{{ icon('shield') }}<span>Assessments</span></a>
+      <a href="{{ base }}/scan"        class="{{ nav_class('/scan') }}">{{ icon('scan') }}<span>Scans</span></a>
+      <a href="{{ base }}/flows"       class="{{ nav_class('/flow') }}">{{ icon('flow') }}<span>Flows</span></a>
+      <a href="{{ base }}/proxy"       class="{{ nav_class('/proxy') }}">{{ icon('browser') }}<span>Proxy</span></a>
+    </nav>
+
+    <div class="nav-section">Configuration</div>
+    <nav>
+      <a href="{{ base }}/auth"        class="{{ nav_class('/auth') }}">{{ icon('lock') }}<span>Auth</span></a>
+      <a href="{{ base }}/llm"         class="{{ nav_class('/llm') }}">{{ icon('sparkles') }}<span>LLM</span></a>
+      <a href="{{ base }}/user-agents" class="{{ nav_class('/user-agents') }}">{{ icon('list') }}<span>User-Agents</span></a>
+    </nav>
+
+    {% if is_admin %}
+    <div class="nav-section">Admin</div>
+    <nav>
+      <a href="{{ base }}/admin"             class="{{ nav_class('/admin') }}">{{ icon('cog') }}<span>Settings</span></a>
+      <a href="{{ base }}/admin/api-tokens"  class="{{ nav_class('/admin/api-tokens') }}">{{ icon('key') }}<span>API tokens</span></a>
+    </nav>
     {% endif %}
-  </nav>
-</header>
-<main>
-  {% block content %}{% endblock %}
-</main>
-<footer>
-  {% if brand and brand.footer_logo_filename %}
-    <img src="{{ base }}/branding/logo/footer" alt="" style="height:1.4em;width:auto;vertical-align:middle;margin-right:.5em">
-  {% endif %}
-  <small>
-    {% if brand and brand.footer_text %}{{ brand.footer_text }} · {% endif %}
-    bound 127.0.0.1 only · proxy: {{ state.proxy.listen_host }}:{{ state.proxy.listen_port }} → {{ state.proxy.upstream }}
-  </small>
-  {% if brand and brand.disclaimer %}
-  <p style="max-width:60em;margin:.6em auto 0;color:var(--muted);font-size:.78em">{{ brand.disclaimer }}</p>
-  {% endif %}
-</footer>
+
+    <div class="sidebar-footer">
+      {% if user %}
+        <div class="user-pill">
+          <div class="avatar">{{ user.username[0]|upper }}</div>
+          <div>
+            <div class="username">{{ user.username }}</div>
+            <div class="role">{{ user.role }}</div>
+          </div>
+        </div>
+        <form class="signout" method="post" action="{{ base }}/logout">
+          <button type="submit">Sign out</button>
+        </form>
+      {% endif %}
+      <div class="build-tag">nextgen-dast 2.1.1</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
 </body>
 </html>

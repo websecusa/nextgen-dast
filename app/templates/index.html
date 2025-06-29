@@ -1,75 +1,240 @@
 {#
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Overview dashboard. Layout (top → bottom):
+    1. Page heading + greeting
+    2. KPI strip (overall score, open findings + 7d delta, severity dots,
+       targets / assessments / last-scan totals)
+    3. Findings trend (30-day stacked-area sparkline, drawn inline as SVG
+       so we don't ship a charting library)
+    4. Two-column row: Target Security (top targets by score) + Unresolved
+       findings by age (severity matrix)
+    5. Recent activity table
+
+  All data is gathered server-side in server._dashboard_data().
 #}
 {% extends "base.html" %}
 {% block content %}
-<h1>Dashboard</h1>
+<h1>
+  Welcome back{% if user %}, {{ user.username }}{% endif %}
+</h1>
 
-<section class="grid">
-  <div class="card">
-    <h2>Intercept proxy</h2>
-    <p>{{ state.proxy.listen_host }}:{{ state.proxy.listen_port }}
-       &rarr; {{ state.proxy.upstream }}
-       {% if state.proxy.upstream_host_header %}
-         (Host: {{ state.proxy.upstream_host_header }})
-       {% endif %}</p>
-    <p>Status:
-      <strong class="{% if proxy_running %}ok{% else %}err{% endif %}">
-        {{ "running" if proxy_running else "stopped" }}
-      </strong>
+{# ---- KPI strip ---------------------------------------------------- #}
+<div class="kpi-strip">
+  {% if kpi.risk_score is not none %}
+  <div class="kpi">
+    <span class="v">{{ kpi.risk_score }}</span><span class="lbl">/100 risk</span>
+  </div>
+  {% endif %}
+  <div class="kpi">
+    <span class="v">{{ kpi.open }}</span><span class="lbl">findings</span>
+    {% if kpi.delta_7d != 0 %}
+      {% set up = kpi.delta_7d > 0 %}
+      <span class="delta {{ 'up' if up else 'down' }}">
+        {{ '↑' if up else '↓' }} {{ kpi.delta_7d|abs }}% 7d
+      </span>
+    {% endif %}
+  </div>
+  <div class="kpi">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      {% if kpi.sev[sev] %}
+        <span class="sev-dot sev-{{ sev }}"
+              title="{{ sev|capitalize }}: {{ kpi.sev[sev] }}"></span>{{ kpi.sev[sev] }}
+      {% endif %}
+    {% endfor %}
+    {% if kpi.open == 0 %}<span class="muted">no open findings</span>{% endif %}
+  </div>
+  <div class="kpi">
+    <span class="v">{{ kpi.targets }}</span><span class="lbl">targets</span>
+  </div>
+  <div class="kpi">
+    <span class="v">{{ kpi.assessments }}</span><span class="lbl">assessments</span>
+  </div>
+  {% if kpi.last_scan %}
+  <div class="kpi" title="Most recent finished assessment">
+    <span class="lbl">Last:</span>
+    <span>{{ kpi.last_scan.strftime('%Y-%m-%d') if kpi.last_scan.strftime else kpi.last_scan }}</span>
+  </div>
+  {% endif %}
+</div>
+
+{# ---- Findings trend (30-day SVG stacked area) -------------------- #}
+{# We render as a stacked area inline so the dashboard has zero JS
+   dependencies. The SVG path is computed in Jinja from the trend
+   data; height is fixed at 200px and the X-axis is the 30-day window. #}
+<section>
+  <div class="card-header">
+    <h2>Findings trend (last 30 days)</h2>
+    <div class="muted small">Stacked by severity, false positives excluded.</div>
+  </div>
+
+  {# All chart geometry (band polygons, max, width, height) is
+     computed in server._dashboard_data and passed in via trend.bands.
+     The template just renders. #}
+  {% if trend.max_total == 0 %}
+    <p class="muted small" style="margin: 1.4em 0 .4em">
+      No findings in the last 30 days.
     </p>
-    <p><a href="{{ base }}/proxy">Configure / control →</a></p>
+  {% else %}
+  <svg viewBox="0 0 {{ trend.w }} {{ trend.h + 24 }}"
+       preserveAspectRatio="none"
+       style="width:100%; height:230px; display:block">
+    {# Horizontal grid: lines at 0/25/50/75/100% of max for visual scale. #}
+    {% for g in [0, 0.25, 0.5, 0.75, 1.0] %}
+      <line x1="0" x2="{{ trend.w }}"
+            y1="{{ trend.h - g * trend.h }}" y2="{{ trend.h - g * trend.h }}"
+            stroke="rgba(255,255,255,.05)" stroke-width="1"/>
+    {% endfor %}
+    {% for band in trend.bands %}
+      <polygon
+        fill="var(--sev-{{ band.sev }})"
+        fill-opacity="0.35"
+        stroke="var(--sev-{{ band.sev }})"
+        stroke-width="1.5"
+        stroke-opacity="0.9"
+        points="{{ band.points }}"/>
+    {% endfor %}
+    {# X-axis labels: first / middle / last date (MM-DD form). #}
+    <text x="0" y="{{ trend.h + 18 }}"
+          fill="var(--muted)" font-size="11">{{ trend.days[0][5:] }}</text>
+    <text x="{{ trend.w / 2 }}" y="{{ trend.h + 18 }}"
+          fill="var(--muted)" font-size="11"
+          text-anchor="middle">{{ trend.days[trend.days|length // 2][5:] }}</text>
+    <text x="{{ trend.w }}" y="{{ trend.h + 18 }}"
+          fill="var(--muted)" font-size="11"
+          text-anchor="end">{{ trend.days[-1][5:] }}</text>
+  </svg>
+  <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:.4em">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      <span><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</span>
+    {% endfor %}
   </div>
-
-  <div class="card">
-    <h2>Scanners</h2>
-    <p>wapiti and nikto are preinstalled. Default target: <code>127.0.0.1</code>.</p>
-    <p><a href="{{ base }}/scan">Launch a scan →</a></p>
-  </div>
+  {% endif %}
 </section>
 
+{# ---- Two-column row: targets + age matrix ------------------------ #}
+<div class="grid">
+  <section>
+    <div class="card-header">
+      <h2>Target security</h2>
+      <a href="{{ base }}/assessments" class="muted small">View all →</a>
+    </div>
+    {% if targets %}
+      <div style="display:flex; flex-direction:column; gap:.7em">
+      {% for t in targets %}
+        <a href="{{ base }}/assessment/{{ t.id }}"
+           style="display:flex; align-items:center; justify-content:space-between;
+                  padding:.7em .9em; background:var(--panel-2);
+                  border:1px solid var(--border); border-radius:10px;
+                  color:var(--text); text-decoration:none">
+          <div style="min-width:0; flex:1; padding-right:1em">
+            <div style="font-weight:600; color:var(--text)">{{ t.fqdn }}</div>
+            <div class="muted small" style="margin-top:.15em">
+              {% if t.application_id %}<code>{{ t.application_id }}</code> · {% endif %}
+              {{ t.total_findings or 0 }} findings
+              {% if t.finished_at %} · {{ t.finished_at.strftime('%Y-%m-%d') if t.finished_at.strftime else t.finished_at }}{% endif %}
+            </div>
+          </div>
+          <div style="text-align:right">
+            {% if t.risk_score is not none %}
+              {% set sev = 'critical' if t.risk_score >= 80 else ('high' if t.risk_score >= 60 else ('medium' if t.risk_score >= 40 else ('low' if t.risk_score >= 20 else 'info'))) %}
+              <span class="sev sev-{{ sev }}"
+                    style="font-size:1.2em">{{ t.risk_score }}</span>
+              <div class="muted small">/ 100</div>
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </div>
+        </a>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">
+        No assessments yet.
+        <a href="{{ base }}/assess">Run your first assessment →</a>
+      </p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="card-header">
+      <h2>Unresolved findings by age</h2>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Age</th>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+          <tr>
+            <td>{{ label }}</td>
+            {% for sev in ['critical','high','medium','low','info'] %}
+              <td>
+                {% if ages[label][sev] %}
+                  <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
+                {% else %}<span class="muted">—</span>{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+{# ---- Recent activity ----------------------------------------------- #}
 <section>
-  <h2>Recent flows</h2>
-  {% if flows %}
+  <div class="card-header">
+    <h2>Recent assessments</h2>
+    <a href="{{ base }}/assessments" class="muted small">All assessments →</a>
+  </div>
+  {% if recent %}
   <table>
-    <thead><tr><th>Time</th><th>Method</th><th>URL</th><th>Status</th><th>Findings</th></tr></thead>
+    <thead><tr>
+      <th>ID</th><th>Target</th><th>App</th><th>Profile</th>
+      <th>Status</th><th>Findings</th><th>Risk</th><th>When</th>
+    </tr></thead>
     <tbody>
-    {% for f in flows %}
+    {% for a in recent %}
       <tr>
-        <td><a href="{{ base }}/flow/{{ f.id }}">{{ f.timestamp[11:19] }}</a></td>
-        <td>{{ f.method }}</td>
-        <td class="url">{{ f.url }}</td>
-        <td>{{ f.status_code or "-" }}</td>
+        <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
+        <td><code>{{ a.fqdn }}</code></td>
         <td>
-          {% if f.findings %}
-            <span class="badge red">{{ f.findings|length }}</span>
-            {{ f.findings|map(attribute='type')|unique|join(", ") }}
-          {% else %}<span class="muted">none</span>{% endif %}
+          {% if a.application_id %}
+            <code>{{ a.application_id }}</code>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td><span class="badge">{{ a.profile }}</span></td>
+        <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
+        <td>{{ a.total_findings or 0 }}</td>
+        <td>
+          {% if a.risk_score is not none %}
+            {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
+            <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if a.finished_at %}
+            {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}
+          {% else %}
+            {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at.strftime else a.created_at }}
+          {% endif %}
         </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
-  {% else %}<p class="muted">No flows captured yet.</p>{% endif %}
-</section>
-
-<section>
-  <h2>Recent scans</h2>
-  {% if scans %}
-  <table>
-    <thead><tr><th>Started</th><th>Tool</th><th>Target</th><th>Status</th></tr></thead>
-    <tbody>
-    {% for s in scans %}
-      <tr>
-        <td><a href="{{ base }}/scan/{{ s.id }}">{{ s.started_at[:19] }}</a></td>
-        <td>{{ s.tool }}</td>
-        <td class="url">{{ s.target }}</td>
-        <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}<p class="muted">No scans yet.</p>{% endif %}
+  {% else %}
+  <p class="muted">
+    No assessments yet.
+    <a href="{{ base }}/assess">Start your first assessment →</a>
+  </p>
+  {% endif %}
 </section>
 {% endblock %}
