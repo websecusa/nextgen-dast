@@ -1453,48 +1453,136 @@ def assessments_list(request: Request):
 
 
 @app.get("/assessment/{aid}", response_class=HTMLResponse)
-def assessment_detail(request: Request, aid: int):
+def assessment_detail(request: Request, aid: int,
+                      status: str = "open",
+                      sev: str = "",
+                      sort: str = "severity",
+                      q: str = ""):
+    """Per-assessment workspace.
+
+    Query params drive the findings list:
+      status = open | closed | all
+      sev    = critical | high | medium | low | info | "" (all)
+      sort   = severity | newest | tool
+      q      = case-insensitive title substring
+
+    The page renders the full findings list (no pagination at this
+    scale) plus a header card with the severity rollup and the PDF
+    report list. Selection state lives in the URL hash (#finding-<id>)
+    and is restored client-side so refresh / share-link works.
+    """
     a = db.query_one("SELECT * FROM assessments WHERE id = %s", (aid,))
     if not a:
         raise HTTPException(404)
-    # Pull `status` and `validation_status` so the table can render the
-    # False-Positive badge and the rollup can exclude suppressed rows.
-    findings = db.query(
+
+    if status not in ("open", "closed", "all"):
+        status = "open"
+    if sev not in ("", "critical", "high", "medium", "low", "info"):
+        sev = ""
+    if sort not in ("severity", "newest", "tool"):
+        sort = "severity"
+    q = (q or "").strip()
+
+    # Pull every finding once. We do server-side sorting + filtering on
+    # the dict list so the same data drives the visible list AND the
+    # severity-rollup tiles, which always reflect the unfiltered counts.
+    rows = db.query(
         "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
-        "cwe, cvss, title, description, evidence_url, remediation, "
-        "status, validation_status, "
-        "COALESCE(seen_count, 1) AS seen_count "
-        "FROM findings WHERE assessment_id = %s "
-        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
+        "cwe, cvss, title, description, evidence_url, evidence_method, "
+        "remediation, status, validation_status, validation_run_at, "
+        "COALESCE(seen_count, 1) AS seen_count, created_at "
+        "FROM findings WHERE assessment_id = %s",
         (aid,))
-    # Severity rollup excludes findings the analyst has marked false
-    # positive — they shouldn't influence the score or the report cover.
-    # When the assessment has the filter_info toggle on, info-severity
-    # rows are also suppressed from both the table and the rollup.
+
+    # Severity rollup — false positives excluded; matches the PDF.
     sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
     fp_count = 0
+    counts_by_status = {"open": 0, "closed": 0, "all": 0}
     info_hidden = 0
     filter_info = bool(a.get("filter_info"))
-    visible: list[dict] = []
-    for f in findings:
+    for f in rows:
+        counts_by_status["all"] += 1
         if f.get("status") == "false_positive":
             fp_count += 1
+        if f.get("status") in ("open", "confirmed"):
+            counts_by_status["open"] += 1
+        else:
+            counts_by_status["closed"] += 1
+        if f.get("status") == "false_positive":
             continue
         if filter_info and f.get("severity") == "info":
             info_hidden += 1
             continue
         sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
+
+    # Apply the visible filters to derive the list shown in the workspace.
+    sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    visible: list[dict] = []
+    for f in rows:
+        # Status tabs
+        st = f.get("status") or "open"
+        if status == "open" and st not in ("open", "confirmed"):
+            continue
+        if status == "closed" and st in ("open", "confirmed"):
+            continue
+        if sev and f.get("severity") != sev:
+            continue
+        if q and q.lower() not in (f.get("title") or "").lower():
+            continue
         visible.append(f)
+
+    if sort == "newest":
+        visible.sort(key=lambda f: (f.get("created_at") or 0), reverse=True)
+    elif sort == "tool":
+        visible.sort(key=lambda f: (f.get("source_tool") or "",
+                                     sev_rank.get(f.get("severity"), 9),
+                                     f.get("id") or 0))
+    else:
+        visible.sort(key=lambda f: (sev_rank.get(f.get("severity"), 9),
+                                     -(f.get("id") or 0)))
+
     scan_ids = (a.get("scan_ids") or "").split(",") if a.get("scan_ids") else []
     scan_ids = [s for s in scan_ids if s]
     reports = reports_mod.list_reports(aid)
+
+    # The detail + aside columns render the FIRST visible finding so the
+    # workspace is never blank on first paint. Subsequent clicks swap
+    # the panels in via fetch (no page reload).
+    initial = visible[0] if visible else None
+    detail_ctx = _finding_panel_context(initial)
+
     return templates.TemplateResponse(
         "assessment_detail.html",
         ctx(request, a=a, findings=visible, sev_counts=sev_counts,
             fp_count=fp_count, info_hidden=info_hidden,
             filter_info=filter_info,
-            scan_ids=scan_ids, reports=reports),
+            scan_ids=scan_ids, reports=reports,
+            counts=counts_by_status,
+            filter_status=status, filter_sev=sev, sort=sort, q=q,
+            **detail_ctx),
     )
+
+
+def _finding_panel_context(f: Optional[dict]) -> dict:
+    """Build the variables the finding_panel.html / _finding_aside.html
+    partials expect: f, e (enrichment), repro (reproduction block),
+    probe (matched validation probe). Tolerant of f=None — used as the
+    empty-state path."""
+    if not f:
+        return {"f": None, "e": None, "repro": None, "probe": None}
+    e = None
+    if f.get("enrichment_id"):
+        e = db.query_one(
+            "SELECT * FROM finding_enrichment WHERE id = %s",
+            (f["enrichment_id"],))
+        if e:
+            try:
+                e["steps"] = json.loads(e.get("remediation_steps") or "[]")
+            except Exception:
+                e["steps"] = []
+    repro = reports_mod._repro_for(f)
+    probe = toolkit_mod.find_probe_for_finding(f)
+    return {"f": f, "e": e, "repro": repro, "probe": probe}
 
 
 @app.post("/assessment/{aid}/filter_info")
@@ -2352,6 +2440,94 @@ def assessment_challenge_all(aid: int):
         start_new_session=True, cwd="/app",
     )
     return redirect(f"/assessment/{aid}?msg=challenge+all+started")
+
+
+# ---- Workspace partials + bulk actions -------------------------------------
+
+@app.get("/finding/{fid}/panel", response_class=HTMLResponse)
+def finding_panel_fragment(request: Request, fid: int):
+    """Detail-pane HTML fragment, swapped into the workspace via fetch.
+    Standalone (no layout chrome) so it slots straight into #fw-detail."""
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    return templates.TemplateResponse(
+        "finding_panel.html",
+        ctx(request, **_finding_panel_context(f)),
+    )
+
+
+@app.get("/finding/{fid}/aside", response_class=HTMLResponse)
+def finding_aside_fragment(request: Request, fid: int):
+    """Right-rail (AT A GLANCE + actions) HTML fragment for the workspace."""
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    return templates.TemplateResponse(
+        "_finding_aside.html",
+        ctx(request, **_finding_panel_context(f)),
+    )
+
+
+@app.post("/finding/{fid}/status")
+def finding_set_status(fid: int, status: str = Form(...)):
+    """Set findings.status to fixed (Resolve) or accepted_risk (Archive).
+    Other statuses are rejected so the route can't be coerced into
+    arbitrary state changes."""
+    if status not in ("fixed", "accepted_risk", "open"):
+        raise HTTPException(400, f"invalid status {status!r}")
+    f = db.query_one("SELECT id, assessment_id FROM findings WHERE id = %s",
+                     (fid,))
+    if not f:
+        raise HTTPException(404)
+    db.execute("UPDATE findings SET status = %s WHERE id = %s",
+               (status, fid))
+    return redirect(f"/assessment/{f['assessment_id']}#finding-{fid}")
+
+
+@app.post("/assessment/{aid}/findings/bulk")
+async def assessment_findings_bulk(request: Request, aid: int):
+    """Bulk-action endpoint for the workspace toolbar.
+
+    Body: form-data with `action` in {resolve, archive, delete} and one
+    or more `finding_ids` entries. All targeted findings must belong to
+    THIS assessment — we filter by assessment_id in the SQL so a forged
+    list of foreign ids cannot mutate other assessments' rows.
+    """
+    a = db.query_one("SELECT id FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    form = await request.form()
+    action = (form.get("action") or "").strip().lower()
+    raw_ids = form.getlist("finding_ids")
+    ids: list[int] = []
+    for v in raw_ids:
+        try:
+            ids.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return JSONResponse({"ok": True, "affected": 0})
+    placeholders = ",".join(["%s"] * len(ids))
+    if action == "resolve":
+        n = db.execute(
+            f"UPDATE findings SET status = 'fixed' "
+            f"WHERE assessment_id = %s AND id IN ({placeholders})",
+            [aid, *ids])
+    elif action == "archive":
+        n = db.execute(
+            f"UPDATE findings SET status = 'accepted_risk' "
+            f"WHERE assessment_id = %s AND id IN ({placeholders})",
+            [aid, *ids])
+    elif action == "delete":
+        n = db.execute(
+            f"DELETE FROM findings "
+            f"WHERE assessment_id = %s AND id IN ({placeholders})",
+            [aid, *ids])
+    else:
+        raise HTTPException(400, f"unknown action {action!r}")
+    return JSONResponse({"ok": True, "action": action,
+                         "requested": len(ids), "affected": n or len(ids)})
 
 
 @app.post("/finding/{fid}/reopen")

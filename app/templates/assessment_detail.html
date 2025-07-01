@@ -1,255 +1,273 @@
 {#
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Per-assessment workspace. Three-column layout:
+
+    [findings list]   [selected finding's detail]   [AT A GLANCE + actions]
+
+  The list supports filter (severity), sort (severity / recency / tool),
+  status tabs (Open / Closed / All), and free-text title search. All four
+  go through the same querystring on a normal page navigation -- no SPA
+  state. Clicking a list row, however, does NOT reload the page: a tiny
+  fetch() pulls the detail+aside HTML for the chosen finding from the
+  server and swaps it into the middle and right columns. Browser
+  history is updated via location.hash so a refresh / back-button keeps
+  the same selection.
+
+  Bulk-action toolbar appears at the bottom of the list when one or
+  more rows are checkboxed. POSTs to /assessment/<aid>/findings/bulk
+  with action in (resolve | archive | delete) and reloads on success.
+
+  The status banner, severity rollup, validation card, PDF report card
+  and underlying-scans block from the previous version live in the
+  Overview tab so the deliverable surfaces (PDF, scan IDs) stay one
+  click away without crowding the workspace.
 #}
 {% extends "base.html" %}
 {% block content %}
-<h1>Assessment #{{ a.id }} — <code>{{ a.fqdn }}</code></h1>
-<p>
-  <span class="badge">{{ a.profile }}</span>
-  <span class="badge">LLM: {{ a.llm_tier }}</span>
-  {# Surface the caller-supplied application identifier next to the
-     other run metadata so reports / handoffs can be cross-referenced
-     against the customer's app catalog. Hidden when not provided. #}
-  {% if a.application_id %}
-    <span class="badge" title="Caller-supplied application identifier">App: {{ a.application_id }}</span>
-  {% endif %}
-  <span class="badge {{ a.status }}" id="status">{{ a.status }}</span>
-  &nbsp;
-  <span class="muted" id="step">{{ a.current_step or "" }}</span>
-</p>
-<p class="muted">
-  Started {{ a.created_at }}
-  {% if a.finished_at %}· finished {{ a.finished_at }}{% endif %}
-  {% if a.status not in ('running', 'queued', 'deleting') %}
-    &nbsp;·&nbsp;
-    <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
-          style="display:inline"
-          onsubmit="return confirm('Permanently delete assessment #{{ a.id }} ({{ a.fqdn }}) and all of its scan files? This cannot be undone.')">
-      <button type="submit" class="warn">Delete assessment</button>
-    </form>
-  {% endif %}
-</p>
 
-{# PDF report card sits at the top so the deliverable is the first
-   thing visible on the assessment page. We keep at most ONE report
-   per assessment — generating replaces the previous one. #}
-<section class="card">
-  <h2>PDF report</h2>
-  {% if a.status not in ('running','queued','deleting') %}
-    {% if is_admin %}
-      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report" style="display:inline">
-        <button type="submit">{% if reports %}Regenerate PDF report{% else %}Generate PDF report{% endif %}</button>
-      </form>
-      <small class="muted" style="margin-left:.6em">
-        Takes 5–15 s. Only one PDF is kept per assessment —
-        regenerating replaces the previous one.
-      </small>
-    {% else %}
-      <p class="muted">Read-only — ask an admin to generate a new report. Existing report is downloadable below.</p>
-    {% endif %}
-  {% else %}
-    <p class="muted">Report generation available once the assessment finishes.</p>
-  {% endif %}
-
-  {% if reports %}
-    <table style="margin-top:.8em">
-      <thead><tr><th>Filename</th><th>Generated</th><th>Size</th><th></th></tr></thead>
-      <tbody>
-      {% for r in reports %}
-        <tr>
-          <td><code>{{ r.filename }}</code></td>
-          <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
-          <td>{{ (r.size_bytes / 1024) | round(1) }} KB</td>
-          <td>
-            <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">Download</a>
-            {% if is_admin %}
-              &nbsp;·&nbsp;
-              <form method="post"
-                    action="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}/delete"
-                    style="display:inline"
-                    onsubmit="return confirm('Delete report {{ r.filename }}? This cannot be undone.')">
-                <button type="submit" class="warn link">Delete</button>
-              </form>
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="muted small">No report generated yet.</p>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h2>Severity rollup</h2>
-  {# Filter-info toggle. Persists on the assessment row so it affects
-     both the on-screen view AND the next generated PDF. The checkbox
-     auto-submits the form on change so it's a single click. Disabled
-     for non-admins (the form would be rejected anyway). #}
-  <form method="post" action="{{ base }}/assessment/{{ a.id }}/filter_info"
-        style="margin:0 0 .8em 0">
-    <label class="check" style="display:inline-flex; align-items:center; gap:.4em">
-      <input type="checkbox" name="enabled" value="1"
-             {% if filter_info %}checked{% endif %}
-             {% if not is_admin %}disabled{% endif %}
-             onchange="this.form.submit()">
-      <span>Hide info-severity findings on this page and in the PDF</span>
-    </label>
-    {% if filter_info and info_hidden %}
-      <span class="muted small" style="margin-left:.6em">
-        ({{ info_hidden }} info-severity finding{{ '' if info_hidden == 1 else 's' }} currently hidden)
-      </span>
-    {% endif %}
-  </form>
-  <div style="display:flex; gap:1em; flex-wrap:wrap">
-    {% for sev in ['critical','high','medium','low','info'] %}
-      <div style="flex:1; min-width:120px; text-align:center; padding:.8em; border-radius:6px; border:1px solid var(--border)">
-        <div class="badge sev-{{ sev }}" style="font-size:1em; padding:.3em .6em">{{ sev }}</div>
-        <div style="font-size:1.6em; font-weight:600; margin-top:.3em">{{ sev_counts[sev] }}</div>
-      </div>
-    {% endfor %}
-    {# Sixth tile: false-positive count. Web view only — the PDF report
-       already excludes suppressed findings from its rollup and shouldn't
-       advertise the suppression count to clients reading the deliverable. #}
-    <div style="flex:1; min-width:120px; text-align:center; padding:.8em; border-radius:6px; border:1px dashed var(--border); opacity:.85"
-         title="Findings the analyst marked as false positive. Excluded from the rollup, the score, and the PDF report — visible here for audit only.">
-      <div class="badge warn" style="font-size:1em; padding:.3em .6em">false positive</div>
-      <div style="font-size:1.6em; font-weight:600; margin-top:.3em">{{ fp_count or 0 }}</div>
+<div class="fw-header">
+  <div class="title">
+    <h1>{{ a.application_id or a.fqdn }}</h1>
+    <div class="subtitle">
+      <code>{{ a.fqdn }}</code>
+      <span>·</span>
+      <span class="badge">{{ a.profile }}</span>
+      <span class="badge {{ a.status }}" id="status">{{ a.status }}</span>
+      {% if a.application_id %}<span class="badge">App: {{ a.application_id }}</span>{% endif %}
+      {% if a.finished_at %}
+        <span>·</span>
+        <span>Last assessment {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}</span>
+      {% endif %}
+      <span class="muted small" id="step">{{ a.current_step or "" }}</span>
     </div>
   </div>
-  {% if fp_count and fp_count > 0 %}
-    <p class="muted small" style="margin-top:.6em">
-      The <em>false positive</em> tile is excluded from the score and from
-      the generated PDF report. Re-open any row from its finding-detail
-      page to put it back in the rollup.
-    </p>
-  {% endif %}
-</section>
-
-{% if a.exec_summary %}
-<section class="card">
-  <h2>Executive summary <small class="muted">(LLM)</small></h2>
-  <div style="white-space:pre-wrap">{{ a.exec_summary }}</div>
-</section>
-{% endif %}
-
-<section class="card">
-  <h2>Validate findings</h2>
-  <p class="muted" style="margin-top:0">
-    Run high-fidelity validation probes against every <strong>open,
-    unvalidated</strong> finding in this assessment that has a toolkit
-    probe mapped to it. Probes use the assessment's stored credentials
-    when available (single login, cookie reused for the whole batch).
-    <strong>Info-severity findings are skipped</strong> — only critical,
-    high, medium, and low rows are challenged.
-  </p>
-  <p class="muted small" style="margin:.2em 0 .8em">
-    Probes are read-only by manifest. A confident
-    <em>false positive</em> verdict automatically suppresses the row
-    (status flips to <code>false_positive</code>, excluded from the
-    severity rollup and the PDF report). Validations don't auto-flip —
-    they're left for an analyst to confirm.
-  </p>
-  <form method="post" action="{{ base }}/assessment/{{ a.id }}/challenge_all"
-        onsubmit="return confirm('Run validation probes against every eligible finding in this assessment?\n\nThis runs in the background. Watch the status line under the assessment header for progress.')">
-    <button type="submit" {% if not is_admin or a.status not in ('done','error','cancelled') %}disabled{% endif %}>
-      Challenge all eligible findings
-    </button>
-    {% if a.status not in ('done','error','cancelled') %}
-      <small class="muted" style="margin-left:.6em">
-        Disabled while the assessment is {{ a.status }}; finish first.
-      </small>
+  <div class="actions">
+    {% if is_admin and a.status not in ('running','queued','deleting') %}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report"
+            style="display:inline">
+        <button type="submit" class="ghost">
+          {% if reports %}Regenerate PDF{% else %}Generate PDF{% endif %}
+        </button>
+      </form>
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
+            style="display:inline"
+            onsubmit="return confirm('Permanently delete assessment #{{ a.id }} ({{ a.fqdn }}) and all of its scan files? This cannot be undone.')">
+        <button type="submit" class="warn">Delete assessment</button>
+      </form>
     {% endif %}
-  </form>
-</section>
+    <a href="{{ base }}/assess" class="button">Re-scan / new target</a>
+  </div>
+</div>
 
-<section>
-  <h2>Findings ({{ findings|length }})</h2>
-  {% if findings %}
-  <table>
-    <thead><tr>
-      <th>Severity</th><th>Tool</th><th>Title</th><th>OWASP</th>
-      <th>CWE</th><th>Evidence</th>
-    </tr></thead>
-    <tbody>
-    {% for f in findings %}
-      {# False-positive rows render dimmed + struck-through, with a clear
-         badge in both the Severity column (so it's visible at a glance) and
-         alongside the title. They stay in the table for audit; the rollup
-         and the PDF report exclude them. #}
-      {% set is_fp = f.status == 'false_positive' %}
-      <tr style="{% if is_fp %}opacity:.55{% endif %}">
-        <td>
-          {% if is_fp %}
-            <span class="badge warn"
-                  title="This finding has been suppressed by an analyst. It does not count toward the severity rollup or the generated PDF report.">
-              False Positive
-            </span><br>
-            <small class="muted" style="text-decoration:line-through">{{ f.severity }}</small>
-          {% else %}
-            <span class="badge sev-{{ f.severity }}">{{ f.severity }}</span>
-            {% if f.validation_status == 'validated' %}
-              <br><small class="badge" title="Confirmed by a high-fidelity probe">✓ validated</small>
-            {% endif %}
-          {% endif %}
-        </td>
-        <td>{{ f.source_tool }}</td>
-        <td>
-          <a href="{{ base }}/finding/{{ f.id }}"
-             {% if is_fp %}style="text-decoration:line-through"{% endif %}>{{ f.title|truncate(140) }}</a>
-          {% if f.seen_count and f.seen_count > 1 %}
-            <span class="badge" title="Number of times this finding was reported by the same tool">×{{ f.seen_count }}</span>
-          {% endif %}
-          {% if f.description %}
-            <details><summary class="muted" style="cursor:pointer">details</summary>
-              <pre style="white-space:pre-wrap; font-size:.85em">{{ f.description|truncate(2000) }}</pre>
-              {% if f.remediation %}
-                <p><strong>Remediation:</strong> {{ f.remediation }}</p>
-              {% endif %}
-              <p><a href="{{ base }}/finding/{{ f.id }}">Open full guidance &amp; ticket export →</a></p>
-            </details>
-          {% endif %}
-        </td>
-        <td><small>{{ f.owasp_category or "—" }}</small></td>
-        <td>{{ "CWE-" + f.cwe if f.cwe else "—" }}</td>
-        <td class="url"><small>{{ f.evidence_url|truncate(80) if f.evidence_url else "" }}</small></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-    <p class="muted">No findings yet — assessment in progress.</p>
+{# ---- Severity rollup strip (KPI-style) ----------------------------- #}
+<div class="kpi-strip" style="margin-bottom:1em">
+  {% if a.risk_score is not none %}
+  <div class="kpi"><span class="v">{{ a.risk_score }}</span><span class="lbl">/100 risk</span></div>
   {% endif %}
-</section>
-
-{% if scan_ids %}
-<section class="card">
-  <h2>Underlying scans</h2>
-  <ul>
-    {% for sid in scan_ids %}
-      <li><a href="{{ base }}/scan/{{ sid }}">#{{ sid }}</a></li>
+  <div class="kpi"><span class="v">{{ findings|length }}</span><span class="lbl">findings</span></div>
+  <div class="kpi">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      {% if sev_counts[sev] %}
+        <span class="sev-dot sev-{{ sev }}"
+              title="{{ sev|capitalize }}: {{ sev_counts[sev] }}"></span>{{ sev_counts[sev] }}&nbsp;
+      {% endif %}
     {% endfor %}
-  </ul>
-</section>
-{% endif %}
+  </div>
+  {% if fp_count %}
+  <div class="kpi"><span class="v">{{ fp_count }}</span><span class="lbl">false positive</span></div>
+  {% endif %}
+  {% if reports %}
+  <div class="kpi" style="margin-left:auto">
+    {% for r in reports %}
+      <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">
+        Download PDF ({{ (r.size_bytes / 1024) | round(1) }} KB)
+      </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{# ---- Three-column workspace --------------------------------------- #}
+<div class="fw">
+
+  {# ----- LEFT: filterable, selectable findings list ---------------- #}
+  <div class="fw-list">
+    <form method="get" action="" class="fw-list-toolbar"
+          style="display:flex; flex-direction:column; align-items:stretch; gap:.5em">
+      <div class="tabs">
+        <a href="?status=open{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'open' %}active{% endif %}">Open ({{ counts.open }})</a>
+        <a href="?status=closed{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'closed' %}active{% endif %}">Closed ({{ counts.closed }})</a>
+        <a href="?status=all{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'all' %}active{% endif %}">All ({{ counts.all }})</a>
+      </div>
+      <div style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
+        <select name="sev" onchange="this.form.submit()">
+          <option value="">All severities</option>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <option value="{{ sev }}" {% if filter_sev == sev %}selected{% endif %}>{{ sev|capitalize }}</option>
+          {% endfor %}
+        </select>
+        <select name="sort" onchange="this.form.submit()">
+          <option value="severity" {% if sort == 'severity' %}selected{% endif %}>By severity</option>
+          <option value="newest"   {% if sort == 'newest' %}selected{% endif %}>Newest first</option>
+          <option value="tool"     {% if sort == 'tool' %}selected{% endif %}>By tool</option>
+        </select>
+        <input type="search" name="q" value="{{ q or '' }}"
+               placeholder="Search title…">
+        <input type="hidden" name="status" value="{{ filter_status }}">
+      </div>
+    </form>
+
+    <div class="fw-list-items">
+      {% if findings %}
+        {% for f in findings %}
+          {% set is_fp = f.status == 'false_positive' %}
+          <label class="fw-item {% if is_fp %}is-fp{% endif %}"
+                 data-id="{{ f.id }}"
+                 onclick="loadFinding({{ f.id }}, this, event)">
+            <input type="checkbox" value="{{ f.id }}"
+                   onclick="event.stopPropagation(); refreshBulkBar()">
+            <div class="fi-body">
+              <div class="fi-title">{{ f.title }}</div>
+              <div class="fi-meta">
+                <span class="sev sev-{{ f.severity }}">{{ f.severity }}</span>
+                <span>·</span>
+                <span>{{ f.source_tool }}</span>
+                {% if f.created_at %}
+                  <span>·</span>
+                  <span>{{ f.created_at.strftime('%m/%d %H:%M') if f.created_at.strftime else f.created_at }}</span>
+                {% endif %}
+                {% if f.seen_count and f.seen_count > 1 %}
+                  <span>·</span>
+                  <span>×{{ f.seen_count }}</span>
+                {% endif %}
+              </div>
+            </div>
+          </label>
+        {% endfor %}
+      {% else %}
+        <p class="muted small" style="padding:1.4em">
+          No findings match the current filter.
+        </p>
+      {% endif %}
+    </div>
+
+    {# Bulk-action bar appears once at least one row is checked. #}
+    <div class="fw-bulk-bar" hidden id="fw-bulk-bar">
+      <span class="count"><span id="bulk-count">0</span> selected</span>
+      <button type="button" class="ghost" onclick="bulkAction('resolve')">Resolve</button>
+      <button type="button" class="ghost" onclick="bulkAction('archive')">Archive</button>
+      <button type="button" class="warn" onclick="bulkAction('delete')">Delete</button>
+    </div>
+  </div>
+
+  {# ----- MIDDLE: selected finding's detail ------------------------- #}
+  <div class="fw-detail" id="fw-detail">
+    {% include 'finding_panel.html' %}
+  </div>
+
+  {# ----- RIGHT: AT A GLANCE + actions ------------------------------ #}
+  <div class="fw-aside" id="fw-aside">
+    {% include '_finding_aside.html' %}
+  </div>
+
+</div>
+
+<script>
+  // Workspace state. The selected finding's id flows through location.hash
+  // so a refresh / share-link keeps the same row open.
+  const BASE = "{{ base }}";
+
+  function loadFinding(id, item, ev) {
+    if (ev) {
+      // Suppress accidental click-into-select on the row's checkbox
+      // (the checkbox handler already stops propagation, but defend
+      // here too in case markup changes).
+      const t = ev.target;
+      if (t && t.tagName === "INPUT") return;
+    }
+    document.querySelectorAll(".fw-item.active").forEach(el => el.classList.remove("active"));
+    if (item) item.classList.add("active");
+    history.replaceState(null, "", "#finding-" + id);
+
+    // Load the detail panel and the right-rail aside in parallel — they
+    // each render a small fragment. On error we leave the previous
+    // selection visible so a transient network blip is not destructive.
+    Promise.all([
+      fetch(BASE + "/finding/" + id + "/panel").then(r => r.text()),
+      fetch(BASE + "/finding/" + id + "/aside").then(r => r.text()),
+    ]).then(([detail, aside]) => {
+      document.getElementById("fw-detail").innerHTML = detail;
+      document.getElementById("fw-aside").innerHTML = aside;
+    }).catch(err => console.error("loadFinding failed", err));
+  }
+
+  function refreshBulkBar() {
+    const checked = document.querySelectorAll(".fw-item input[type=checkbox]:checked");
+    document.getElementById("bulk-count").textContent = checked.length;
+    document.getElementById("fw-bulk-bar").hidden = checked.length === 0;
+  }
+
+  function bulkAction(action) {
+    const ids = Array.from(document.querySelectorAll(".fw-item input[type=checkbox]:checked"))
+                     .map(cb => cb.value);
+    if (ids.length === 0) return;
+    const verb = action === "delete" ? "delete" : action;
+    if (!confirm(verb.charAt(0).toUpperCase() + verb.slice(1) + " " +
+                 ids.length + " finding(s)?" +
+                 (action === "delete" ? "\n\nDelete is permanent." : ""))) return;
+    const fd = new FormData();
+    fd.append("action", action);
+    ids.forEach(id => fd.append("finding_ids", id));
+    fetch(BASE + "/assessment/{{ a.id }}/findings/bulk",
+          { method: "POST", body: fd, credentials: "same-origin" })
+      .then(r => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        location.reload();
+      })
+      .catch(err => alert("Bulk action failed: " + err));
+  }
+
+  // Restore selection from location.hash on first paint, or auto-select
+  // the first row if there's no hash. Lets a fresh visit immediately
+  // show something useful instead of an empty middle column.
+  document.addEventListener("DOMContentLoaded", () => {
+    const m = location.hash.match(/^#finding-(\d+)$/);
+    let target = null;
+    if (m) {
+      target = document.querySelector(`.fw-item[data-id="${m[1]}"]`);
+    }
+    if (!target) {
+      target = document.querySelector(".fw-item");
+    }
+    if (target) loadFinding(target.dataset.id, target);
+  });
+</script>
 
 {% if a.status not in ('done','error','cancelled') %}
 <script>
-async function poll() {
-  try {
-    const r = await fetch('{{ base }}/assessment/{{ a.id }}/status');
-    const j = await r.json();
-    document.getElementById('status').textContent = j.status;
-    document.getElementById('status').className = 'badge ' + j.status;
-    document.getElementById('step').textContent = j.current_step || '';
-    if (j.status === 'done' || j.status === 'error' || j.status === 'cancelled') {
-      window.location.reload();
-    }
-  } catch (e) {}
-}
-setInterval(poll, 4000);
+  // While the assessment is still running, poll the status endpoint and
+  // reload the page once it transitions to a terminal state. This keeps
+  // the workspace in sync with newly-arrived findings without forcing
+  // the operator to refresh manually.
+  async function pollStatus() {
+    try {
+      const r = await fetch(BASE + "/assessment/{{ a.id }}/status");
+      const j = await r.json();
+      const stEl = document.getElementById("status");
+      if (stEl) { stEl.textContent = j.status; stEl.className = "badge " + j.status; }
+      const stepEl = document.getElementById("step");
+      if (stepEl) stepEl.textContent = j.current_step || "";
+      if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
+        window.location.reload();
+      }
+    } catch (e) {}
+  }
+  setInterval(pollStatus, 4000);
 </script>
 {% endif %}
 {% endblock %}

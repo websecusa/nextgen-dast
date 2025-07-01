@@ -84,10 +84,19 @@ aside.sidebar .brand {
   padding: .2em .4em .6em;
   font-weight: 700;
   color: var(--text);
-  font-size: 1.05em;
+  font-size: 14px;
   letter-spacing: -.01em;
 }
-aside.sidebar .brand img { height: 1.5em; width: auto; }
+/* Tightly clamp the brand logo regardless of the uploaded image's
+   intrinsic dimensions. Without max-width + object-fit, a logo with a
+   transparent canvas / wide aspect ratio overflows the slim sidebar. */
+aside.sidebar .brand img {
+  height: 22px;
+  width: auto;
+  max-width: 26px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
 
 aside.sidebar .cta {
   display: flex; align-items: center; justify-content: center; gap: .4em;
@@ -459,3 +468,194 @@ footer {
   color: var(--muted);
   font-size: .82em;
 }
+
+/* ---- Findings workspace (assessment_detail) ----------------------- */
+/*
+ * Three-column layout: filterable list (left) + selected finding's
+ * detail (middle) + AT A GLANCE metadata + actions (right). Each
+ * column is independently scrollable so the workspace fills the
+ * viewport without the page itself scrolling.
+ */
+.fw {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr) 320px;
+  gap: 1.1em;
+  /* Fill the viewport minus the page header (h1 + KPI strip ~ 180px). */
+  height: calc(100vh - 220px);
+  min-height: 540px;
+}
+@media (max-width: 1200px) {
+  .fw { grid-template-columns: 340px minmax(0, 1fr); }
+  .fw .fw-aside { display: none; }
+}
+@media (max-width: 900px) {
+  .fw { grid-template-columns: 1fr; height: auto; }
+  .fw-list, .fw-detail { max-height: 60vh; }
+}
+
+.fw-list, .fw-detail, .fw-aside {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.fw-detail, .fw-aside { padding: 1.2em 1.4em; overflow-y: auto; }
+
+.fw-list-toolbar {
+  padding: .7em .8em;
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: .4em; flex-wrap: wrap; align-items: center;
+}
+.fw-list-toolbar .tabs { display: flex; gap: .15em; }
+.fw-list-toolbar .tabs a {
+  padding: .35em .75em;
+  border-radius: var(--radius-pill);
+  font-size: .82em;
+  font-weight: 500;
+  color: var(--text-soft);
+  text-decoration: none;
+}
+.fw-list-toolbar .tabs a:hover { background: var(--panel-2); text-decoration: none; }
+.fw-list-toolbar .tabs a.active { background: var(--panel-2); color: var(--text); }
+
+.fw-list-toolbar select,
+.fw-list-toolbar input[type=search] {
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: .35em .55em;
+  border-radius: 8px;
+  font-size: .85em;
+}
+.fw-list-toolbar input[type=search] { flex: 1; min-width: 100px; }
+
+.fw-list-items {
+  overflow-y: auto;
+  flex: 1;
+  /* leave room for the bulk-action bar at the bottom (which is
+     `position: sticky` inside this scroll container). */
+}
+.fw-item {
+  display: flex; gap: .55em; align-items: flex-start;
+  padding: .7em .9em;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background-color .12s;
+  position: relative;
+}
+.fw-item:hover { background: var(--panel-2); }
+.fw-item.active {
+  background: var(--panel-2);
+}
+.fw-item.active::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px; background: var(--accent);
+}
+.fw-item input[type=checkbox] {
+  margin-top: .25em; cursor: pointer; flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.fw-item .fi-body { min-width: 0; flex: 1; }
+.fw-item .fi-title {
+  font-size: .9em; font-weight: 500; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fw-item .fi-meta {
+  display: flex; gap: .55em; align-items: center; flex-wrap: wrap;
+  font-size: .76em; color: var(--muted); margin-top: .3em;
+}
+.fw-item.is-fp { opacity: .55; }
+
+.fw-bulk-bar {
+  position: sticky; bottom: 0;
+  background: var(--elevated);
+  border-top: 1px solid var(--border-strong);
+  padding: .65em .8em;
+  display: flex; gap: .5em; align-items: center; flex-wrap: wrap;
+}
+.fw-bulk-bar[hidden] { display: none; }
+.fw-bulk-bar .count {
+  font-size: .85em; font-weight: 600; color: var(--text);
+  margin-right: auto;
+}
+.fw-bulk-bar button { padding: .3em .8em; font-size: .82em; }
+
+/* Detail pane */
+.fw-detail .detail-head {
+  display: flex; align-items: flex-start; gap: 1em;
+  padding-bottom: .8em; margin-bottom: 1em;
+  border-bottom: 1px solid var(--border);
+}
+.fw-detail .detail-head .sev-label {
+  display: block; font-size: .82em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+  margin-bottom: .25em;
+}
+.fw-detail .detail-head h2 {
+  margin: 0; color: var(--text); text-transform: none; letter-spacing: 0;
+  font-size: 1.2em; font-weight: 600;
+}
+.fw-detail .detail-head .head-chips {
+  display: flex; gap: .35em; margin-top: .4em; flex-wrap: wrap;
+}
+.fw-detail h3.section {
+  font-size: .8em; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 1.4em 0 .4em; font-weight: 600;
+}
+.fw-detail .empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--muted); font-size: .9em;
+}
+
+/* Aside (AT A GLANCE) */
+.fw-aside .aside-section {
+  font-size: .72em; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin: 1.1em 0 .4em; font-weight: 600;
+}
+.fw-aside .aside-section:first-child { margin-top: 0; }
+.fw-aside .aside-row {
+  display: flex; justify-content: space-between; gap: .6em;
+  padding: .25em 0; font-size: .85em;
+}
+.fw-aside .aside-row .lbl { color: var(--muted); }
+.fw-aside .aside-row .val { color: var(--text); text-align: right;
+                             word-break: break-word; max-width: 60%; }
+.fw-aside .action-btn {
+  display: flex; align-items: center; gap: .55em; width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: .55em .8em;
+  margin: .35em 0 0;
+  border-radius: 10px;
+  font-size: .88em; font-weight: 500;
+  text-align: left; cursor: pointer;
+  transition: background-color .12s, border-color .12s;
+}
+.fw-aside .action-btn:hover {
+  background: var(--elevated); border-color: var(--muted);
+}
+.fw-aside .action-btn.primary {
+  background: var(--accent); color: #07111a; border-color: transparent;
+  font-weight: 600;
+}
+.fw-aside .action-btn.primary:hover { background: var(--accent-2); }
+.fw-aside .action-btn.warn {
+  background: transparent; color: var(--red); border-color: var(--red);
+}
+.fw-aside .action-btn.warn:hover { background: rgba(232,112,96,.1); }
+
+/* Page header for the assessment workspace */
+.fw-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1em; flex-wrap: wrap;
+  margin-bottom: 1em;
+}
+.fw-header .title { display: flex; flex-direction: column; gap: .15em; }
+.fw-header h1 { margin: 0; }
+.fw-header .subtitle { color: var(--muted); font-size: .9em;
+                       display: flex; gap: .55em; align-items: center;
+                       flex-wrap: wrap; }
+.fw-header .actions { display: flex; gap: .5em; flex-wrap: wrap; }

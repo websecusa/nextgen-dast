@@ -1,0 +1,156 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  AT A GLANCE side panel for the workspace's right column. Renders
+  status / metadata at the top and a button stack ("Send to agent",
+  "Mark false positive", "Resolve", "Archive", "Reopen") that wraps
+  the existing per-finding routes.
+
+  Fragment-rendered: included by assessment_detail.html for the
+  initially-selected row, and re-rendered standalone by
+  GET /finding/<id>/aside when the operator clicks a different row.
+#}
+{% if not f %}
+  <div class="empty">No finding selected.</div>
+{% else %}
+<div class="aside-section">At a glance</div>
+<div class="aside-row">
+  <span class="lbl">Severity</span>
+  <span class="val sev sev-{{ f.severity }}">{{ f.severity|upper }}</span>
+</div>
+<div class="aside-row">
+  <span class="lbl">Status</span>
+  <span class="val">
+    {% if f.status == 'false_positive' %}
+      <span class="badge warn">false positive</span>
+    {% elif f.status == 'fixed' %}
+      <span class="badge done">resolved</span>
+    {% elif f.status == 'accepted_risk' %}
+      <span class="badge">archived</span>
+    {% else %}
+      <span class="badge">{{ f.status }}</span>
+    {% endif %}
+  </span>
+</div>
+<div class="aside-row">
+  <span class="lbl">Validation</span>
+  <span class="val">
+    {% if f.validation_status == 'validated' %}
+      <span class="badge done">✓ validated</span>
+    {% elif f.validation_status == 'false_positive' %}
+      <span class="badge warn">refuted</span>
+    {% else %}
+      <span class="badge">{{ f.validation_status or 'unvalidated' }}</span>
+    {% endif %}
+  </span>
+</div>
+{% if f.owasp_category %}
+<div class="aside-row">
+  <span class="lbl">OWASP</span>
+  <span class="val">{{ f.owasp_category }}</span>
+</div>
+{% endif %}
+{% if f.cwe %}
+<div class="aside-row">
+  <span class="lbl">CWE</span>
+  <span class="val">CWE-{{ f.cwe }}</span>
+</div>
+{% endif %}
+{% if f.cvss %}
+<div class="aside-row">
+  <span class="lbl">CVSS</span>
+  <span class="val">{{ f.cvss }}</span>
+</div>
+{% endif %}
+<div class="aside-row">
+  <span class="lbl">Source tool</span>
+  <span class="val">{{ f.source_tool }}</span>
+</div>
+{% if f.created_at %}
+<div class="aside-row">
+  <span class="lbl">First seen</span>
+  <span class="val">{{ f.created_at.strftime('%Y-%m-%d %H:%M') if f.created_at.strftime else f.created_at }}</span>
+</div>
+{% endif %}
+{% if f.validation_run_at %}
+<div class="aside-row">
+  <span class="lbl">Last validated</span>
+  <span class="val">{{ f.validation_run_at.strftime('%Y-%m-%d %H:%M') if f.validation_run_at.strftime else f.validation_run_at }}</span>
+</div>
+{% endif %}
+{% if f.seen_count and f.seen_count > 1 %}
+<div class="aside-row">
+  <span class="lbl">Seen count</span>
+  <span class="val">×{{ f.seen_count }}</span>
+</div>
+{% endif %}
+
+<div class="aside-section">Actions</div>
+{# All write actions require admin. Forms render but the button is
+   disabled for read-only viewers; the global middleware would reject
+   the POST anyway -- this just removes the affordance. #}
+{% if probe %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
+      onsubmit="return confirm('Challenge this finding with the {{ probe.name }} probe? Read-only HTTP.');">
+  <button type="submit" class="action-btn primary"
+          {% if not is_admin %}disabled title="Read-only account"{% endif %}>
+    🔍 Send to agent
+    <small style="opacity:.85; font-weight:500; margin-left:auto">{{ probe.name }}</small>
+  </button>
+</form>
+{% else %}
+<button class="action-btn" disabled
+        title="No toolkit probe is mapped to this finding's signature.">
+  🔍 Send to agent
+  <small style="opacity:.7; margin-left:auto">no probe</small>
+</button>
+{% endif %}
+
+{% if f.status == 'false_positive' %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/reopen">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>↻ Re-open</button>
+</form>
+{% else %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/false_positive">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>✗ Mark false positive</button>
+</form>
+
+<form method="post" action="{{ base }}/finding/{{ f.id }}/status"
+      style="display:contents">
+  <input type="hidden" name="status" value="fixed">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>✓ Resolve (mark fixed)</button>
+</form>
+
+<form method="post" action="{{ base }}/finding/{{ f.id }}/status"
+      style="display:contents">
+  <input type="hidden" name="status" value="accepted_risk">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>📂 Archive (accepted risk)</button>
+</form>
+{% endif %}
+
+<a href="{{ base }}/finding/{{ f.id }}/export?format=jira" target="_blank"
+   class="action-btn" style="text-decoration:none">📤 Export as Jira / MD</a>
+
+<div class="aside-section">Found in</div>
+<div class="aside-row">
+  <span class="lbl">Assessment</span>
+  <span class="val"><a href="{{ base }}/assessment/{{ f.assessment_id }}">#{{ f.assessment_id }}</a></span>
+</div>
+{% if f.source_scan_id %}
+<div class="aside-row">
+  <span class="lbl">Scan ID</span>
+  <span class="val"><code style="font-size:.78em">{{ f.source_scan_id }}</code></span>
+</div>
+{% endif %}
+{% if f.evidence_url %}
+<div class="aside-row">
+  <span class="lbl">URL</span>
+  <span class="val"><code style="font-size:.78em">{{ f.evidence_url|truncate(60) }}</code></span>
+</div>
+{% endif %}
+{% endif %}
