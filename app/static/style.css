@@ -88,14 +88,18 @@ aside.sidebar .brand {
   letter-spacing: -.01em;
 }
 /* Tightly clamp the brand logo regardless of the uploaded image's
-   intrinsic dimensions. Without max-width + object-fit, a logo with a
-   transparent canvas / wide aspect ratio overflows the slim sidebar. */
+   intrinsic dimensions. Both !important rules defeat any user-uploaded
+   <img width=...> attribute or cached older stylesheet. With max-height
+   + max-width AND object-fit:contain, a logo with a transparent canvas
+   or wide aspect ratio cannot overflow the slim sidebar. */
 aside.sidebar .brand img {
-  height: 22px;
-  width: auto;
-  max-width: 26px;
+  height: 22px !important;
+  max-height: 22px !important;
+  width: auto !important;
+  max-width: 32px !important;
   object-fit: contain;
   flex-shrink: 0;
+  display: inline-block;
 }
 
 aside.sidebar .cta {
@@ -139,13 +143,21 @@ aside.sidebar nav a.active {
   background: var(--panel-2);
   color: var(--text);
 }
-aside.sidebar nav a .icon {
-  width: 16px; height: 16px;
+/* Inline-SVG icons. Default size applies anywhere the svg.icon class
+   appears (nav rows, the CTA, inline buttons). Without this universal
+   rule an unsized <svg> renders at its intrinsic size and blows the
+   layout up — that was the "crazy light-blue triangle" in the CTA. */
+.icon {
+  width: 16px;
+  height: 16px;
   flex: 0 0 16px;
   opacity: .85;
+  display: inline-block;
+  vertical-align: middle;
 }
 aside.sidebar nav a.active .icon,
 aside.sidebar nav a:hover .icon { opacity: 1; }
+aside.sidebar .cta .icon { opacity: 1; color: inherit; }
 
 aside.sidebar .sidebar-footer {
   margin-top: auto;
