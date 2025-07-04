@@ -1527,6 +1527,12 @@ def assessment_detail(request: Request, aid: int,
             continue
         if sev and f.get("severity") != sev:
             continue
+        # The persistent "hide info-severity findings" toggle on the
+        # assessment row hides info rows from the workspace AND the PDF.
+        # The dropdown filter (sev=) lets the analyst still see info
+        # rows on demand — explicit filter beats the toggle.
+        if filter_info and not sev and f.get("severity") == "info":
+            continue
         if q and q.lower() not in (f.get("title") or "").lower():
             continue
         visible.append(f)

@@ -78,8 +78,31 @@
   {% if fp_count %}
   <div class="kpi"><span class="v">{{ fp_count }}</span><span class="lbl">false positive</span></div>
   {% endif %}
-  {% if reports %}
+  {# "Hide info-severity findings" toggle. Persists on the assessment
+     row (via POST /assessment/<id>/filter_info) so it affects both
+     this on-screen view AND the next generated PDF report. The
+     checkbox auto-submits on change so it's a one-click toggle.
+     Disabled for read-only viewers (the form would be rejected by
+     the global middleware anyway). #}
   <div class="kpi" style="margin-left:auto">
+    <form method="post" action="{{ base }}/assessment/{{ a.id }}/filter_info"
+          style="display:flex; align-items:center; gap:.5em; margin:0">
+      <label class="check" style="display:flex; align-items:center; gap:.4em;
+                                  margin:0; font-size:.85em; color:var(--text-soft)">
+        <input type="checkbox" name="enabled" value="1"
+               {% if filter_info %}checked{% endif %}
+               {% if not is_admin %}disabled{% endif %}
+               onchange="this.form.submit()"
+               style="accent-color:var(--accent)">
+        Hide info-severity (page + PDF)
+      </label>
+      {% if filter_info and info_hidden %}
+        <span class="muted small">{{ info_hidden }} hidden</span>
+      {% endif %}
+    </form>
+  </div>
+  {% if reports %}
+  <div class="kpi">
     {% for r in reports %}
       <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">
         Download PDF ({{ (r.size_bytes / 1024) | round(1) }} KB)
@@ -121,6 +144,25 @@
         <input type="hidden" name="status" value="{{ filter_status }}">
       </div>
     </form>
+
+    {# Select-all bar. The header checkbox toggles every row currently
+       visible in the list (i.e. obeying the filter/search), and goes
+       indeterminate when only some rows are checked. Row count on the
+       right doubles as a "showing N" indicator. #}
+    <div class="fw-list-selectall"
+         style="display:flex; align-items:center; justify-content:space-between;
+                gap:.5em; padding:.5em .9em; border-bottom:1px solid var(--border);
+                background:var(--panel-2)">
+      <label class="check" style="display:flex; align-items:center; gap:.55em;
+                                  font-size:.82em; color:var(--text-soft);
+                                  cursor:pointer; margin:0">
+        <input type="checkbox" id="fw-select-all"
+               onclick="toggleSelectAll(this)"
+               style="cursor:pointer; accent-color:var(--accent)">
+        Select all visible
+      </label>
+      <span class="muted small">{{ findings|length }} shown</span>
+    </div>
 
     <div class="fw-list-items">
       {% if findings %}
@@ -207,9 +249,34 @@
   }
 
   function refreshBulkBar() {
+    const all     = document.querySelectorAll(".fw-item input[type=checkbox]");
     const checked = document.querySelectorAll(".fw-item input[type=checkbox]:checked");
     document.getElementById("bulk-count").textContent = checked.length;
     document.getElementById("fw-bulk-bar").hidden = checked.length === 0;
+    // Reflect the row-level state into the header's select-all box:
+    //   none checked  -> empty
+    //   some checked  -> indeterminate (browser-rendered "─" tick)
+    //   all  checked  -> ticked
+    const sel = document.getElementById("fw-select-all");
+    if (!sel) return;
+    if (checked.length === 0) {
+      sel.checked = false; sel.indeterminate = false;
+    } else if (checked.length === all.length) {
+      sel.checked = true; sel.indeterminate = false;
+    } else {
+      sel.checked = false; sel.indeterminate = true;
+    }
+  }
+
+  // Header select-all checkbox: tick / untick every visible row in
+  // one click. We dispatch on the header's checked state AFTER the
+  // browser flips it, so the user's intent (check vs uncheck) drives
+  // every row in lockstep.
+  function toggleSelectAll(headerEl) {
+    const want = headerEl.checked;
+    document.querySelectorAll(".fw-item input[type=checkbox]")
+            .forEach(cb => { cb.checked = want; });
+    refreshBulkBar();
   }
 
   function bulkAction(action) {
