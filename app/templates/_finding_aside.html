@@ -129,12 +129,36 @@
       style="display:contents">
   <input type="hidden" name="status" value="accepted_risk">
   <button type="submit" class="action-btn"
-          {% if not is_admin %}disabled{% endif %}>📂 Archive (accepted risk)</button>
+          {% if not is_admin %}disabled{% endif %}>
+    {# Untitled UI "folder" — tabbed-folder outline. Uses the
+       universal .icon size + currentColor so it picks up the button's
+       text color and matches the other action icons. #}
+    <svg class="icon" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true">
+      <path d="M22 19V9.4c0-1.12 0-1.68-.218-2.108a2 2 0 0 0-.874-.874C20.48 6.2 19.92 6.2 18.8 6.2h-5.4l-.572-1.144c-.317-.633-.476-.95-.713-1.182a2 2 0 0 0-.717-.443C10.99 3.32 10.636 3.32 9.927 3.32H5.2c-1.12 0-1.68 0-2.108.218a2 2 0 0 0-.874.874C2 4.84 2 5.4 2 6.52V19c0 1.12 0 1.68.218 2.108a2 2 0 0 0 .874.874C3.52 22.2 4.08 22.2 5.2 22.2h13.6c1.12 0 1.68 0 2.108-.218a2 2 0 0 0 .874-.874C22 20.68 22 20.12 22 19Z"/>
+    </svg>
+    Archive (accepted risk)
+  </button>
 </form>
 {% endif %}
 
 <a href="{{ base }}/finding/{{ f.id }}/export?format=jira" target="_blank"
-   class="action-btn" style="text-decoration:none">📤 Export as Jira / MD</a>
+   class="action-btn" style="text-decoration:none">
+  {# Untitled UI "share-02" — open container with an upward-pointing
+     arrow rising out of it. Matches the icon set the rest of the
+     buttons reference. #}
+  <svg class="icon" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round"
+       aria-hidden="true">
+    <path d="M21 12v6.2c0 1.12 0 1.68-.218 2.108a2 2 0 0 1-.874.874C19.48 21.4 18.92 21.4 17.8 21.4H6.2c-1.12 0-1.68 0-2.108-.218a2 2 0 0 1-.874-.874C3 19.88 3 19.32 3 18.2V12"/>
+    <path d="M16 6l-4-4-4 4"/>
+    <path d="M12 2v13"/>
+  </svg>
+  Export as Jira / MD
+</a>
 
 <div class="aside-section">Found in</div>
 <div class="aside-row">
