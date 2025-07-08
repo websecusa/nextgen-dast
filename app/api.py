@@ -653,6 +653,11 @@ def api_scan_results(
         description="Include info-severity findings. Defaults to true. "
                     "Set false to mirror what an assessment with the "
                     "'hide info-severity findings' toggle on would emit."),
+    include_accepted_risk: bool = Query(
+        False,
+        description="Include findings the analyst marked as accepted-risk "
+                    "(archived). Defaults to false so the playground / "
+                    "default API call returns only the actionable list."),
     authorization: Optional[str] = Header(None),
     x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
 ):
@@ -667,6 +672,10 @@ def api_scan_results(
         info-severity rows (the same suppression the per-assessment
         'hide info-severity findings' toggle applies to the on-screen
         view and the generated PDF).
+      * `include_accepted_risk` — default false; set true to include
+        findings the analyst archived as accepted-risk. Default
+        excludes them so the response mirrors what an oncall would
+        consider actionable.
     """
     _require_token(request, authorization, x_api_token)
     a = db.query_one("SELECT id, fqdn, application_id, profile, status, "
@@ -677,6 +686,8 @@ def api_scan_results(
     rows = _findings_for(scan_id)
     if not include_false_positives:
         rows = [r for r in rows if r.get("status") != "false_positive"]
+    if not include_accepted_risk:
+        rows = [r for r in rows if r.get("status") != "accepted_risk"]
     if not include_info:
         rows = [r for r in rows if r.get("severity") != "info"]
 
@@ -1067,6 +1078,12 @@ def _openapi_paths() -> dict:
                          "Include info-severity findings. Default "
                          "true. Set false to mirror the per-assessment "
                          "'hide info-severity findings' toggle."},
+                    {"name": "include_accepted_risk", "in": "query",
+                     "schema": {"type": "boolean", "default": False},
+                     "description":
+                         "Include findings the analyst marked as "
+                         "accepted-risk (archived). Default false so "
+                         "the response is just the actionable list."},
                 ],
                 "responses": {
                     "200": {

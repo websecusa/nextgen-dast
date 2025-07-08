@@ -165,6 +165,17 @@
           "much shorter actionable list.",
       ],
     },
+    include_accepted_risk: {
+      title: "include_accepted_risk — include archived findings",
+      summary:
+        "When true, returns findings the analyst archived (set status = " +
+        "accepted_risk). Default false, matching the workspace and PDF " +
+        "report which exclude archived rows from the actionable view.",
+      notes: [
+        "Use true when reconciling a backlog or producing a complete " +
+          "audit export, false (default) for an actionable oncall list.",
+      ],
+    },
     limit: {
       title: "limit — max scans to return",
       summary:
