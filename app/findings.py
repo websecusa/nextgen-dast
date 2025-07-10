@@ -509,16 +509,42 @@ def parse_dalfox(scan_dir: Path) -> Iterable[dict]:
         return
     items = data if isinstance(data, list) else data.get("results", [])
     for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        # Dalfox occasionally emits empty / partial result objects (e.g.
+        # when the JSONL writer flushes mid-scan, or against a target
+        # with no fuzzable parameter). Drop anything that doesn't carry
+        # the minimum evidence we'd need to claim XSS:
+        #   * a URL with at least one path/query segment, AND
+        #   * at least one signal that an actual hit occurred
+        #     (payload, vulnerable parameter, proof type, message,
+        #     response evidence).
+        # Without those checks the parser was emitting bare-host XSS
+        # findings backed by empty raw_data -- false positives that
+        # the validation toolkit then mis-routed to the SQLi probe.
+        url = it.get("data") or it.get("url") or ""
+        url_has_path = isinstance(url, str) and url.count("/") >= 3
+        has_signal = any(it.get(k) for k in
+                         ("payload", "param", "type", "message", "evidence"))
+        if not url_has_path or not has_signal:
+            continue
         sev_raw = (it.get("severity") or "medium").lower()
         sev = sev_raw if sev_raw in ("critical", "high", "medium", "low", "info") else "medium"
+        # Build a useful description from whatever Dalfox gave us so
+        # the analyst doesn't see a blank Overview pane.
+        desc_bits = []
+        if it.get("type"):    desc_bits.append(f"Proof type: {it['type']}")
+        if it.get("param"):   desc_bits.append(f"Vulnerable parameter: {it['param']}")
+        if it.get("payload"): desc_bits.append(f"Payload: {it['payload']}")
+        if it.get("message"): desc_bits.append(it["message"])
         yield {
             "source_tool": "dalfox",
             "severity": sev,
             "title": "Cross-site scripting (XSS)",
-            "description": it.get("message") or it.get("type") or "",
+            "description": "\n".join(desc_bits),
             "owasp_category": "A03:2021-Injection",
             "cwe": "79",
-            "evidence_url": it.get("data") or it.get("url"),
+            "evidence_url": url,
             "raw_data": it,
         }
 
