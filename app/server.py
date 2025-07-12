@@ -2310,6 +2310,13 @@ def _run_finding_probe(finding: dict, probe: dict,
         "max_rps": 5.0,
         "dry_run": False,
     }
+    # Probes whose manifest declares requires_post need the destructive-
+    # method gate opened so the SafeClient will accept their POSTs. The
+    # gate is gated by the *manifest*, not by the caller, so a forged
+    # finding row cannot trigger destructive operations on a probe that
+    # didn't opt in.
+    if probe.get("requires_post"):
+        config["allow_destructive"] = True
     if cookie:
         config["cookie"] = cookie  # picked up by SafeClient via Probe._build_client
     if extra:
