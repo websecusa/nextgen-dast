@@ -2299,6 +2299,21 @@ def _run_finding_probe(finding: dict, probe: dict,
     SafeClient sends it as a `Cookie:` header on every request."""
     from urllib.parse import urlparse
     url = finding.get("evidence_url") or ""
+    # Wapiti (and a couple of other tools) emit findings with a path-
+    # only evidence_url like "/login.php". urllib rejects those as
+    # "unknown url type", and the probe errors before sending its first
+    # request. Resolve to an absolute URL using the owning assessment's
+    # FQDN + scheme. Prefer https when the assessment scanned both;
+    # fall back to http if that's the only scheme tested.
+    if url.startswith("/"):
+        aid = finding.get("assessment_id")
+        if aid:
+            a = db.query_one("SELECT fqdn, scan_http, scan_https "
+                             "FROM assessments WHERE id = %s", (aid,))
+            if a and a.get("fqdn"):
+                scheme = "https" if a.get("scan_https") else (
+                    "http" if a.get("scan_http") else "https")
+                url = f"{scheme}://{a['fqdn']}{url}"
     parsed = urlparse(url)
     # Lock the probe to the host of the finding so it cannot wander.
     scope = [parsed.hostname] if parsed.hostname else []
