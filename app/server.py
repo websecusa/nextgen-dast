@@ -1494,26 +1494,45 @@ def assessment_detail(request: Request, aid: int,
         "FROM findings WHERE assessment_id = %s",
         (aid,))
 
-    # Severity rollup — false positives excluded; matches the PDF.
+    # Severity rollup — anything the analyst has triaged out is
+    # excluded so the KPI strip and the live risk score reflect what's
+    # actually open. Three statuses count as "triaged":
+    #   false_positive (suppressed by analyst or probe)
+    #   fixed          (analyst marked resolved)
+    #   accepted_risk  (archived; risk explicitly accepted)
+    # Counts of each triage outcome are surfaced separately below the
+    # rollup so the analyst can see what's been resolved without it
+    # influencing the score.
     sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
     fp_count = 0
+    resolved_count = 0
+    archived_count = 0
     counts_by_status = {"open": 0, "closed": 0, "all": 0}
     info_hidden = 0
     filter_info = bool(a.get("filter_info"))
     for f in rows:
         counts_by_status["all"] += 1
-        if f.get("status") == "false_positive":
-            fp_count += 1
-        if f.get("status") in ("open", "confirmed"):
+        st = f.get("status") or "open"
+        if st == "false_positive":   fp_count += 1
+        elif st == "fixed":          resolved_count += 1
+        elif st == "accepted_risk":  archived_count += 1
+        if st in ("open", "confirmed"):
             counts_by_status["open"] += 1
         else:
             counts_by_status["closed"] += 1
-        if f.get("status") == "false_positive":
+        if st in EXCLUDED_FROM_SCORE:
             continue
         if filter_info and f.get("severity") == "info":
             info_hidden += 1
             continue
         sev_counts[f["severity"]] = sev_counts.get(f["severity"], 0) + 1
+
+    # Compute the live risk score from the current state of findings.
+    # We deliberately don't read a.risk_score (the LLM-written value is
+    # frozen at consolidation time and goes stale as the analyst
+    # triages). The PDF report uses its own derivation in reports.py;
+    # this is the workspace-page equivalent.
+    live_risk = _live_risk_score(rows)
 
     # Apply the visible filters to derive the list shown in the workspace.
     sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -1560,13 +1579,48 @@ def assessment_detail(request: Request, aid: int,
     return templates.TemplateResponse(
         "assessment_detail.html",
         ctx(request, a=a, findings=visible, sev_counts=sev_counts,
-            fp_count=fp_count, info_hidden=info_hidden,
+            fp_count=fp_count, resolved_count=resolved_count,
+            archived_count=archived_count,
+            live_risk=live_risk,
+            info_hidden=info_hidden,
             filter_info=filter_info,
             scan_ids=scan_ids, reports=reports,
             counts=counts_by_status,
             filter_status=status, filter_sev=sev, sort=sort, q=q,
             **detail_ctx),
     )
+
+
+EXCLUDED_FROM_SCORE = ("false_positive", "fixed", "accepted_risk")
+
+# Demerit weights for the live risk-score derivation. Higher = worse,
+# so the resulting number matches the LLM's risk_score convention
+# (0 = no meaningful issues, 100 = critical / treat as incident).
+# Validated findings carry roughly 2x the unvalidated weight so a
+# probe-confirmed bug moves the dial harder than a scanner suspicion.
+_SEV_RISK_VALIDATED = {"critical": 15.0, "high": 8.0,
+                       "medium": 3.0, "low": 1.0, "info": 0.0}
+_SEV_RISK_UNVALIDATED = {"critical": 8.0, "high": 4.0,
+                         "medium": 1.5, "low": 0.5, "info": 0.0}
+
+
+def _live_risk_score(findings: list[dict]) -> int:
+    """0-100 risk derived from the CURRENT state of `findings`.
+
+    Excludes anything the analyst has triaged out (false-positive,
+    resolved, archived). Validated findings hit harder than scanner
+    suspicions. Capped at 100. Returns an int so the KPI strip can
+    render it without a format spec.
+    """
+    risk = 0.0
+    for f in findings or []:
+        if (f.get("status") or "open") in EXCLUDED_FROM_SCORE:
+            continue
+        sev = f.get("severity") or "info"
+        validated = (f.get("validation_status") == "validated")
+        table = _SEV_RISK_VALIDATED if validated else _SEV_RISK_UNVALIDATED
+        risk += table.get(sev, 0.0)
+    return min(100, int(round(risk)))
 
 
 def _finding_panel_context(f: Optional[dict]) -> dict:

@@ -61,11 +61,19 @@
   </div>
 </div>
 
-{# ---- Severity rollup strip (KPI-style) ----------------------------- #}
+{# ---- Severity rollup strip (KPI-style) -----------------------------
+   Risk score is recomputed live from the CURRENT state of the
+   findings, not the stale a.risk_score the LLM wrote at consolidation
+   time. Triaged findings (false_positive, resolved/fixed, archived/
+   accepted_risk) are excluded from both the severity rollup and the
+   risk number. Triage outcomes are surfaced as separate KPI tiles so
+   the analyst sees the work that's been done without it skewing the
+   actionable view. #}
 <div class="kpi-strip" style="margin-bottom:1em">
-  {% if a.risk_score is not none %}
-  <div class="kpi"><span class="v">{{ a.risk_score }}</span><span class="lbl">/100 risk</span></div>
-  {% endif %}
+  <div class="kpi"
+       title="Live risk score derived from current open findings. Excludes false positives, resolved, and archived. 0 = clean, 100 = critical.">
+    <span class="v">{{ live_risk }}</span><span class="lbl">/100 risk</span>
+  </div>
   <div class="kpi"><span class="v">{{ findings|length }}</span><span class="lbl">findings</span></div>
   <div class="kpi">
     {% for sev in ['critical','high','medium','low','info'] %}
@@ -76,7 +84,19 @@
     {% endfor %}
   </div>
   {% if fp_count %}
-  <div class="kpi"><span class="v">{{ fp_count }}</span><span class="lbl">false positive</span></div>
+  <div class="kpi" title="Suppressed by analyst override or refuted by a probe — excluded from risk score and PDF report.">
+    <span class="v">{{ fp_count }}</span><span class="lbl">false positive</span>
+  </div>
+  {% endif %}
+  {% if resolved_count %}
+  <div class="kpi" title="Marked Resolve in the workspace (status = fixed) — excluded from risk score.">
+    <span class="v">{{ resolved_count }}</span><span class="lbl">resolved</span>
+  </div>
+  {% endif %}
+  {% if archived_count %}
+  <div class="kpi" title="Marked Archive (status = accepted_risk) — risk explicitly accepted, excluded from score.">
+    <span class="v">{{ archived_count }}</span><span class="lbl">archived</span>
+  </div>
   {% endif %}
   {# "Hide info-severity findings" toggle. Persists on the assessment
      row (via POST /assessment/<id>/filter_info) so it affects both
