@@ -626,25 +626,29 @@ def _dashboard_data() -> dict:
     if not db.healthy():
         return empty
 
-    # Severity counts (excluding analyst-suppressed false positives) over
-    # the entire history. Cheap on small deployments; if this ever grows
-    # we'll add WHERE created_at > NOW() - INTERVAL 90 DAY.
+    # Every count on this dashboard treats triaged findings as "done":
+    # false-positive (suppressed), fixed (resolved), and accepted_risk
+    # (archived) all drop out so the dashboard mirrors what's actually
+    # actionable. The same exclusion drives the per-target live risk
+    # below and the trend-chart series.
+    triage_clause = "status NOT IN ('false_positive', 'fixed', 'accepted_risk')"
+
     sev = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
     for r in db.query(
-            "SELECT severity, COUNT(*) AS n FROM findings "
-            "WHERE status != 'false_positive' GROUP BY severity"):
+            f"SELECT severity, COUNT(*) AS n FROM findings "
+            f"WHERE {triage_clause} GROUP BY severity"):
         sev[r["severity"]] = int(r["n"] or 0)
     open_total = sum(sev.values())
 
     # 7-day delta: open findings created in the last 7 days vs the prior
     # 7-day window. Negative means we're trending down (good).
     last7 = db.query_one(
-        "SELECT COUNT(*) AS n FROM findings WHERE status != 'false_positive' "
-        "AND created_at > NOW() - INTERVAL 7 DAY")["n"] or 0
+        f"SELECT COUNT(*) AS n FROM findings WHERE {triage_clause} "
+        f"AND created_at > NOW() - INTERVAL 7 DAY")["n"] or 0
     prev7 = db.query_one(
-        "SELECT COUNT(*) AS n FROM findings WHERE status != 'false_positive' "
-        "AND created_at > NOW() - INTERVAL 14 DAY "
-        "AND created_at <= NOW() - INTERVAL 7 DAY")["n"] or 0
+        f"SELECT COUNT(*) AS n FROM findings WHERE {triage_clause} "
+        f"AND created_at > NOW() - INTERVAL 14 DAY "
+        f"AND created_at <= NOW() - INTERVAL 7 DAY")["n"] or 0
     if prev7 > 0:
         delta_pct = round(100 * (last7 - prev7) / prev7)
     elif last7 > 0:
@@ -653,7 +657,8 @@ def _dashboard_data() -> dict:
         delta_pct = 0
 
     validated = db.query_one(
-        "SELECT COUNT(*) AS n FROM findings WHERE validation_status='validated'"
+        f"SELECT COUNT(*) AS n FROM findings WHERE validation_status='validated' "
+        f"AND {triage_clause}"
     )["n"] or 0
     fp = db.query_one(
         "SELECT COUNT(*) AS n FROM findings WHERE status='false_positive'"
@@ -667,18 +672,29 @@ def _dashboard_data() -> dict:
         "SELECT MAX(finished_at) AS last_at FROM assessments WHERE status='done'")
     last_at = last_row.get("last_at") if last_row else None
 
-    # Average risk_score across the most recent assessment per target (so
-    # one host with 50 scans doesn't dominate the average).
-    overall_risk = None
+    # Live per-target risk: pull every finding from each target's most
+    # recent assessment in one query and run _live_risk_score on the
+    # group. This replaces the previous use of a.risk_score (the LLM-
+    # written value, frozen at consolidation time and stale the moment
+    # the analyst triages). Same demerit math as the assessment page.
+    live_per_aid: dict[int, int] = {}
+    findings_by_aid: dict[int, list[dict]] = {}
     rows = db.query(
-        "SELECT a.risk_score FROM assessments a "
+        "SELECT f.assessment_id, f.severity, f.status, f.validation_status "
+        "FROM findings f "
         "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
         "      WHERE status='done' GROUP BY fqdn) t "
-        "  ON a.id = t.mid "
-        "WHERE a.risk_score IS NOT NULL")
-    scores = [int(r["risk_score"]) for r in rows if r.get("risk_score") is not None]
-    if scores:
-        overall_risk = round(sum(scores) / len(scores))
+        "  ON f.assessment_id = t.mid")
+    for r in rows:
+        findings_by_aid.setdefault(r["assessment_id"], []).append(r)
+    for aid, fs in findings_by_aid.items():
+        live_per_aid[aid] = _live_risk_score(fs)
+
+    # Overall risk: average across the per-target live scores so one
+    # host with 50 scans doesn't dominate the dashboard headline.
+    overall_risk = None
+    if live_per_aid:
+        overall_risk = round(sum(live_per_aid.values()) / len(live_per_aid))
 
     # Findings-by-day for the last 30 days, broken down by severity.
     # We fill the dates client-side from the days array, so missing days
@@ -689,10 +705,10 @@ def _dashboard_data() -> dict:
     series = {s: [0] * len(days) for s in sev_chart_order}
     day_idx = {d: i for i, d in enumerate(days)}
     for r in db.query(
-            "SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
-            "FROM findings WHERE status != 'false_positive' "
-            "  AND created_at > NOW() - INTERVAL 30 DAY "
-            "GROUP BY DATE(created_at), severity"):
+            f"SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
+            f"FROM findings WHERE {triage_clause} "
+            f"  AND created_at > NOW() - INTERVAL 30 DAY "
+            f"GROUP BY DATE(created_at), severity"):
         d = r["d"].isoformat() if hasattr(r["d"], "isoformat") else str(r["d"])
         if d in day_idx and r["severity"] in series:
             series[r["severity"]][day_idx[d]] = int(r["n"] or 0)
@@ -724,38 +740,51 @@ def _dashboard_data() -> dict:
             bands.append({"sev": sev_name, "points": poly})
             bottoms = tops
 
-    # Top 6 targets ranked by their most recent risk_score.
-    targets = db.query(
-        "SELECT a.fqdn, a.application_id, a.risk_score, a.id, "
+    # Top 6 targets ranked by their most recent live risk score (the
+    # post-triage value, computed above). a.risk_score is preserved on
+    # the row for PDF report regeneration but no longer drives the
+    # dashboard ordering or the displayed number.
+    target_rows = db.query(
+        "SELECT a.fqdn, a.application_id, a.id, "
         "       a.total_findings, a.finished_at "
         "FROM assessments a "
         "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
         "      WHERE status='done' GROUP BY fqdn) t "
-        "  ON a.id = t.mid "
-        "ORDER BY COALESCE(a.risk_score, 0) DESC, a.finished_at DESC "
-        "LIMIT 6")
+        "  ON a.id = t.mid")
+    for t in target_rows:
+        t["risk_score"] = live_per_aid.get(t["id"])
+    targets = sorted(
+        target_rows,
+        key=lambda t: (-(t["risk_score"] or 0),
+                       -(t["finished_at"].timestamp() if t.get("finished_at")
+                         and hasattr(t["finished_at"], "timestamp") else 0)),
+    )[:6]
 
-    # Unresolved findings broken down by age bucket. Skips false
-    # positives so the matrix matches what the PDF report would show.
+    # Unresolved findings broken down by age bucket. Triaged rows
+    # (false-positive, resolved, archived) are excluded so the matrix
+    # matches the actionable list.
     sev_order = ("critical", "high", "medium", "low", "info")
     ages = {">30 days": {s: 0 for s in sev_order},
             ">60 days": {s: 0 for s in sev_order},
             ">90 days": {s: 0 for s in sev_order}}
     for bucket, bound in (("90 days", 90), ("60 days", 60), ("30 days", 30)):
         rows = db.query(
-            "SELECT severity, COUNT(*) AS n FROM findings "
-            "WHERE status != 'false_positive' "
-            "  AND status NOT IN ('fixed') "
-            "  AND created_at < NOW() - INTERVAL %s DAY "
-            "GROUP BY severity",
+            f"SELECT severity, COUNT(*) AS n FROM findings "
+            f"WHERE {triage_clause} "
+            f"  AND created_at < NOW() - INTERVAL %s DAY "
+            f"GROUP BY severity",
             (bound,))
         for r in rows:
             ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
 
     recent = db.query(
         "SELECT id, fqdn, application_id, status, total_findings, "
-        "       risk_score, profile, created_at, finished_at "
+        "       profile, created_at, finished_at "
         "FROM assessments ORDER BY id DESC LIMIT 6")
+    # Decorate the recent rows with the same live risk score the
+    # targets card uses, so the two stay consistent.
+    for r in recent:
+        r["risk_score"] = live_per_aid.get(r["id"])
 
     return {
         "kpi": {
