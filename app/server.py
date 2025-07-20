@@ -601,26 +601,39 @@ def ctx(request: Request, **extra) -> dict:
     }
 
 
-def _dashboard_data() -> dict:
+def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
     """Aggregate the metrics shown on the / overview page.
 
     Returns a dict with severity counts, finished-assessment metrics, a
     findings-by-day series for the trend chart (last 30 days), the
-    top-risk targets, the unresolved-by-age breakdown, and a recent-
-    activity list. All queries skip false-positive findings so the
-    dashboard mirrors what the report cover would say.
+    top-risk targets, the unresolved-by-age breakdown, the resolved-by-
+    age breakdown, and a recent-activity list. All queries skip
+    triaged findings (false-positive, fixed, accepted_risk) so the
+    dashboard mirrors what's actually actionable.
+
+    `trend_filter`, when set, restricts JUST the trend chart's series
+    to assessments whose fqdn or application_id matches the substring.
+    The filter intentionally does not propagate to the KPI strip /
+    targets / age matrices -- the typeahead is a per-card lens, not a
+    global filter.
 
     Falls back to a zeroed-out dict when the DB isn't reachable so the
     page still renders during a database outage."""
     from datetime import date, timedelta
+    # Trend chart deliberately omits 'info' (high-volume, low-signal
+    # noise that flattens the more interesting bands). Other UI
+    # surfaces still show info; this restriction is chart-only.
+    sev_chart_order = ("critical", "high", "medium", "low")
     empty = {
         "kpi": {"open": 0, "delta_7d": 0, "validated": 0, "false_positive": 0,
                 "targets": 0, "assessments": 0, "last_scan": None,
                 "risk_score": None, "sev": {s: 0 for s in
                     ("critical", "high", "medium", "low", "info")}},
-        "trend": {"days": [], "series": {s: [] for s in
-                  ("critical", "high", "medium", "low", "info")}},
+        "trend": {"days": [], "series": {s: [] for s in sev_chart_order},
+                  "bands": [], "max_total": 0, "w": 1000.0, "h": 200.0,
+                  "filter": "", "filter_targets": [], "filter_matched": True},
         "targets": [], "ages": {">30 days": {}, ">60 days": {}, ">90 days": {}},
+        "resolved_ages": {">30 days": {}, ">60 days": {}, ">90 days": {}},
         "recent": [],
     }
     if not db.healthy():
@@ -697,18 +710,54 @@ def _dashboard_data() -> dict:
         overall_risk = round(sum(live_per_aid.values()) / len(live_per_aid))
 
     # Findings-by-day for the last 30 days, broken down by severity.
-    # We fill the dates client-side from the days array, so missing days
-    # show as zero rather than collapsing the X-axis.
+    # Info severity is excluded from the chart series (high-volume /
+    # low-signal noise that flattens the criticals visually). The other
+    # dashboard surfaces still surface info totals.
     days = [(date.today() - timedelta(days=i)).isoformat()
             for i in range(29, -1, -1)]
-    sev_chart_order = ("critical", "high", "medium", "low", "info")
+    sev_chart_order = ("critical", "high", "medium", "low")
     series = {s: [0] * len(days) for s in sev_chart_order}
     day_idx = {d: i for i, d in enumerate(days)}
-    for r in db.query(
-            f"SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
-            f"FROM findings WHERE {triage_clause} "
-            f"  AND created_at > NOW() - INTERVAL 30 DAY "
-            f"GROUP BY DATE(created_at), severity"):
+
+    # Optional trend filter: restrict the series to findings whose
+    # owning assessment matches `trend_filter` on either fqdn or
+    # application_id (case-insensitive substring). Resolved server-
+    # side to a list of assessment ids so the per-day query stays
+    # efficient. `filter_matched` lets the UI distinguish "no filter"
+    # from "filter matched zero targets" (useful empty-state).
+    trend_filter = (trend_filter or "").strip()
+    matched_aids: Optional[list[int]] = None
+    filter_matched = True
+    if trend_filter:
+        like = f"%{trend_filter[:128].lower()}%"
+        matched = db.query(
+            "SELECT id FROM assessments "
+            "WHERE LOWER(fqdn) LIKE %s "
+            "   OR LOWER(COALESCE(application_id, '')) LIKE %s",
+            (like, like),
+        )
+        matched_aids = [r["id"] for r in matched]
+        filter_matched = bool(matched_aids)
+
+    trend_sql = (
+        f"SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
+        f"FROM findings WHERE {triage_clause} "
+        f"  AND severity != 'info' "
+        f"  AND created_at > NOW() - INTERVAL 30 DAY "
+    )
+    trend_params: list = []
+    if matched_aids is not None:
+        # An empty matched_aids means the filter matched no targets;
+        # short-circuit by passing an impossible WHERE so the chart
+        # renders an empty state rather than the full series.
+        if not matched_aids:
+            trend_sql += "  AND 1=0 "
+        else:
+            ph = ",".join(["%s"] * len(matched_aids))
+            trend_sql += f"  AND assessment_id IN ({ph}) "
+            trend_params.extend(matched_aids)
+    trend_sql += "GROUP BY DATE(created_at), severity"
+    for r in db.query(trend_sql, trend_params):
         d = r["d"].isoformat() if hasattr(r["d"], "isoformat") else str(r["d"])
         if d in day_idx and r["severity"] in series:
             series[r["severity"]][day_idx[d]] = int(r["n"] or 0)
@@ -728,7 +777,7 @@ def _dashboard_data() -> dict:
     bottoms = [0.0] * n_pts
     bands: list[dict] = []
     if max_total > 0:
-        for sev_name in ("info", "low", "medium", "high", "critical"):
+        for sev_name in ("low", "medium", "high", "critical"):
             tops = [bottoms[i] + series[sev_name][i] for i in range(n_pts)]
             top_points = [(round(i * step, 2),
                            round(chart_h - (tops[i] / max_total) * chart_h, 2))
@@ -739,6 +788,22 @@ def _dashboard_data() -> dict:
             poly = " ".join(f"{x},{y}" for x, y in top_points + bot_points)
             bands.append({"sev": sev_name, "points": poly})
             bottoms = tops
+
+    # Datalist for the trend filter typeahead: every distinct fqdn +
+    # every distinct non-empty application_id ever seen. Sorted, deduped.
+    filter_targets: list[str] = []
+    seen: set[str] = set()
+    for r in db.query("SELECT DISTINCT fqdn FROM assessments "
+                      "WHERE fqdn IS NOT NULL ORDER BY fqdn"):
+        v = r["fqdn"]
+        if v and v not in seen:
+            seen.add(v); filter_targets.append(v)
+    for r in db.query("SELECT DISTINCT application_id FROM assessments "
+                      "WHERE application_id IS NOT NULL "
+                      "  AND application_id != '' ORDER BY application_id"):
+        v = r["application_id"]
+        if v and v not in seen:
+            seen.add(v); filter_targets.append(v)
 
     # Top 6 targets ranked by their most recent live risk score (the
     # post-triage value, computed above). a.risk_score is preserved on
@@ -777,14 +842,50 @@ def _dashboard_data() -> dict:
         for r in rows:
             ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
 
+    # Resolved findings broken down by age bucket. Counterpart to the
+    # `ages` matrix: shows what the team has cleared (status fixed or
+    # accepted_risk), bucketed by the original finding's age. Useful
+    # for measuring backlog burndown -- "we resolved this many old
+    # criticals." Aged on created_at because the schema doesn't track
+    # status_changed_at.
+    resolved_ages = {">30 days": {s: 0 for s in sev_order},
+                     ">60 days": {s: 0 for s in sev_order},
+                     ">90 days": {s: 0 for s in sev_order}}
+    for bucket, bound in (("90 days", 90), ("60 days", 60), ("30 days", 30)):
+        rows = db.query(
+            "SELECT severity, COUNT(*) AS n FROM findings "
+            "WHERE status IN ('fixed', 'accepted_risk') "
+            "  AND created_at < NOW() - INTERVAL %s DAY "
+            "GROUP BY severity",
+            (bound,))
+        for r in rows:
+            resolved_ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
+
     recent = db.query(
         "SELECT id, fqdn, application_id, status, total_findings, "
         "       profile, created_at, finished_at "
         "FROM assessments ORDER BY id DESC LIMIT 6")
-    # Decorate the recent rows with the same live risk score the
-    # targets card uses, so the two stay consistent.
-    for r in recent:
-        r["risk_score"] = live_per_aid.get(r["id"])
+    # Decorate recent rows with live open-findings count + risk score
+    # so the dashboard matches the /assessments listing. total_findings
+    # on the row is the orchestrator's scan-time count and goes stale
+    # the moment the analyst triages anything.
+    if recent:
+        rec_ids = [r["id"] for r in recent]
+        ph = ",".join(["%s"] * len(rec_ids))
+        rec_findings: dict[int, list[dict]] = {aid: [] for aid in rec_ids}
+        for f in db.query(
+                f"SELECT assessment_id, severity, status, validation_status "
+                f"FROM findings WHERE assessment_id IN ({ph})",
+                rec_ids):
+            rec_findings.setdefault(f["assessment_id"], []).append(f)
+        for r in recent:
+            fs = rec_findings.get(r["id"], [])
+            r["open_findings"] = sum(
+                1 for f in fs
+                if (f.get("status") or "open") not in EXCLUDED_FROM_SCORE)
+            r["risk_score"] = (live_per_aid.get(r["id"])
+                               if r["id"] in live_per_aid
+                               else _live_risk_score(fs))
 
     return {
         "kpi": {
@@ -800,16 +901,23 @@ def _dashboard_data() -> dict:
         },
         "trend": {"days": days, "series": series,
                   "bands": bands, "max_total": max_total,
-                  "w": chart_w, "h": chart_h},
+                  "w": chart_w, "h": chart_h,
+                  "filter": trend_filter,
+                  "filter_targets": filter_targets,
+                  "filter_matched": filter_matched},
         "targets": targets,
         "ages": ages,
+        "resolved_ages": resolved_ages,
         "recent": recent,
     }
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    data = _dashboard_data()
+def index(request: Request, trend: str = ""):
+    """Overview dashboard. `trend` query-param filters the trend chart's
+    series by FQDN or application_id substring; the rest of the
+    dashboard ignores it."""
+    data = _dashboard_data(trend_filter=trend)
     return templates.TemplateResponse("index.html", ctx(request, **data))
 
 

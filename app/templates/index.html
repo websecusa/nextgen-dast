@@ -65,16 +65,49 @@
    data; height is fixed at 200px and the X-axis is the 30-day window. #}
 <section>
   <div class="card-header">
-    <h2>Findings trend (last 30 days)</h2>
-    <div class="muted small">Stacked by severity, false positives excluded.</div>
+    <div>
+      <h2>Findings trend (last 30 days)</h2>
+      <div class="muted small">
+        Stacked by severity. Triaged + info-severity excluded.
+        {% if trend.filter %}
+          Filtered to <code>{{ trend.filter }}</code>.
+        {% endif %}
+      </div>
+    </div>
+    {# Typeahead filter: free-text input backed by a <datalist> of every
+       distinct fqdn + application_id in the deployment. Browser handles
+       autocomplete. Form submits on Enter or via the Apply button;
+       clearing the input + submit reverts to the unfiltered chart. #}
+    <form method="get" action="" class="trend-filter"
+          style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
+      <input type="search" name="trend" list="trend-targets"
+             value="{{ trend.filter or '' }}"
+             placeholder="Filter by target or app id…"
+             autocomplete="off"
+             style="width:240px; font-size:.85em">
+      <datalist id="trend-targets">
+        {% for t in trend.filter_targets %}
+          <option value="{{ t }}">
+        {% endfor %}
+      </datalist>
+      <button type="submit" class="ghost"
+              style="padding:.35em .75em; font-size:.82em">Apply</button>
+      {% if trend.filter %}
+        <a href="?" class="muted small">clear</a>
+      {% endif %}
+    </form>
   </div>
 
   {# All chart geometry (band polygons, max, width, height) is
      computed in server._dashboard_data and passed in via trend.bands.
      The template just renders. #}
-  {% if trend.max_total == 0 %}
+  {% if trend.filter and not trend.filter_matched %}
     <p class="muted small" style="margin: 1.4em 0 .4em">
-      No findings in the last 30 days.
+      Filter <code>{{ trend.filter }}</code> matched no targets.
+    </p>
+  {% elif trend.max_total == 0 %}
+    <p class="muted small" style="margin: 1.4em 0 .4em">
+      No findings in the last 30 days{% if trend.filter %} for that filter{% endif %}.
     </p>
   {% else %}
   <svg viewBox="0 0 {{ trend.w }} {{ trend.h + 24 }}"
@@ -106,7 +139,10 @@
           text-anchor="end">{{ trend.days[-1][5:] }}</text>
   </svg>
   <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:.4em">
-    {% for sev in ['critical','high','medium','low','info'] %}
+    {# Info severity is omitted from the chart on purpose, so it's not
+       in the legend either. The KPI strip and the age matrices still
+       surface info totals separately. #}
+    {% for sev in ['critical','high','medium','low'] %}
       <span><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</span>
     {% endfor %}
   </div>
@@ -188,6 +224,43 @@
   </section>
 </div>
 
+{# Resolved counterpart to the Unresolved-by-age card. Counts findings
+   marked as fixed or accepted_risk, bucketed by the original
+   finding's created_at (the schema doesn't track when an analyst
+   changed status, so age-since-resolution is not available). #}
+<section>
+  <div class="card-header">
+    <h2>Resolved findings by age</h2>
+    <div class="muted small">
+      Fixed + archived (accepted_risk). Bucketed by the original finding's age.
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Age</th>
+        {% for sev in ['critical','high','medium','low','info'] %}
+          <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for label in ['>30 days', '>60 days', '>90 days'] %}
+        <tr>
+          <td>{{ label }}</td>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <td>
+              {% if resolved_ages[label][sev] %}
+                <span class="sev sev-{{ sev }}">{{ resolved_ages[label][sev] }}</span>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
 {# ---- Recent activity ----------------------------------------------- #}
 <section>
   <div class="card-header">
@@ -198,7 +271,9 @@
   <table>
     <thead><tr>
       <th>ID</th><th>Target</th><th>App</th><th>Profile</th>
-      <th>Status</th><th>Findings</th><th>Risk</th><th>When</th>
+      <th>Status</th>
+      <th title="Open findings, post-triage. Excludes false-positive, resolved, archived.">Open</th>
+      <th>Risk</th><th>When</th>
     </tr></thead>
     <tbody>
     {% for a in recent %}
@@ -212,7 +287,7 @@
         </td>
         <td><span class="badge">{{ a.profile }}</span></td>
         <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
-        <td>{{ a.total_findings or 0 }}</td>
+        <td>{{ a.open_findings if a.open_findings is defined else (a.total_findings or 0) }}</td>
         <td>
           {% if a.risk_score is not none %}
             {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
