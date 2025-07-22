@@ -74,24 +74,22 @@
         {% endif %}
       </div>
     </div>
-    {# Typeahead filter: free-text input backed by a <datalist> of every
-       distinct fqdn + application_id in the deployment. Browser handles
-       autocomplete. Form submits on Enter or via the Apply button;
-       clearing the input + submit reverts to the unfiltered chart. #}
-    <form method="get" action="" class="trend-filter"
-          style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
-      <input type="search" name="trend" list="trend-targets"
+    {# True typeahead. Browsers render <datalist> as an open-on-focus
+       drop-down (the full list shows the moment the input is focused),
+       which isn't what we want. Custom popup driven by trend-typeahead.js:
+       suggestions appear only after the user starts typing and only
+       show prefix/substring matches. Hidden by default; populated from
+       trend.filter_targets. #}
+    <form method="get" action="" class="trend-filter typeahead"
+          data-targets='{{ trend.filter_targets | tojson }}'>
+      <input type="search" name="trend"
+             class="typeahead-input"
              value="{{ trend.filter or '' }}"
              placeholder="Filter by target or app id…"
              autocomplete="off"
-             style="width:240px; font-size:.85em">
-      <datalist id="trend-targets">
-        {% for t in trend.filter_targets %}
-          <option value="{{ t }}">
-        {% endfor %}
-      </datalist>
-      <button type="submit" class="ghost"
-              style="padding:.35em .75em; font-size:.82em">Apply</button>
+             spellcheck="false">
+      <ul class="typeahead-suggest" role="listbox" hidden></ul>
+      <button type="submit" class="ghost typeahead-apply">Apply</button>
       {% if trend.filter %}
         <a href="?" class="muted small">clear</a>
       {% endif %}
@@ -110,34 +108,58 @@
       No findings in the last 30 days{% if trend.filter %} for that filter{% endif %}.
     </p>
   {% else %}
-  <svg viewBox="0 0 {{ trend.w }} {{ trend.h + 24 }}"
-       preserveAspectRatio="none"
-       style="width:100%; height:230px; display:block">
-    {# Horizontal grid: lines at 0/25/50/75/100% of max for visual scale. #}
-    {% for g in [0, 0.25, 0.5, 0.75, 1.0] %}
-      <line x1="0" x2="{{ trend.w }}"
-            y1="{{ trend.h - g * trend.h }}" y2="{{ trend.h - g * trend.h }}"
-            stroke="rgba(255,255,255,.05)" stroke-width="1"/>
-    {% endfor %}
-    {% for band in trend.bands %}
-      <polygon
-        fill="var(--sev-{{ band.sev }})"
-        fill-opacity="0.35"
-        stroke="var(--sev-{{ band.sev }})"
-        stroke-width="1.5"
-        stroke-opacity="0.9"
-        points="{{ band.points }}"/>
-    {% endfor %}
-    {# X-axis labels: first / middle / last date (MM-DD form). #}
-    <text x="0" y="{{ trend.h + 18 }}"
-          fill="var(--muted)" font-size="11">{{ trend.days[0][5:] }}</text>
-    <text x="{{ trend.w / 2 }}" y="{{ trend.h + 18 }}"
-          fill="var(--muted)" font-size="11"
-          text-anchor="middle">{{ trend.days[trend.days|length // 2][5:] }}</text>
-    <text x="{{ trend.w }}" y="{{ trend.h + 18 }}"
-          fill="var(--muted)" font-size="11"
-          text-anchor="end">{{ trend.days[-1][5:] }}</text>
-  </svg>
+  {# Chart layout:
+       Y-axis labels (left)  | SVG bands + crosshair  | Y-axis labels (right)
+                             | X-axis dates (below)   |
+     The Y-axis numbers live in HTML divs flanking the SVG (instead of
+     inside it) because preserveAspectRatio="none" stretches SVG text
+     unevenly and the count labels became unreadable smears. Same goes
+     for the X-axis date labels. The bands themselves still get the
+     "fill the chart width" stretch via the SVG. #}
+  <div class="trend-grid"
+       data-days='{{ trend.days | tojson }}'
+       data-series='{{ trend.series | tojson }}'>
+    <div class="trend-yaxis">
+      {% for v in trend.y_ticks %}<span>{{ v }}</span>{% endfor %}
+    </div>
+
+    <div class="trend-svg-wrap">
+      <svg viewBox="0 0 {{ trend.w }} {{ trend.h }}"
+           preserveAspectRatio="none"
+           class="trend-svg">
+        {# Horizontal grid lines lined up with trend.y_ticks. #}
+        {% for v in trend.y_ticks %}
+          {% set gy = (loop.index0 / (trend.y_ticks|length - 1)) * trend.h %}
+          <line x1="0" x2="{{ trend.w }}" y1="{{ gy }}" y2="{{ gy }}"
+                stroke="rgba(255,255,255,.05)" stroke-width="1"
+                vector-effect="non-scaling-stroke"/>
+        {% endfor %}
+        {% for band in trend.bands %}
+          <polygon
+            fill="var(--sev-{{ band.sev }})"
+            fill-opacity="0.35"
+            stroke="var(--sev-{{ band.sev }})"
+            stroke-width="1.5"
+            stroke-opacity="0.9"
+            vector-effect="non-scaling-stroke"
+            points="{{ band.points }}"/>
+        {% endfor %}
+      </svg>
+      {# Crosshair + tooltip for hover. Both hidden until the cursor
+         enters the SVG; populated by trend-tooltip.js. #}
+      <div class="trend-crosshair" hidden></div>
+      <div class="trend-tooltip" hidden role="tooltip"></div>
+      <div class="trend-xaxis">
+        <span>{{ trend.days[0][5:] }}</span>
+        <span>{{ trend.days[trend.days|length // 2][5:] }}</span>
+        <span>{{ trend.days[-1][5:] }}</span>
+      </div>
+    </div>
+
+    <div class="trend-yaxis trend-yaxis-right">
+      {% for v in trend.y_ticks %}<span>{{ v }}</span>{% endfor %}
+    </div>
+  </div>
   <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:.4em">
     {# Info severity is omitted from the chart on purpose, so it's not
        in the legend either. The KPI strip and the age matrices still
@@ -312,4 +334,8 @@
   </p>
   {% endif %}
 </section>
+
+{# Custom typeahead + chart hover tooltip. Both are no-frameworks vanilla
+   JS; cache-busted alongside style.css via the same query string. #}
+<script src="{{ base }}/static/dashboard-trend.js?b=20260428a"></script>
 {% endblock %}
