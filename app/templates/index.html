@@ -160,7 +160,9 @@
       {% for v in trend.y_ticks %}<span>{{ v }}</span>{% endfor %}
     </div>
   </div>
-  <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:.4em">
+  {# Legend sits ~1/8" (12px) below the X-axis dates so it doesn't
+     visually fuse with the date row. .4em was too tight. #}
+  <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:1.15em">
     {# Info severity is omitted from the chart on purpose, so it's not
        in the legend either. The KPI strip and the age matrices still
        surface info totals separately. #}
