@@ -76,6 +76,19 @@ def append_scan_id(aid: int, scan_id: str) -> None:
                (",".join(ids), aid))
 
 
+def detach_scan_id(aid: int, scan_id: str) -> None:
+    """Remove `scan_id` from assessments.scan_ids. Used when a scanner
+    fails to start or crashes before producing usable output, so the
+    orphan sweep can reclaim its now-empty scan dir on the next pass."""
+    row = db.query_one("SELECT scan_ids FROM assessments WHERE id = %s", (aid,))
+    if not row:
+        return
+    ids = (row.get("scan_ids") or "").split(",") if row.get("scan_ids") else []
+    ids = [s for s in ids if s and s != scan_id]
+    db.execute("UPDATE assessments SET scan_ids = %s WHERE id = %s",
+               (",".join(ids), aid))
+
+
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -95,6 +108,7 @@ def _wrap_with_proxy(scan_dir: Path, scanner_cmd: list[str]) -> tuple[list[str],
 
 
 def run_tool(tool: str, target: str, profile: str,
+             aid: int,
              auth_args: Optional[list[str]] = None,
              user_agent: Optional[str] = None) -> str:
     auth_args = auth_args or []
@@ -102,6 +116,26 @@ def run_tool(tool: str, target: str, profile: str,
     scan_id = new_scan_id()
     sdir = SCANS_DIR / scan_id
     sdir.mkdir(parents=True, exist_ok=True)
+    # Register ownership of this scan dir with the assessment BEFORE the
+    # scanner spawns. If we delay this until run_tool returns (as we used
+    # to), a long-running scanner like wapiti can race the periodic
+    # orphan sweep in app/cleanup.py: the sweep reads assessments.scan_ids,
+    # sees no owner for this fresh dir, and rmtree's it mid-scan — which
+    # then crashes the post-wait meta.json rewrite below. Registering
+    # up-front closes that window. detach_scan_id() rolls it back if
+    # spawning or the scan itself raises before we can finalise meta.json.
+    append_scan_id(aid, scan_id)
+    try:
+        return _run_tool_inner(tool, target, profile, scan_id, sdir,
+                               auth_args, ua_args)
+    except BaseException:
+        detach_scan_id(aid, scan_id)
+        raise
+
+
+def _run_tool_inner(tool: str, target: str, profile: str,
+                    scan_id: str, sdir: Path,
+                    auth_args: list[str], ua_args: list[str]) -> str:
     out = sdir / "output.log"
 
     # Allocate the per-scan mitmdump port up-front so we can pass explicit
@@ -388,13 +422,26 @@ def _enhanced_probe_files() -> list[Path]:
                   if not p.name.startswith("_"))
 
 
-def run_enhanced_testing(target: str, profile: str) -> str:
+def run_enhanced_testing(target: str, profile: str, aid: int) -> str:
     """Run every probe under enhanced_testing/probes against `target`.
     One verdict file per probe is written under
-    /data/scans/<scan_id>/verdicts/. Returns the synthetic scan_id."""
+    /data/scans/<scan_id>/verdicts/. Returns the synthetic scan_id.
+
+    Like run_tool, the scan_id is registered with the assessment up-front
+    so the orphan sweeper in app/cleanup.py cannot rmtree this dir while
+    probes are still running."""
     scan_id = new_scan_id()
     sdir = SCANS_DIR / scan_id
     (sdir / "verdicts").mkdir(parents=True, exist_ok=True)
+    append_scan_id(aid, scan_id)
+    try:
+        return _run_enhanced_testing_inner(target, scan_id, sdir)
+    except BaseException:
+        detach_scan_id(aid, scan_id)
+        raise
+
+
+def _run_enhanced_testing_inner(target: str, scan_id: str, sdir: Path) -> str:
     log = sdir / "output.log"
     log_fh = open(log, "ab", buffering=0)
 
@@ -556,9 +603,11 @@ def main() -> int:
         if "testssl" in plan and a.get("scan_https"):
             target = f"https://{a['fqdn']}"
             update(aid, current_step=f"testssl → {target}")
-            scan_id = run_tool("testssl", target, profile,
+            # run_tool / run_enhanced_testing register the scan_id with
+            # the assessment internally (before spawning), so we don't
+            # call append_scan_id here anymore — doing so would double-add.
+            scan_id = run_tool("testssl", target, profile, aid=aid,
                                user_agent=user_agent)
-            append_scan_id(aid, scan_id)
             total_findings += insert_findings(aid, scan_id, "testssl",
                                               endpoint=enrich_endpoint,
                                               target=target)
@@ -575,8 +624,7 @@ def main() -> int:
                     # exercise both http and https surfaces if the
                     # assessment opted into both.
                     update(aid, current_step=f"enhanced_testing → {target}")
-                    scan_id = run_enhanced_testing(target, profile)
-                    append_scan_id(aid, scan_id)
+                    scan_id = run_enhanced_testing(target, profile, aid=aid)
                     added = insert_findings(aid, scan_id, "enhanced_testing",
                                             endpoint=enrich_endpoint,
                                             target=target)
@@ -585,10 +633,9 @@ def main() -> int:
                     continue
                 update(aid, current_step=f"{tool} → {target}")
                 use_auth = (tool == "wapiti")  # only wapiti supports our auth
-                scan_id = run_tool(tool, target, profile,
+                scan_id = run_tool(tool, target, profile, aid=aid,
                                    auth_args=auth_args if use_auth else [],
                                    user_agent=user_agent)
-                append_scan_id(aid, scan_id)
                 added = insert_findings(aid, scan_id, tool,
                                         endpoint=enrich_endpoint,
                                         target=target)
