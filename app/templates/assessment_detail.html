@@ -188,9 +188,13 @@
       {% if findings %}
         {% for f in findings %}
           {% set is_fp = f.status == 'false_positive' %}
-          <label class="fw-item {% if is_fp %}is-fp{% endif %}"
-                 data-id="{{ f.id }}"
-                 onclick="loadFinding({{ f.id }}, this, event)">
+          {# A <div>, not a <label>: a label dispatches a synthetic click
+             on its wrapped input whenever any descendant is clicked, which
+             would tick the checkbox every time the user just meant to open
+             the row. The checkbox below is reachable on its own. #}
+          <div class="fw-item {% if is_fp %}is-fp{% endif %}"
+               data-id="{{ f.id }}"
+               onclick="loadFinding({{ f.id }}, this, event)">
             <input type="checkbox" value="{{ f.id }}"
                    onclick="event.stopPropagation(); refreshBulkBar()">
             <div class="fi-body">
@@ -209,7 +213,7 @@
                 {% endif %}
               </div>
             </div>
-          </label>
+          </div>
         {% endfor %}
       {% else %}
         <p class="muted small" style="padding:1.4em">
