@@ -178,7 +178,12 @@ _NIKTO_SEV_RES = [(sev, [_re.compile(p, _re.IGNORECASE) for p in pats])
                   for sev, pats in _NIKTO_SEV_PATTERNS]
 
 # Status messages nikto emits that aren't findings — they tell you what nikto
-# DIDN'T do. Drop them outright.
+# DIDN'T do, or report scan-completion stats. Drop them outright.
+#
+# The "<N> host(s) tested" and "<N> requests: <M> errors and <K> items
+# reported" lines are end-of-scan summary text. They have a leading numeric
+# count so a simple startswith() against NIKTO_NOISE misses them — match
+# with regex instead.
 _NIKTO_STATUS_PATTERNS = [
     _re.compile(p, _re.IGNORECASE) for p in (
         r"^no cgi directories found",
@@ -189,6 +194,8 @@ _NIKTO_STATUS_PATTERNS = [
         r"^scan terminated",
         r"^[\d:]+ start time",
         r"^[\d:]+ end time",
+        r"^\d+\s+host\(s\)\s+tested\b",
+        r"^\d+\s+requests:\s*\d+\s+errors\s+and\s+\d+\s+items\s+reported\b",
     )
 ]
 
