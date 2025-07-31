@@ -33,6 +33,7 @@
 <section class="card">
   <h2>Evidence</h2>
   <p><code>{{ f.evidence_method or "GET" }} {{ f.evidence_url }}</code></p>
+  {% include '_finding_reproduce.html' %}
 </section>
 {% endif %}
 
@@ -345,6 +346,27 @@ async function copyExport(fmt) {
   } catch (e) {
     status.textContent = 'failed: ' + e;
   }
+}
+
+// Reproduce-&-verify modal helpers. Same logic as in assessment_detail.html;
+// duplicated here because the standalone /finding/<id> page is reached
+// directly (via "Open full detail →") and does not inherit the workspace
+// scripts. The dialog and <template> carriers come from _finding_reproduce.html.
+function openIO(kind) {
+  const modal = document.getElementById('io-modal');
+  const tpl   = document.getElementById('io-data-' + kind);
+  if (!modal || !tpl) return;
+  document.getElementById('io-modal-title').textContent =
+    kind === 'request' ? 'Captured request' : 'Captured response';
+  document.getElementById('io-modal-body').textContent =
+    tpl.content.textContent;
+  if (typeof modal.showModal === 'function') modal.showModal();
+  else modal.setAttribute('open', '');
+}
+
+function copyIO() {
+  const t = document.getElementById('io-modal-body').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
 }
 </script>
 {% endblock %}

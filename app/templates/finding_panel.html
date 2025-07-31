@@ -73,10 +73,7 @@
     {% for step in e.steps %}<li>{{ step }}</li>{% endfor %}
   </ol>
 {% endif %}
-{% if repro and repro.curl %}
-  <p class="muted small" style="margin: .8em 0 .2em">Reproduce:</p>
-  <pre class="log" style="max-height: 14em">{{ repro.curl }}</pre>
-{% endif %}
+{% include '_finding_reproduce.html' %}
 {% if repro and repro.references %}
   <p class="muted small" style="margin-top: .8em">
     <strong>References:</strong>

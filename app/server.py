@@ -774,16 +774,37 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
         t = sum(series[s][i] for s in sev_chart_order)
         if t > max_total:
             max_total = t
+
+    # "Nice" Y-axis ceiling -- the chart scales to this so the grid
+    # labels come out as round numbers (0/15/30/45/60) instead of the
+    # awkward fractions you get from dividing the raw max into 4. For
+    # max_total=0 we still need a non-zero denominator below.
+    def _nice_ceiling(n: int) -> int:
+        if n <= 0:
+            return 4
+        for c in (4, 8, 12, 16, 20, 24, 40, 60, 80, 100, 120, 160,
+                  200, 240, 300, 400, 500, 600, 800, 1000, 1200,
+                  1600, 2000, 2500, 3000, 4000, 5000, 6000, 8000, 10000):
+            if c >= n:
+                return c
+        # Fall back to next multiple of 1000 for very large counts.
+        return ((n + 999) // 1000) * 1000
+
+    nice_max = _nice_ceiling(max_total)
+    # Y-axis tick values (one per grid line, top→bottom). Cast to int
+    # so the template doesn't have to format floats.
+    y_ticks = [int(round(nice_max * g, 0)) for g in (1.0, 0.75, 0.5, 0.25, 0.0)]
+
     bottoms = [0.0] * n_pts
     bands: list[dict] = []
     if max_total > 0:
         for sev_name in ("low", "medium", "high", "critical"):
             tops = [bottoms[i] + series[sev_name][i] for i in range(n_pts)]
             top_points = [(round(i * step, 2),
-                           round(chart_h - (tops[i] / max_total) * chart_h, 2))
+                           round(chart_h - (tops[i] / nice_max) * chart_h, 2))
                           for i in range(n_pts)]
             bot_points = [(round(i * step, 2),
-                           round(chart_h - (bottoms[i] / max_total) * chart_h, 2))
+                           round(chart_h - (bottoms[i] / nice_max) * chart_h, 2))
                           for i in range(n_pts - 1, -1, -1)]
             poly = " ".join(f"{x},{y}" for x, y in top_points + bot_points)
             bands.append({"sev": sev_name, "points": poly})
@@ -901,6 +922,7 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
         },
         "trend": {"days": days, "series": series,
                   "bands": bands, "max_total": max_total,
+                  "nice_max": nice_max, "y_ticks": y_ticks,
                   "w": chart_w, "h": chart_h,
                   "filter": trend_filter,
                   "filter_targets": filter_targets,
@@ -1785,10 +1807,11 @@ def _live_risk_score(findings: list[dict]) -> int:
 def _finding_panel_context(f: Optional[dict]) -> dict:
     """Build the variables the finding_panel.html / _finding_aside.html
     partials expect: f, e (enrichment), repro (reproduction block),
-    probe (matched validation probe). Tolerant of f=None — used as the
+    probe (matched validation probe), io (captured request/response and
+    'what to look for' indicator). Tolerant of f=None — used as the
     empty-state path."""
     if not f:
-        return {"f": None, "e": None, "repro": None, "probe": None}
+        return {"f": None, "e": None, "repro": None, "probe": None, "io": None}
     e = None
     if f.get("enrichment_id"):
         e = db.query_one(
@@ -1799,9 +1822,91 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
                 e["steps"] = json.loads(e.get("remediation_steps") or "[]")
             except Exception:
                 e["steps"] = []
+    # Decode the raw_data JSON once so reproduction and evidence helpers
+    # both see structured fields (matcher-name, http_request, etc.) rather
+    # than each having to parse the blob on its own.
+    if f.get("raw_data") and not f.get("raw"):
+        try:
+            f["raw"] = json.loads(f["raw_data"])
+        except Exception:
+            f["raw"] = None
     repro = reports_mod._repro_for(f)
     probe = toolkit_mod.find_probe_for_finding(f)
-    return {"f": f, "e": e, "repro": repro, "probe": probe}
+    io = _finding_io_evidence(f)
+    return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
+
+
+def _finding_io_evidence(f: dict) -> dict:
+    """Surface the per-tool 'reproduce & verify' evidence for the panel.
+
+    Returns three optional fields:
+      request    raw HTTP request the scanner sent (string, or None)
+      response   raw HTTP response the scanner received (string, or None)
+      indicator  one-line, human-readable "what to confirm" string an
+                 analyst can grep for in their own re-run (or None)
+
+    Only nuclei (request + response) and wapiti (request only) capture
+    full HTTP traffic today. The indicator string is best-effort across
+    every scanner so the analyst always has *something* concrete to look
+    for after pasting the curl. Truncates large blobs at ~64 KB so a
+    single bad finding can not balloon the panel HTML.
+    """
+    raw = f.get("raw") or {}
+    tool = (f.get("source_tool") or "").lower()
+    out: dict = {"request": None, "response": None, "indicator": None}
+
+    def _clip(s):
+        if not s:
+            return None
+        s = str(s)
+        return s if len(s) <= 65536 else (s[:65536] + "\n[…truncated…]")
+
+    if tool == "nuclei":
+        out["request"] = _clip(raw.get("request"))
+        out["response"] = _clip(raw.get("response"))
+        matcher = raw.get("matcher-name") or ""
+        target = raw.get("matched-at") or raw.get("url") or ""
+        if matcher and target:
+            out["indicator"] = (
+                f"Nuclei matcher '{matcher}' fired on {target} — "
+                "the same indicator should appear in your re-run.")
+        elif target:
+            out["indicator"] = (
+                f"Nuclei template '{raw.get('template-id', '?')}' "
+                f"matched at {target}.")
+    elif tool == "wapiti":
+        out["request"] = _clip(raw.get("http_request"))
+        info = raw.get("info") or ""
+        param = raw.get("parameter") or ""
+        if info and param:
+            out["indicator"] = f"{info} — vulnerable parameter: {param}"
+        elif info:
+            out["indicator"] = info
+    elif tool == "testssl":
+        tid = raw.get("id") or ""
+        finding = raw.get("finding") or ""
+        if tid or finding:
+            out["indicator"] = (
+                f"testssl check '{tid}' reported: {finding}".strip())
+    elif tool == "nikto":
+        line = raw.get("line") or ""
+        if line:
+            out["indicator"] = line
+    elif tool == "ffuf":
+        url = raw.get("url") or ""
+        status = raw.get("status")
+        length = raw.get("length")
+        if url and status is not None:
+            out["indicator"] = (
+                f"HTTP {status} response ({length} bytes) at {url} — "
+                "this path is reachable on the target.")
+    elif tool == "dalfox":
+        payload = raw.get("payload") or raw.get("data") or ""
+        param = raw.get("param") or raw.get("parameter") or ""
+        if payload:
+            base = f"Reflected XSS payload: {payload}"
+            out["indicator"] = base + (f" via parameter {param}" if param else "")
+    return out
 
 
 @app.post("/assessment/{aid}/filter_info")
@@ -2323,9 +2428,19 @@ def finding_detail(request: Request, fid: int):
             validation = json.loads(f["validation_evidence"])
         except Exception:
             validation = {"raw": f["validation_evidence"][:2000]}
+    # Decode raw_data once so the Reproduce-&-verify partial sees the
+    # same structured fields the assessment-workspace panel does.
+    if f.get("raw_data") and not f.get("raw"):
+        try:
+            f["raw"] = json.loads(f["raw_data"])
+        except Exception:
+            f["raw"] = None
+    repro = reports_mod._repro_for(f)
+    io = _finding_io_evidence(f)
     return templates.TemplateResponse(
         "finding_detail.html",
-        ctx(request, f=f, e=e, probe=probe, validation=validation),
+        ctx(request, f=f, e=e, probe=probe, validation=validation,
+            repro=repro, io=io),
     )
 
 

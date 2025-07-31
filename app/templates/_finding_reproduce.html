@@ -1,0 +1,82 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Reproduce-&-verify partial. Renders three things, in order:
+
+    1. The exact command an analyst should run to re-issue the request
+       the scanner sent (uses `repro.curl` from reports._repro_for).
+    2. A one-line "what to look for" indicator (`io.indicator`) — a
+       concrete signal the analyst can grep for in their own re-run, so
+       success / failure does not require interpreting the scanner's
+       output format.
+    3. View-request / View-response modal triggers, when the source
+       scanner captured the round-trip in raw_data.
+
+  The captured request and response bytes are emitted into <template>
+  tags rather than into the visible DOM. <template>.content.textContent
+  hands them back to the modal as the original raw text (Jinja's HTML
+  escaping is reversed by the parse-then-read round-trip).
+
+  The modal is just an HTML <dialog>. The openIO / copyIO functions live
+  in the page that includes this partial — script tags inside a fragment
+  swapped via innerHTML do not execute, so we keep this file inert.
+
+  Used by both:
+    * finding_panel.html  — the assessment-workspace middle pane
+    * finding_detail.html — the standalone /finding/<id> page
+#}
+{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response)) %}
+<h3 class="section">Reproduce &amp; verify</h3>
+<ol class="repro-steps" style="margin:.25em 0 .8em 1.2em; padding:0">
+  {% if repro and repro.curl %}
+  <li>
+    <span>Run this request:</span>
+    <pre class="log" style="margin:.4em 0; max-height:14em">{{ repro.curl }}</pre>
+    {% if repro.hint %}<p class="muted small" style="margin:.2em 0">{{ repro.hint|safe }}</p>{% endif %}
+  </li>
+  {% endif %}
+  {% if io and io.indicator %}
+  <li><strong>Look for:</strong> {{ io.indicator }}</li>
+  {% endif %}
+  {% if io and (io.request or io.response) %}
+  <li>
+    <span>Compare against the captured round-trip from the scan:</span>
+    <div style="display:flex; gap:.5em; flex-wrap:wrap; margin-top:.4em">
+      {% if io.request %}
+        <button type="button" class="ghost"
+                onclick="openIO('request')">View request</button>
+      {% endif %}
+      {% if io.response %}
+        <button type="button" class="ghost"
+                onclick="openIO('response')">View response</button>
+      {% endif %}
+    </div>
+  </li>
+  {% endif %}
+</ol>
+
+{# Inert carriers for the captured bytes. The modal reads .content.textContent. #}
+{% if io and io.request %}<template id="io-data-request">{{ io.request }}</template>{% endif %}
+{% if io and io.response %}<template id="io-data-response">{{ io.response }}</template>{% endif %}
+
+{% if io and (io.request or io.response) %}
+<dialog id="io-modal" class="io-modal"
+        style="max-width:min(90vw, 900px); width:80vw; padding:0;
+               background:var(--panel); color:var(--text);
+               border:1px solid var(--border); border-radius:8px">
+  <div style="display:flex; align-items:center; justify-content:space-between;
+              padding:.7em 1em; border-bottom:1px solid var(--border)">
+    <strong id="io-modal-title">Captured</strong>
+    <div style="display:flex; gap:.4em">
+      <button type="button" class="ghost small" onclick="copyIO()">Copy</button>
+      <button type="button" class="ghost small"
+              onclick="document.getElementById('io-modal').close()">Close</button>
+    </div>
+  </div>
+  <pre id="io-modal-body" class="log"
+       style="margin:0; padding:1em; max-height:70vh; overflow:auto;
+              white-space:pre-wrap; word-break:break-word"></pre>
+</dialog>
+{% endif %}
+{% endif %}

@@ -323,6 +323,31 @@
       .catch(err => alert("Bulk action failed: " + err));
   }
 
+  // Reproduce-&-verify modal. The dialog and its <template> data carriers
+  // live inside the panel fragment (see _finding_reproduce.html), so we
+  // re-resolve them on every click — they are recreated each panel swap.
+  // Defined at the parent level because <script> tags inside a fragment
+  // inserted via innerHTML do not execute.
+  function openIO(kind) {
+    const modal = document.getElementById("io-modal");
+    const tpl   = document.getElementById("io-data-" + kind);
+    if (!modal || !tpl) return;
+    document.getElementById("io-modal-title").textContent =
+      kind === "request" ? "Captured request" : "Captured response";
+    // <template>.content is an inert DocumentFragment whose textContent
+    // returns the original raw bytes (any HTML escaping Jinja did is
+    // un-escaped by the parser when the template element was built).
+    document.getElementById("io-modal-body").textContent =
+      tpl.content.textContent;
+    if (typeof modal.showModal === "function") modal.showModal();
+    else modal.setAttribute("open", "");
+  }
+
+  function copyIO() {
+    const t = document.getElementById("io-modal-body").textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+  }
+
   // Restore selection from location.hash on first paint, or auto-select
   // the first row if there's no hash. Lets a fresh visit immediately
   // show something useful instead of an empty middle column.
