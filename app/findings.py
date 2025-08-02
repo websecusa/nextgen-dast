@@ -125,6 +125,14 @@ def parse_nuclei(scan_dir: Path) -> Iterable[dict]:
 # ---- nikto ------------------------------------------------------------------
 
 NIKTO_LINE = re.compile(r"^\+\s*(?:\[(\d+)\]\s*)?(.+)$")
+# Most Nikto findings begin with the affected URL path:
+#   "/vendor/composer/installed.json: PHP Composer config file reveals ..."
+#   "/login.php: Admin login page/section found."
+#   "/: Server is using a wildcard certificate: ..."
+# Capture the path as a relative URL so the orchestrator can resolve it
+# against the scan target. Without this, every Nikto finding inherited
+# the bare-host fallback and the reproduction curl tested the wrong URL.
+NIKTO_PATH_PREFIX = re.compile(r"^(\/\S*?):\s+(.+)$")
 NIKTO_NOISE = (
     "Server:", "Target IP", "Target Hostname", "Target Port",
     "Start Time", "End Time", "Scan terminated", "0 errors and",
@@ -230,11 +238,20 @@ def parse_nikto(scan_dir: Path) -> Iterable[dict]:
             continue
         seen.add(text)
         sev = _nikto_severity(text)
+        # Pull the URL path off the front of the line if present. The
+        # orchestrator joins relative paths against the scan target, so
+        # the analyst's reproduction curl points at the actual file
+        # Nikto flagged (e.g. /vendor/composer/installed.json) rather
+        # than the bare host (which often redirects to a login page).
+        pmatch = NIKTO_PATH_PREFIX.match(text)
+        evidence_url = pmatch.group(1) if pmatch else None
         yield {
             "source_tool": "nikto",
             "severity": sev,
             "title": text[:200],
             "description": text,
+            "evidence_url": evidence_url,
+            "evidence_method": "GET" if evidence_url else None,
             "owasp_category": "A05:2021-Security_Misconfiguration"
                               if sev in ("low", "info", "medium") else None,
             "raw_data": {"line": text, "id": m.group(1)},

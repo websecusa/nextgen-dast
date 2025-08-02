@@ -302,8 +302,18 @@ def insert_findings(assessment_id: int, scan_id: str, tool: str,
         # two findings with the same title but originally-empty URLs
         # collapse correctly and the inserted row carries something the
         # validation pipeline can use.
-        if target and not (f.get("evidence_url") or "").strip():
-            f["evidence_url"] = target
+        #
+        # Parsers may also return a path-only URL (e.g. Nikto yields
+        # "/vendor/composer/installed.json") — resolve those against the
+        # target so the analyst's reproduction curl points at the right
+        # full URL instead of just the bare host.
+        if target:
+            current = (f.get("evidence_url") or "").strip()
+            if not current:
+                f["evidence_url"] = target
+            elif current.startswith("/"):
+                from urllib.parse import urljoin
+                f["evidence_url"] = urljoin(target, current)
         key = _dedup_key(f)
         existing = groups.get(key)
         if existing is None:
