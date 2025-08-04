@@ -352,14 +352,19 @@ async function copyExport(fmt) {
 // duplicated here because the standalone /finding/<id> page is reached
 // directly (via "Open full detail →") and does not inherit the workspace
 // scripts. The dialog and <template> carriers come from _finding_reproduce.html.
+const BASE = "{{ base }}";
+
 function openIO(kind) {
   const modal = document.getElementById('io-modal');
   const tpl   = document.getElementById('io-data-' + kind);
   if (!modal || !tpl) return;
   document.getElementById('io-modal-title').textContent =
     kind === 'request' ? 'Captured request' : 'Captured response';
-  document.getElementById('io-modal-body').textContent =
-    tpl.content.textContent;
+  const body = document.getElementById('io-modal-body');
+  body.textContent = tpl.content.textContent;
+  body.hidden = false;
+  document.getElementById('io-validate-body').hidden = true;
+  document.getElementById('io-copy-btn').hidden = false;
   if (typeof modal.showModal === 'function') modal.showModal();
   else modal.setAttribute('open', '');
 }
@@ -367,6 +372,105 @@ function openIO(kind) {
 function copyIO() {
   const t = document.getElementById('io-modal-body').textContent;
   if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+}
+
+async function runValidate(fid) {
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = 'Validating finding #' + fid + '…';
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/validate', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = 'Validation result · finding #' + fid;
+    validateEl.innerHTML = renderValidateBody(data);
+  } catch (err) {
+    validateEl.innerHTML = '<p class="warn">Validation request failed: ' +
+                            escapeHTML(String(err)) + '</p>';
+  }
+}
+
+function renderValidateBody(d) {
+  if (!d) return '<p class="warn">empty response</p>';
+  if (d.error === 'no_probe' || d.error === 'not_safe' ||
+      d.error === 'no_url') {
+    return '<p class="warn"><strong>Cannot validate:</strong> ' +
+           escapeHTML(d.message || d.error) + '</p>';
+  }
+  let badge, badgeColor;
+  if (d.validated === true)        { badge = '✓ Confirmed';      badgeColor = 'var(--sev-high, #c0392b)'; }
+  else if (d.validated === false)  { badge = '✗ Not reproduced'; badgeColor = 'var(--sev-info, #5d8aa8)'; }
+  else if (!d.ok || d.error)       { badge = '⚠ Errored';        badgeColor = 'var(--sev-medium, #e67e22)'; }
+  else                              { badge = '— Inconclusive';   badgeColor = 'var(--muted, #888)'; }
+  const conf = (d.confidence != null)
+    ? ' · confidence ' + (Math.round((d.confidence || 0) * 100)) + '%'
+    : '';
+  let html = '';
+  html += '<p style="margin:0 0 .6em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em;';
+  html +=   ' border-radius:4px; background:' + badgeColor + ';';
+  html +=   ' color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+  html +=   ' <span class="muted small">via probe ' +
+               '<code>' + escapeHTML(d.probe || '?') + '</code>' + conf + '</span>';
+  html += '</p>';
+  if (d.summary) html += '<p style="white-space:pre-wrap">' + escapeHTML(d.summary) + '</p>';
+  if (d.error) html += '<p class="warn"><strong>Probe error:</strong> ' + escapeHTML(d.error) + '</p>';
+  const hits = (d.evidence && d.evidence.hits) || [];
+  if (hits.length) {
+    html += '<h4 style="margin:.8em 0 .3em">What was matched</h4>';
+    html += '<ul style="margin:.2em 0 .6em 1.1em; padding:0">';
+    for (const h of hits) {
+      html += '<li><strong>' + escapeHTML(h.label || 'match') + '</strong>';
+      if (h.severity) html += ' <span class="badge">' + escapeHTML(h.severity) + '</span>';
+      if (h.where) html += ' <span class="muted small">in ' + escapeHTML(h.where) + '</span>';
+      if (h.match) html += '<pre class="log" style="margin:.2em 0; max-height:8em">' + escapeHTML(h.match) + '</pre>';
+      html += '</li>';
+    }
+    html += '</ul>';
+  }
+  if (d.audit && d.audit.length) {
+    html += '<h4 style="margin:.8em 0 .3em">Probe requests (' + d.audit.length + ')</h4>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:.9em">';
+    html += '<thead><tr style="text-align:left">';
+    html +=   '<th style="padding:.2em .4em">#</th>';
+    html +=   '<th style="padding:.2em .4em">Method</th>';
+    html +=   '<th style="padding:.2em .4em">URL</th>';
+    html +=   '<th style="padding:.2em .4em">Status</th>';
+    html +=   '<th style="padding:.2em .4em">Size</th>';
+    html += '</tr></thead><tbody>';
+    d.audit.forEach((e, i) => {
+      html += '<tr style="border-top:1px solid var(--border, #333)">';
+      html += '<td style="padding:.25em .4em">' + (i + 1) + '</td>';
+      html += '<td style="padding:.25em .4em"><code>' + escapeHTML(e.method || '') + '</code></td>';
+      html += '<td style="padding:.25em .4em"><code>' + escapeHTML(e.url || '') + '</code></td>';
+      html += '<td style="padding:.25em .4em">' + escapeHTML(String(e.status ?? '')) + '</td>';
+      html += '<td style="padding:.25em .4em">' + escapeHTML(String(e.size ?? '')) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  if (d.remediation) {
+    html += '<h4 style="margin:.8em 0 .3em">Remediation</h4>';
+    html += '<p style="white-space:pre-wrap">' + escapeHTML(d.remediation) + '</p>';
+  }
+  html += '<p class="muted small" style="margin-top:.8em">' +
+          'Verdict saved as <code>' + escapeHTML(d.status || '?') + '</code> on this finding.</p>';
+  return html;
+}
+
+function escapeHTML(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 </script>
 {% endblock %}

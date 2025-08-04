@@ -1833,6 +1833,18 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     repro = reports_mod._repro_for(f)
     probe = toolkit_mod.find_probe_for_finding(f)
     io = _finding_io_evidence(f)
+    # The Validate button (inline, modal) is only offered when a probe
+    # is matched, the probe is declared read-only, and we have a URL to
+    # send it to. Anything else falls back to the existing Challenge
+    # form on the standalone /finding/<id> page, where the analyst sees
+    # the probe budget and confirms before running.
+    io["validatable"] = bool(
+        probe
+        and (probe.get("safety_class") == "read-only")
+        and (f.get("evidence_url") or "").strip()
+    )
+    if io["validatable"]:
+        io["probe_name"] = probe.get("name")
     return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
 
 
@@ -2750,6 +2762,104 @@ def finding_challenge(fid: int, cookie: str = Form("")):
              json.dumps(verdict, default=str)[:65000], fid),
         )
     return redirect(f"/finding/{fid}?msg=challenge+result%3A+{new_status}")
+
+
+@app.post("/finding/{fid}/validate")
+def finding_validate_inline(fid: int):
+    """JSON sibling of /finding/<id>/challenge for the assessment-workspace
+    'Validate' button. Runs the matched probe IF (and only if) it is
+    declared `safety_class: read-only`, then returns the verdict as JSON
+    so the workspace modal can render it inline.
+
+    Persisting the verdict matches the challenge endpoint exactly, so a
+    Validate run on the workspace shows up on the standalone /finding/<id>
+    page just like a Challenge would.
+
+    Refuses (HTTP 409) for probes whose safety class is anything other
+    than read-only — any 'probe' or 'destructive' validation must go
+    through the explicit Challenge form so the analyst sees the budget
+    and confirms first.
+    """
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    probe = toolkit_mod.find_probe_for_finding(f)
+    if not probe:
+        return JSONResponse(
+            {"ok": False, "error": "no_probe",
+             "message": "No validation probe matches this finding's signature."},
+            status_code=409)
+    if probe.get("safety_class") != "read-only":
+        return JSONResponse(
+            {"ok": False, "error": "not_safe",
+             "message": (f"Probe '{probe.get('name')}' is classified "
+                         f"'{probe.get('safety_class')}'. Use the Challenge "
+                         "form on the full detail page so the budget and "
+                         "scope are visible before it runs.")},
+            status_code=409)
+    if not (f.get("evidence_url") or "").strip():
+        return JSONResponse(
+            {"ok": False, "error": "no_url",
+             "message": "Finding has no evidence URL to test against."},
+            status_code=409)
+
+    # No manual cookie override on the inline path — the workspace button
+    # is meant to be one-click. The standalone Challenge form is still
+    # the right place when authenticated session replay is needed.
+    session_cookie, auth_diag = _resolve_challenge_cookie(f, manual_cookie="")
+    verdict = _run_finding_probe(f, probe, cookie=session_cookie)
+
+    if isinstance(verdict, dict):
+        verdict.setdefault("auth", {}).update(auth_diag)
+        for entry in verdict.get("audit_log") or []:
+            if "headers" in entry:
+                entry["headers"].pop("Cookie", None)
+
+    new_status = _verdict_to_status(verdict)
+    new_finding_status = ("false_positive" if new_status == "false_positive"
+                          else None)
+    if new_finding_status:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s, status = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000],
+             new_finding_status, fid),
+        )
+    else:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000], fid),
+        )
+
+    # Hand the modal a stable, lightweight payload. We pass through the
+    # parts the analyst actually reads (verdict, summary, hits, request
+    # round-trip) and skip the bulky catalog metadata.
+    audit = verdict.get("audit_log") or []
+    last_req = audit[-1] if audit else {}
+    return JSONResponse({
+        "ok": bool(verdict.get("ok", True)),
+        "validated": verdict.get("validated"),
+        "confidence": verdict.get("confidence"),
+        "summary": verdict.get("summary") or "",
+        "remediation": verdict.get("remediation") or "",
+        "severity_uplift": verdict.get("severity_uplift"),
+        "status": new_status,
+        "probe": probe.get("name"),
+        "evidence": verdict.get("evidence") or {},
+        "audit": [{
+            "method": e.get("method"),
+            "url":    e.get("url"),
+            "status": e.get("status"),
+            "size":   e.get("size"),
+        } for e in audit[:10]],
+        "last_status": last_req.get("status"),
+        "error": verdict.get("error"),
+    })
 
 
 @app.post("/finding/{fid}/false_positive")
