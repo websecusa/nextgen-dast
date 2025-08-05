@@ -39,6 +39,7 @@ import enrichment as enrichment_mod    # noqa: E402
 from findings import parse_scan        # noqa: E402
 import useragent as ua_mod             # noqa: E402
 import consolidation                   # noqa: E402
+from scripts import challenge_runner   # noqa: E402  — auto-validate pass
 
 
 def _resolve_endpoint(endpoint_id: Optional[int]) -> Optional[dict]:
@@ -669,6 +670,20 @@ def main() -> int:
                     ))
             except Exception as e:
                 update(aid, error_text=f"consolidation crashed: {e!r}")
+        # Automatic post-scan validation pass: re-run every read-only
+        # toolkit probe against its matched findings to catch obvious
+        # false positives before the analyst opens the assessment. A
+        # high-confidence "not reproduced" verdict auto-flips the
+        # finding to status=false_positive; everything else is left
+        # for human triage. We deliberately fence this in a try/except
+        # so a flaky probe (timeout, target down, etc.) cannot mark
+        # the whole assessment as errored — the scan results are
+        # already persisted at this point.
+        update(aid, current_step="auto_validate: starting")
+        try:
+            challenge_runner.run(aid, safe_only=True)
+        except Exception as e:
+            update(aid, error_text=f"auto_validate crashed: {e!r}")
         update(aid, status="done", current_step="done", finished_at=now())
     except Exception as e:
         update(aid, status="error", error_text=f"{type(e).__name__}: {e}",

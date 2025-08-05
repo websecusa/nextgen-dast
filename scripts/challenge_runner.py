@@ -12,6 +12,15 @@ is confident the finding is a false positive.
 
 Spawned by the web UI as a detached subprocess:
     python -m scripts.challenge_runner <assessment_id>
+    python -m scripts.challenge_runner --safe-only <assessment_id>
+
+`--safe-only` restricts the run to probes whose manifest declares
+`safety_class: read-only`. This is the mode the orchestrator invokes
+automatically at the end of every scan: read-only probes never modify
+target state, so they are safe to fire without analyst confirmation
+and they pre-eliminate scanner false positives before the analyst
+opens the assessment. The full bulk-Challenge button (no flag) still
+runs every matched probe class.
 
 The web UI re-uses the same `current_step` field on the assessments row
 that the orchestrator uses, so the existing /assessment/<id>/status
@@ -86,11 +95,16 @@ def _step(aid: int, msg: str) -> None:
                (msg[:255], aid))
 
 
-def run(aid: int) -> None:
+def run(aid: int, safe_only: bool = False) -> None:
     a = db.query_one("SELECT * FROM assessments WHERE id = %s", (aid,))
     if not a:
         print(f"[challenge_runner] no assessment {aid}", flush=True)
         sys.exit(2)
+
+    # The current_step messages share a prefix that distinguishes the
+    # automatic post-scan run from a manually-triggered bulk Challenge.
+    # The web UI's status polling shows it verbatim.
+    label = "auto_validate" if safe_only else "challenge_all"
 
     # 1. Resolve a session cookie ONCE for the whole batch. We re-use
     # auth.form_login_cookie() so the failure-mode diagnostics are the
@@ -100,7 +114,7 @@ def run(aid: int) -> None:
                        "reason": "no creds + no manual cookie"}
     if (a.get("creds_username") and a.get("creds_password")
             and a.get("login_url")):
-        _step(aid, "challenge_all: logging in")
+        _step(aid, f"{label}: logging in")
         result = auth_mod.form_login_cookie(
             a["login_url"], a["creds_username"], a["creds_password"])
         if result.get("ok"):
@@ -133,20 +147,27 @@ def run(aid: int) -> None:
         "ORDER BY FIELD(severity,'critical','high','medium','low'), id",
         (aid,))
 
-    # 3. Filter to ones that have a probe match.
+    # 3. Filter to ones that have a probe match. In safe-only mode we
+    # additionally require the matched probe to be classified
+    # `read-only` — anything that injects payloads or modifies state
+    # falls back to the manual Challenge button, where the analyst
+    # sees the budget and confirms before it runs.
     plan: list[tuple[dict, dict]] = []
     for f in findings:
         p = toolkit_mod.find_probe_for_finding(f)
-        if p:
-            plan.append((f, p))
+        if not p:
+            continue
+        if safe_only and (p.get("safety_class") != "read-only"):
+            continue
+        plan.append((f, p))
 
     total = len(plan)
     if not total:
-        _step(aid, "challenge_all: no eligible findings (skipped or no probes)")
+        _step(aid, f"{label}: no eligible findings (skipped or no probes)")
         print("[challenge_runner] nothing to do", flush=True)
         return
 
-    print(f"[challenge_runner] aid={aid} eligible={total} "
+    print(f"[challenge_runner] aid={aid} mode={label} eligible={total} "
           f"auth_source={auth_diag.get('source')}", flush=True)
 
     # 4. Run each probe. Light pacing between findings to be polite to
@@ -155,7 +176,7 @@ def run(aid: int) -> None:
     counts = {"validated": 0, "false_positive": 0,
               "inconclusive": 0, "errored": 0}
     for i, (f, p) in enumerate(plan, 1):
-        _step(aid, f"challenge_all: running probe {i}/{total} "
+        _step(aid, f"{label}: running probe {i}/{total} "
                    f"({p['name']} on finding #{f['id']})")
         config = _build_probe_config(f, p, session_cookie)
         # per-probe timeout from manifest typical budget × 2, clamped 30..120s
@@ -196,7 +217,7 @@ def run(aid: int) -> None:
 
         time.sleep(0.5)
 
-    summary = (f"challenge_all: done — {counts['validated']} validated, "
+    summary = (f"{label}: done — {counts['validated']} validated, "
                f"{counts['false_positive']} false-positive, "
                f"{counts['inconclusive']} inconclusive, "
                f"{counts['errored']} errored")
@@ -205,7 +226,16 @@ def run(aid: int) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: challenge_runner.py <assessment_id>", file=sys.stderr)
+    # Argv shapes:
+    #   challenge_runner.py <assessment_id>
+    #   challenge_runner.py --safe-only <assessment_id>
+    args = sys.argv[1:]
+    safe_only = False
+    if args and args[0] == "--safe-only":
+        safe_only = True
+        args = args[1:]
+    if len(args) != 1 or not args[0].isdigit():
+        print("usage: challenge_runner.py [--safe-only] <assessment_id>",
+              file=sys.stderr)
         sys.exit(2)
-    run(int(sys.argv[1]))
+    run(int(args[0]), safe_only=safe_only)
