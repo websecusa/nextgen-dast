@@ -482,6 +482,134 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // Inline "Test" — sends the finding's reproduction request once,
+  // server-side, and shows the live response in the modal. Server gates
+  // are: GET/HEAD only, host inside assessment scope, no private IPs,
+  // per-user 30/min rate limit. Highlights any indicator strings the
+  // server told us to mark up.
+  async function runTest(fid) {
+    const modal = document.getElementById("io-modal");
+    const titleEl = document.getElementById("io-modal-title");
+    const validateEl = document.getElementById("io-validate-body");
+    const ioBody = document.getElementById("io-modal-body");
+    if (!modal || !validateEl) return;
+    titleEl.textContent = "Testing finding #" + fid + "…";
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    document.getElementById("io-copy-btn").hidden = true;
+    validateEl.innerHTML = '<p class="muted">Sending request…</p>';
+    if (typeof modal.showModal === "function") modal.showModal();
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/test", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Live test · finding #" + fid;
+      validateEl.innerHTML = renderTestBody(data);
+    } catch (err) {
+      validateEl.innerHTML = '<p class="warn">Test request failed: ' +
+                              escapeHTML(String(err)) + '</p>';
+    }
+  }
+
+  // Build the live-test result HTML. Mirrors renderValidateBody in
+  // shape (badge, summary, body) but renders the raw response status,
+  // headers and body instead of a probe verdict, and marks indicator
+  // strings inside the body with <mark>.
+  function renderTestBody(d) {
+    if (!d) return '<p class="warn">empty response</p>';
+    if (!d.ok) {
+      return '<p class="warn"><strong>Cannot test:</strong> ' +
+             escapeHTML(d.message || d.error || "unknown error") + '</p>';
+    }
+    const s = Number(d.status || 0);
+    let statusColor = "var(--muted, #888)";
+    if (s >= 200 && s < 300)      statusColor = "var(--sev-low, #2ecc71)";
+    else if (s >= 300 && s < 400) statusColor = "var(--sev-info, #5d8aa8)";
+    else if (s >= 400 && s < 500) statusColor = "var(--sev-medium, #e67e22)";
+    else if (s >= 500)            statusColor = "var(--sev-high, #c0392b)";
+
+    let html = '';
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; ';
+    html +=   ' border-radius:4px; background:' + statusColor + '; ';
+    html +=   ' color:#fff; font-weight:600">HTTP ' +
+                escapeHTML(String(d.status)) + '</span>';
+    html +=   ' <code style="margin-left:.5em">' +
+                escapeHTML(d.method) + ' ' + escapeHTML(d.url) + '</code>';
+    html +=   ' <span class="muted small" style="margin-left:.5em">' +
+                escapeHTML(String(d.elapsed_ms)) + ' ms · ' +
+                escapeHTML(formatBytes(d.body_size)) +
+                (d.body_truncated ? ' (truncated)' : '') +
+              '</span>';
+    html += '</p>';
+    if (d.indicator) {
+      html += '<p class="muted small" style="margin:.2em 0 .8em">';
+      html +=   '<strong>Look for:</strong> ' + escapeHTML(d.indicator);
+      html += '</p>';
+    }
+    // Headers table
+    if (d.headers && d.headers.length) {
+      html += '<h4 style="margin:.4em 0 .3em">Response headers</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; ';
+      html +=        ' font-size:.88em; margin-bottom:.6em">';
+      html += '<tbody>';
+      const BANNER_HEADERS = /^(server|x-powered-by|x-frame-options|strict-transport-security|content-security-policy|set-cookie|location)$/i;
+      for (const [k, v] of d.headers) {
+        const isBanner = BANNER_HEADERS.test(k);
+        html += '<tr style="border-top:1px solid var(--border, #333)">';
+        html += '<td style="padding:.2em .5em; vertical-align:top; ';
+        html +=    ' width:18em; color:' +
+                   (isBanner ? "var(--accent, #7af)" : "var(--muted, #888)") +
+                   '"><code>' + escapeHTML(k) + '</code></td>';
+        html += '<td style="padding:.2em .5em; word-break:break-all"><code>' +
+                  escapeHTML(v) + '</code></td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+    }
+    // Body with highlights
+    html += '<h4 style="margin:.6em 0 .3em">Response body' +
+            (d.body_truncated ? ' <span class="muted small">(first 256 KB)</span>' : '') +
+            '</h4>';
+    let safeBody = escapeHTML(d.body || "");
+    safeBody = highlightTerms(safeBody, d.highlights || []);
+    html += '<pre class="log" style="margin:0; padding:.8em; max-height:30em; ';
+    html +=          ' overflow:auto; white-space:pre-wrap; word-break:break-word">' +
+              safeBody + '</pre>';
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'No state was modified — request sent with no auth cookie, ' +
+            'GET/HEAD only, scope locked to the assessment FQDN.</p>';
+    return html;
+  }
+
+  function formatBytes(n) {
+    n = Number(n || 0);
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  // Wrap matches in <mark>. Input is already HTML-escaped so we work
+  // on the escaped string and search for escaped versions of each term.
+  function highlightTerms(escapedHtml, terms) {
+    if (!terms || !terms.length) return escapedHtml;
+    let out = escapedHtml;
+    const seen = new Set();
+    for (const raw of terms) {
+      if (!raw) continue;
+      const t = escapeHTML(raw);
+      if (seen.has(t)) continue;
+      seen.add(t);
+      const safeRe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      try {
+        out = out.replace(new RegExp(safeRe, "gi"),
+          (m) => '<mark style="background:#fff59d; color:#000">' + m + '</mark>');
+      } catch (_) { /* invalid regex — skip */ }
+    }
+    return out;
+  }
+
   // Restore selection from location.hash on first paint, or auto-select
   // the first row if there's no hash. Lets a fresh visit immediately
   // show something useful instead of an empty middle column.

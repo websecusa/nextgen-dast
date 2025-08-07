@@ -1845,6 +1845,14 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     )
     if io["validatable"]:
         io["probe_name"] = probe.get("name")
+    # The Test button is the no-probe sibling: just fires the bare
+    # reproduction request once and surfaces the response. Allowed for
+    # any GET / HEAD against a host inside the assessment scope.
+    a_for_scope = (db.query_one("SELECT fqdn FROM assessments WHERE id = %s",
+                                (f.get("assessment_id"),))
+                   if f.get("assessment_id") else None)
+    testable, _why = _finding_testable(f, a_for_scope)
+    io["testable"] = testable
     return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
 
 
@@ -1919,6 +1927,293 @@ def _finding_io_evidence(f: dict) -> dict:
             base = f"Reflected XSS payload: {payload}"
             out["indicator"] = base + (f" via parameter {param}" if param else "")
     return out
+
+
+# ----------------------------------------------------------------------
+# Inline "Test" button — runs the finding's reproduction request once,
+# server-side, with hard safety gates. Lets the analyst confirm
+# something like "is /vendor/composer/installed.json actually present"
+# without dropping to a terminal. NOT a probe (no verdict logic) —
+# just a one-shot fetch with the response surfaced into a modal.
+# ----------------------------------------------------------------------
+
+# Hostnames considered "internal" — anything resolving here is refused
+# regardless of scope, so the Test button cannot be coerced into a
+# server-side request forgery vehicle against the orchestrator's own
+# private network.
+import ipaddress as _ipaddress
+import socket as _socket
+
+# Per-user token bucket: 30 Test invocations per 60s window. Crude but
+# enough to stop a tab full of buttons being slammed in a loop, and
+# resets across container restarts which is fine for an internal tool.
+_TEST_RATE_LIMIT_WINDOW_S = 60
+_TEST_RATE_LIMIT_MAX = 30
+_test_rate_limit_state: dict[str, list[float]] = {}
+
+
+def _test_rate_limit_check(user_key: str) -> Optional[float]:
+    """Return None if under the cap, else the seconds-until-window-resets."""
+    now = time.monotonic()
+    bucket = _test_rate_limit_state.setdefault(user_key, [])
+    cutoff = now - _TEST_RATE_LIMIT_WINDOW_S
+    # Drop expired hits in-place.
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    if len(bucket) >= _TEST_RATE_LIMIT_MAX:
+        return _TEST_RATE_LIMIT_WINDOW_S - (now - bucket[0])
+    bucket.append(now)
+    return None
+
+
+def _is_private_host(host: str) -> bool:
+    """True if `host` resolves to a non-public IP. Refused before any
+    request is sent so an attacker can't pivot Test through the
+    container's network into private services. Checks every A/AAAA
+    record (a host might have one public + one private; treat the
+    whole hostname as private if any record is private)."""
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except OSError:
+        # DNS failure — let the actual request error out with a
+        # clearer message rather than masking it as "private host".
+        return False
+    for info in infos:
+        try:
+            ip = _ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return True
+    return False
+
+
+def _finding_testable(finding: dict,
+                      assessment: Optional[dict]) -> tuple[bool, str]:
+    """Decide whether the inline Test button should be offered for this
+    finding. Returns (testable, reason). Reason is a short string for
+    the tooltip / refusal payload; only meaningful when testable=False.
+
+    Gates:
+      1. Method is GET or HEAD.
+      2. URL has an http(s) scheme.
+      3. URL host is in the assessment's scope (exact match or subdomain
+         of the assessment's fqdn) — keeps the analyst from coaxing the
+         tool into off-target traffic.
+    Per-request gates (private-IP refusal, rate limit) live in the
+    handler itself.
+    """
+    method = (finding.get("evidence_method") or "GET").upper()
+    if method not in ("GET", "HEAD"):
+        return (False, f"only GET / HEAD are testable — finding is {method}")
+    url = (finding.get("evidence_url") or "").strip()
+    if not url:
+        return (False, "finding has no evidence URL")
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return (False, f"unsupported scheme {parsed.scheme!r}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return (False, "URL has no host")
+    if assessment and assessment.get("fqdn"):
+        fqdn = assessment["fqdn"].lower()
+        if not (host == fqdn or host.endswith("." + fqdn)):
+            return (False, f"host {host!r} is outside the assessment scope")
+    return (True, "")
+
+
+def _highlight_terms_for(finding: dict) -> list[str]:
+    """Per-finding shortlist of strings the modal should mark in the
+    response body. Drawn from the same raw_data fields the indicator
+    text uses, plus a few generic banners that always interest an
+    analyst (Server, X-Powered-By). Kept short (≤8 terms) so the
+    modal isn't drowned in highlights."""
+    raw = finding.get("raw") or {}
+    tool = (finding.get("source_tool") or "").lower()
+    terms: list[str] = []
+    if tool == "nuclei":
+        for key in ("matcher-name", "extracted-results"):
+            v = raw.get(key)
+            if isinstance(v, str) and v:
+                terms.append(v)
+            elif isinstance(v, list):
+                terms += [str(x) for x in v if x]
+    elif tool == "wapiti":
+        for key in ("parameter", "info"):
+            v = raw.get(key)
+            if isinstance(v, str) and v:
+                terms.append(v)
+    elif tool == "nikto":
+        # The Nikto line frequently mentions a substring that should
+        # show up in the response (e.g. 'PHP Composer configuration').
+        # We split off any 'See: <url>' tail so the highlight isn't
+        # an external reference URL.
+        line = raw.get("line") or ""
+        if line and ":" in line:
+            after = line.split(":", 1)[1].strip()
+            tail = after.split(" See: ", 1)[0].strip()
+            if tail:
+                terms.append(tail[:80])
+    # Always also scan for these generic disclosure banners.
+    terms += ["Server:", "X-Powered-By:", "Set-Cookie"]
+    # De-dup, drop empties, cap length per term.
+    seen: set = set()
+    out = []
+    for t in terms:
+        t = (t or "").strip()
+        if t and t.lower() not in seen and len(t) >= 3:
+            seen.add(t.lower())
+            out.append(t[:200])
+    return out[:8]
+
+
+@app.post("/finding/{fid}/test")
+def finding_test(request: Request, fid: int):
+    """Run the finding's reproduction request once, server-side, with a
+    SafeClient locked to the assessment's scope. Returns the response
+    as JSON (status, headers, body preview, elapsed time) plus a list
+    of indicator strings the modal should mark up.
+
+    Refusals come back as HTTP 4xx with `{ok:false, error, message}`
+    so the modal can render a friendly explanation instead of an opaque
+    failure. Successful but non-2xx responses (e.g. a 302 to /login.php)
+    are still 'ok' from this endpoint's perspective — the analyst is
+    the one judging the response.
+    """
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    a = db.query_one("SELECT id, fqdn FROM assessments WHERE id = %s",
+                     (f.get("assessment_id"),))
+    if not a:
+        raise HTTPException(404, "owning assessment is gone")
+
+    testable, reason = _finding_testable(f, a)
+    if not testable:
+        return JSONResponse(
+            {"ok": False, "error": "not_testable", "message": reason},
+            status_code=409)
+
+    # Rate limit. Identify the user by id when authenticated, falling
+    # back to client IP for fail-closed behavior. The bucket is in-
+    # memory so a container restart resets — that's intentional, an
+    # operator who wants to wipe the limit can just restart the app.
+    user = current_user(request) or {}
+    user_key = str(user.get("id") or
+                   (request.client.host if request.client else "anon"))
+    over = _test_rate_limit_check(user_key)
+    if over is not None:
+        return JSONResponse(
+            {"ok": False, "error": "rate_limited",
+             "message": (f"Too many Test runs in the last "
+                         f"{_TEST_RATE_LIMIT_WINDOW_S}s. "
+                         f"Try again in {int(over) + 1}s.")},
+            status_code=429)
+
+    # Decode raw_data once so highlight extraction sees structured fields.
+    if f.get("raw_data") and not f.get("raw"):
+        try:
+            f["raw"] = json.loads(f["raw_data"])
+        except Exception:
+            f["raw"] = None
+
+    url = f["evidence_url"]
+    method = (f.get("evidence_method") or "GET").upper()
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if _is_private_host(parsed.hostname or ""):
+        return JSONResponse(
+            {"ok": False, "error": "private_host",
+             "message": (f"Hostname {parsed.hostname!r} resolves to a "
+                         "private / loopback / link-local IP. Refusing "
+                         "to send the request — Test is restricted to "
+                         "external assessment targets only.")},
+            status_code=409)
+
+    # One-shot HTTPS fetch via stdlib. The probe SafeClient lives under
+    # /app/toolkit/lib and is loaded as a subprocess elsewhere — using
+    # it here would entangle two import roots, and we don't need its
+    # audit-log machinery for a single request anyway. The safety we
+    # need (method, scheme, scope, private-IP, timeout, body cap) is
+    # already enforced above.
+    import http.client as _httpclient
+    import ssl as _ssl
+    import urllib.error as _urlerror
+    import urllib.request as _urlreq
+
+    BODY_CAP = 256 * 1024
+    REQ_TIMEOUT = 10.0
+
+    # Most pentest targets are self-signed / wildcard / internal; same
+    # posture every other DAST tool in this stack uses.
+    ssl_ctx = _ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = _ssl.CERT_NONE
+    https_handler = _urlreq.HTTPSHandler(context=ssl_ctx)
+    # Disable redirect following so a 302 → /login.php (a common false
+    # signal) is visible in the response, and so we cannot be coerced
+    # off the in-scope host by a Location: header.
+    class _NoRedirect(_urlreq.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    opener = _urlreq.build_opener(https_handler, _NoRedirect())
+
+    req = _urlreq.Request(url, method=method, headers={
+        "User-Agent": "nextgen-dast/2.1.1 (Test button)",
+        "Accept": "*/*",
+    })
+    t_start = time.monotonic()
+    status = 0
+    body_bytes = b""
+    headers_list: list[tuple[str, str]] = []
+    err_msg: Optional[str] = None
+    try:
+        with opener.open(req, timeout=REQ_TIMEOUT) as resp:
+            status = resp.status
+            headers_list = list(resp.headers.items())
+            try:
+                body_bytes = resp.read(BODY_CAP + 1)
+            except _httpclient.IncompleteRead as ir:
+                body_bytes = ir.partial or b""
+    except _urlerror.HTTPError as e:
+        # 4xx / 5xx still carry a body — surface it the same as a 2xx.
+        status = e.code
+        headers_list = list((e.headers or {}).items())
+        try:
+            body_bytes = e.read() or b""
+        except _httpclient.IncompleteRead as ir:
+            body_bytes = ir.partial or b""
+    except _urlerror.URLError as e:
+        err_msg = f"network error: {e.reason}"
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
+    if err_msg is not None:
+        return JSONResponse(
+            {"ok": False, "error": "request_error",
+             "message": err_msg, "elapsed_ms": elapsed_ms},
+            status_code=502)
+
+    truncated = len(body_bytes) > BODY_CAP
+    body_text = body_bytes[:BODY_CAP].decode("utf-8", "replace")
+
+    return JSONResponse({
+        "ok": True,
+        "method": method,
+        "url": url,
+        "status": status,
+        "elapsed_ms": elapsed_ms,
+        "headers": headers_list,
+        "body": body_text,
+        "body_size": len(body_bytes),
+        "body_truncated": truncated,
+        "highlights": _highlight_terms_for(f),
+        "indicator": _finding_io_evidence(f).get("indicator") or "",
+    })
 
 
 @app.post("/assessment/{aid}/filter_info")
