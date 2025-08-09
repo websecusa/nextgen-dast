@@ -1805,10 +1805,11 @@ def _live_risk_score(findings: list[dict]) -> int:
 
 
 def _finding_panel_context(f: Optional[dict]) -> dict:
-    """Build the variables the finding_panel.html / _finding_aside.html
-    partials expect: f, e (enrichment), repro (reproduction block),
-    probe (matched validation probe), io (captured request/response and
-    'what to look for' indicator). Tolerant of f=None — used as the
+    """Build the variables the finding_panel.html / _finding_aside.html /
+    finding_detail.html templates expect: f, e (enrichment), repro
+    (reproduction block), probe (matched validation probe), io
+    (captured request/response, 'what to look for' indicator, and
+    Validate / Test eligibility). Tolerant of f=None — used as the
     empty-state path."""
     if not f:
         return {"f": None, "e": None, "repro": None, "probe": None, "io": None}
@@ -1818,10 +1819,16 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
             "SELECT * FROM finding_enrichment WHERE id = %s",
             (f["enrichment_id"],))
         if e:
+            # Decode JSON-encoded list columns into actual lists. The
+            # finding_detail.html template renders both directly.
             try:
                 e["steps"] = json.loads(e.get("remediation_steps") or "[]")
             except Exception:
                 e["steps"] = []
+            try:
+                e["references"] = json.loads(e.get("references_json") or "[]")
+            except Exception:
+                e["references"] = []
     # Decode the raw_data JSON once so reproduction and evidence helpers
     # both see structured fields (matcher-name, http_request, etc.) rather
     # than each having to parse the blob on its own.
@@ -2706,48 +2713,28 @@ def assessment_report_delete(aid: int, filename: str):
 def finding_detail(request: Request, fid: int):
     """Per-finding view: enrichment guidance, ticket export, and the
     Challenge / False-Positive workflow. The view is read-only for
-    non-admin users; the action buttons render disabled in that case."""
+    non-admin users; the action buttons render disabled in that case.
+
+    Shares the panel-context builder with the workspace fragment so
+    the embedded Reproduce-&-verify partial sees the same `io`
+    (Validate / Test eligibility, captured request/response, indicator)
+    on this page as it does in the workspace."""
     f = db.query_one(
         "SELECT * FROM findings WHERE id = %s", (fid,))
     if not f:
         raise HTTPException(404)
-    e = None
-    if f.get("enrichment_id"):
-        e = db.query_one(
-            "SELECT * FROM finding_enrichment WHERE id = %s",
-            (f["enrichment_id"],))
-    if e:
-        try:
-            e["steps"] = json.loads(e.get("remediation_steps") or "[]")
-        except Exception:
-            e["steps"] = []
-        try:
-            e["references"] = json.loads(e.get("references_json") or "[]")
-        except Exception:
-            e["references"] = []
-    # Probe matched by title / OWASP / CWE — None if no validation tool fits.
-    # The template uses this to decide whether to render the Challenge button.
-    probe = toolkit_mod.find_probe_for_finding(f)
-    # Decode validation_evidence (stored as JSON when a probe ran).
+    panel = _finding_panel_context(f)
+    # Decode validation_evidence (stored as JSON when a probe ran). This
+    # is full-detail-only — the workspace panel doesn't render it.
     validation = None
     if f.get("validation_evidence"):
         try:
             validation = json.loads(f["validation_evidence"])
         except Exception:
             validation = {"raw": f["validation_evidence"][:2000]}
-    # Decode raw_data once so the Reproduce-&-verify partial sees the
-    # same structured fields the assessment-workspace panel does.
-    if f.get("raw_data") and not f.get("raw"):
-        try:
-            f["raw"] = json.loads(f["raw_data"])
-        except Exception:
-            f["raw"] = None
-    repro = reports_mod._repro_for(f)
-    io = _finding_io_evidence(f)
     return templates.TemplateResponse(
         "finding_detail.html",
-        ctx(request, f=f, e=e, probe=probe, validation=validation,
-            repro=repro, io=io),
+        ctx(request, validation=validation, **panel),
     )
 
 

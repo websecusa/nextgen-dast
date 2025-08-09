@@ -26,7 +26,7 @@
     * finding_panel.html  — the assessment-workspace middle pane
     * finding_detail.html — the standalone /finding/<id> page
 #}
-{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response)) %}
+{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.testable)) %}
 <h3 class="section">Reproduce &amp; verify</h3>
 <ol class="repro-steps" style="margin:.25em 0 .8em 1.2em; padding:0">
   {% if repro and repro.curl %}
