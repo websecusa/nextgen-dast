@@ -1933,6 +1933,71 @@ def _finding_io_evidence(f: dict) -> dict:
         if payload:
             base = f"Reflected XSS payload: {payload}"
             out["indicator"] = base + (f" via parameter {param}" if param else "")
+    elif tool == "enhanced_testing":
+        # Enhanced-testing probes don't store the full HTTP round-trip
+        # but they DO store enough to reconstruct a useful summary:
+        # url + method + status + size + a body snippet that triggered
+        # detection. Synthesize a request and response so the same
+        # Scan-request / Scan-response modal that nuclei populates with
+        # real bytes also works here, with explicit "synthesized from
+        # scan evidence" headers so the analyst is not misled.
+        ev = raw.get("evidence") or {}
+        confirmed = ev.get("confirmed") or []
+        attempts = ev.get("attempts") or []
+        first = (confirmed[0] if isinstance(confirmed, list) and confirmed
+                 else attempts[0] if isinstance(attempts, list) and attempts
+                 else None)
+        if isinstance(first, dict):
+            ent_method = (f.get("evidence_method") or "GET").upper()
+            ent_url = first.get("url") or f.get("evidence_url") or ""
+            ent_status = first.get("status")
+            ent_size = first.get("size")
+            ent_family = first.get("error_family") or ""
+            ent_snippet = first.get("snippet") or ""
+            ent_label = first.get("label") or ""
+            from urllib.parse import urlparse as _u
+            host = _u(ent_url).hostname or ""
+            req_lines = [f"{ent_method} {ent_url}"]
+            if host:
+                req_lines.append(f"Host: {host}")
+            if ent_label:
+                req_lines.append(f"# Probe attempt: {ent_label}")
+            req_lines.append("")
+            req_lines.append("# Synthesized from scan evidence — the "
+                             "enhanced_testing probe records the URL it "
+                             "sent but not full request headers.")
+            out["request"] = _clip("\n".join(req_lines))
+
+            resp_lines = []
+            if ent_status is not None:
+                resp_lines.append(f"HTTP {ent_status}")
+            if ent_size is not None:
+                resp_lines.append(f"Content-Length: {ent_size}")
+            if ent_family:
+                resp_lines.append(f"X-Detected-Error-Family: {ent_family}")
+            resp_lines.append("")
+            if ent_snippet:
+                resp_lines.append("--- response body snippet that "
+                                  "triggered detection ---")
+                resp_lines.append(ent_snippet)
+                resp_lines.append("--- end snippet ---")
+            else:
+                resp_lines.append("[scanner did not capture a body snippet]")
+            resp_lines.append("")
+            resp_lines.append("# Synthesized from scan evidence — full "
+                              "response body was not captured by the probe.")
+            out["response"] = _clip("\n".join(resp_lines))
+
+            indicator_bits = []
+            if ent_status is not None:
+                indicator_bits.append(f"HTTP {ent_status}")
+            if ent_family:
+                indicator_bits.append(f"'{ent_family}'")
+            if ent_snippet:
+                indicator_bits.append(f"body contains '{ent_snippet}'")
+            if indicator_bits:
+                out["indicator"] = ("Re-running the request should reproduce "
+                                    + " · ".join(indicator_bits) + ".")
     return out
 
 

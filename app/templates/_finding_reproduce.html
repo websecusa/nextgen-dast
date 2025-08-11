@@ -47,11 +47,17 @@
     <div style="display:flex; gap:.5em; flex-wrap:wrap; margin-top:.4em">
       {% if io.request %}
         <button type="button" class="ghost"
-                onclick="openIO('request')">View request</button>
+                onclick="openIO('request')"
+                title="The HTTP request the scanner sent (or a synthesized summary when full bytes were not captured).">
+          Scan request
+        </button>
       {% endif %}
       {% if io.response %}
         <button type="button" class="ghost"
-                onclick="openIO('response')">View response</button>
+                onclick="openIO('response')"
+                title="The HTTP response the scanner saw (or a synthesized summary when full bytes were not captured).">
+          Scan response
+        </button>
       {% endif %}
       {% if io.testable %}
         <button type="button" class="primary"
@@ -77,13 +83,25 @@
 {% if io and io.response %}<template id="io-data-response">{{ io.response }}</template>{% endif %}
 
 {% if io and (io.request or io.response or io.validatable or io.testable) %}
+<style>
+  /* The native ::backdrop pseudo-element can't be set inline, so we
+     scope it on the io-modal id. Slightly darker than the default
+     so the modal reads as visually separated from the workspace
+     behind it. */
+  #io-modal::backdrop { background: rgba(0,0,0,0.55); }
+</style>
 <dialog id="io-modal" class="io-modal"
         style="max-width:min(90vw, 900px); width:80vw; padding:0;
                background:var(--panel); color:var(--text);
-               border:1px solid var(--border); border-radius:8px">
+               border:2px solid var(--accent, #5d8aa8);
+               border-radius:10px;
+               box-shadow:0 0 0 1px rgba(0,0,0,0.55),
+                          0 18px 48px rgba(0,0,0,0.55)">
   <div style="display:flex; align-items:center; justify-content:space-between;
-              padding:.7em 1em; border-bottom:1px solid var(--border)">
-    <strong id="io-modal-title">Captured</strong>
+              padding:.7em 1em;
+              border-bottom:2px solid var(--accent, #5d8aa8);
+              background:rgba(255,255,255,0.02)">
+    <strong id="io-modal-title">Scan evidence</strong>
     <div style="display:flex; gap:.4em">
       <button type="button" id="io-copy-btn" class="ghost small"
               onclick="copyIO()">Copy</button>

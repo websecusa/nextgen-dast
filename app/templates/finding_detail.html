@@ -359,7 +359,7 @@ function openIO(kind) {
   const tpl   = document.getElementById('io-data-' + kind);
   if (!modal || !tpl) return;
   document.getElementById('io-modal-title').textContent =
-    kind === 'request' ? 'Captured request' : 'Captured response';
+    kind === 'request' ? 'Scan request' : 'Scan response';
   const body = document.getElementById('io-modal-body');
   body.textContent = tpl.content.textContent;
   body.hidden = false;

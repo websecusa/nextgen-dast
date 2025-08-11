@@ -333,7 +333,7 @@
     const tpl   = document.getElementById("io-data-" + kind);
     if (!modal || !tpl) return;
     document.getElementById("io-modal-title").textContent =
-      kind === "request" ? "Captured request" : "Captured response";
+      kind === "request" ? "Scan request" : "Scan response";
     // <template>.content is an inert DocumentFragment whose textContent
     // returns the original raw bytes (any HTML escaping Jinja did is
     // un-escaped by the parser when the template element was built).

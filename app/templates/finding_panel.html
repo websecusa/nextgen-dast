@@ -40,11 +40,27 @@
      class="button ghost" style="font-size:.82em">Open full detail →</a>
 </div>
 
+{# "What was detected" — the scanner's specific, finding-level
+   description. We render this BEFORE the generic enrichment Overview
+   so the analyst sees the concrete weakness ("verbose error page on X
+   leaks SQLite engine details") before the generic class context
+   ("a configuration setting weakens the security posture..."). When
+   the scanner did not write a description we fall back to the title.
+
+   Only suppressed when the scanner-level text is the SAME as the
+   enrichment text (no point printing the same paragraph twice). #}
+{% set fdesc = (f.description or "").strip() %}
+{% set edesc = ((e and e.description_long) or "").strip() %}
+{% if fdesc and fdesc != edesc %}
+<h3 class="section">What was detected</h3>
+<p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
+{% endif %}
+
 <h3 class="section">Overview</h3>
-{% if e and e.description_long %}
-  <p style="white-space:pre-wrap; margin-top:0">{{ e.description_long }}</p>
-{% elif f.description %}
-  <p style="white-space:pre-wrap; margin-top:0">{{ f.description }}</p>
+{% if edesc %}
+  <p style="white-space:pre-wrap; margin-top:0">{{ edesc }}</p>
+{% elif fdesc %}
+  <p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
 {% else %}
   <p class="muted small">No description was attached to this finding by the
     source scanner.</p>
