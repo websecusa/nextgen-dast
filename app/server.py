@@ -1858,8 +1858,9 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     a_for_scope = (db.query_one("SELECT fqdn FROM assessments WHERE id = %s",
                                 (f.get("assessment_id"),))
                    if f.get("assessment_id") else None)
-    testable, _why = _finding_testable(f, a_for_scope)
+    testable, _why, kind = _finding_testable(f, a_for_scope)
     io["testable"] = testable
+    io["test_kind"] = kind   # 'http' or 'tls' — used for the button label
     return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
 
 
@@ -2062,38 +2063,59 @@ def _is_private_host(host: str) -> bool:
 
 
 def _finding_testable(finding: dict,
-                      assessment: Optional[dict]) -> tuple[bool, str]:
+                      assessment: Optional[dict]) -> tuple[bool, str, str]:
     """Decide whether the inline Test button should be offered for this
-    finding. Returns (testable, reason). Reason is a short string for
-    the tooltip / refusal payload; only meaningful when testable=False.
+    finding. Returns (testable, reason, kind). Reason is a short string
+    for the tooltip / refusal payload; only meaningful when testable
+    is False. Kind is one of:
+      "http" — verify by sending a single GET / HEAD request and
+               showing the live response (the curl-equivalent path).
+      "tls"  — verify by re-running testssl.sh with a narrowly scoped
+               flag for the specific check id, and surfacing the JSON
+               row(s) that match. Used for testssl-source findings,
+               where the source_tool already wrote a TLS verdict and
+               an HTTP request would not exercise the same posture.
 
-    Gates:
-      1. Method is GET or HEAD.
-      2. URL has an http(s) scheme.
-      3. URL host is in the assessment's scope (exact match or subdomain
-         of the assessment's fqdn) — keeps the analyst from coaxing the
-         tool into off-target traffic.
+    Gates (common to both kinds):
+      * URL host is in the assessment's scope (exact match or subdomain
+        of the assessment's fqdn) — keeps the analyst from coaxing the
+        tool into off-target traffic.
+    Kind-specific gates:
+      * http: method is GET / HEAD, scheme is http(s).
+      * tls:  source_tool == 'testssl' (the TLS suite is the only
+              one whose findings reflect transport-layer state rather
+              than HTTP responses).
     Per-request gates (private-IP refusal, rate limit) live in the
     handler itself.
     """
-    method = (finding.get("evidence_method") or "GET").upper()
-    if method not in ("GET", "HEAD"):
-        return (False, f"only GET / HEAD are testable — finding is {method}")
     url = (finding.get("evidence_url") or "").strip()
     if not url:
-        return (False, "finding has no evidence URL")
+        return (False, "finding has no evidence URL", "")
     from urllib.parse import urlparse
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return (False, f"unsupported scheme {parsed.scheme!r}")
+        return (False, f"unsupported scheme {parsed.scheme!r}", "")
     host = (parsed.hostname or "").lower()
     if not host:
-        return (False, "URL has no host")
+        return (False, "URL has no host", "")
     if assessment and assessment.get("fqdn"):
         fqdn = assessment["fqdn"].lower()
         if not (host == fqdn or host.endswith("." + fqdn)):
-            return (False, f"host {host!r} is outside the assessment scope")
-    return (True, "")
+            return (False, f"host {host!r} is outside the assessment scope", "")
+
+    tool = (finding.get("source_tool") or "").lower()
+    if tool == "testssl":
+        # testssl findings only make sense to verify via a TLS probe.
+        # Even when evidence_url is just `https://host`, the test runs
+        # against the host:port directly.
+        return (True, "", "tls")
+
+    method = (finding.get("evidence_method") or "GET").upper()
+    if method not in ("GET", "HEAD"):
+        return (False,
+                f"only GET / HEAD are testable — finding is {method}",
+                "")
+    return (True, "", "http")
 
 
 def _highlight_terms_for(finding: dict) -> list[str]:
@@ -2141,6 +2163,194 @@ def _highlight_terms_for(finding: dict) -> list[str]:
     return out[:8]
 
 
+# Pick the right testssl.sh flag for a given testssl finding id. The
+# narrower the run, the faster the verdict — full-suite testssl runs
+# are minutes, narrow runs are 5-30 seconds. Keys are matched in order:
+# regex prefixes first, then exact-id sets, then a default fallback.
+_TESTSSL_DISPATCH: list[tuple[object, str, str]] = [
+    # (matcher, flag, human label)
+    (re.compile(r"^cipherlist_"),       "-s",  "standard cipher categories"),
+    (re.compile(r"^cipher_order"),      "-P",  "server cipher preference"),
+    (re.compile(r"^cipher_(?:negotiated|x|tls)"),
+                                        "-e",  "each-cipher enumeration"),
+    (re.compile(r"^cert(?:_|ificate)"), "-S",  "server defaults / certificate"),
+    (re.compile(r"^chain"),             "-S",  "certificate chain"),
+    (re.compile(r"^DH(?:_|$)|^GOOD_DH"), "-f", "forward secrecy"),
+    (re.compile(r"^FS"),                "-f",  "forward secrecy"),
+    ({"SSLv2", "SSLv3", "TLS1", "TLS1_1", "TLS1_2", "TLS1_3"},
+                                        "-p",  "protocols"),
+    ({"BREACH", "CRIME_TLS", "POODLE_SSL", "FREAK", "DROWN", "LOGJAM",
+      "BEAST", "RC4", "SWEET32", "WINSHOCK", "HEARTBLEED",
+      "CCS_INJECTION", "TICKETBLEED", "ROBOT", "SECURE_RENEGO",
+      "SECURE_CLIENT_RENEGO", "LUCKY13", "FALLBACK_SCSV"},
+                                        "-U",  "vulnerability suite"),
+    (re.compile(r"^HSTS|^HPKP|^banner|^cookie",
+                re.IGNORECASE),         "-h",  "HTTP / TLS headers"),
+]
+
+
+def _pick_testssl_flag(testssl_id: str) -> tuple[str, str]:
+    """Map a testssl id (e.g. 'cipherlist_aNULL', 'TLS1', 'HEARTBLEED')
+    to the narrowest CLI flag that will exercise that check, plus a
+    human label for the modal. Falls back to '-s' (standard cipher
+    categories) if nothing matches — covers most ciphersuite findings
+    and runs in under 10 seconds."""
+    if not testssl_id:
+        return ("-s", "standard cipher categories")
+    for matcher, flag, label in _TESTSSL_DISPATCH:
+        if isinstance(matcher, set):
+            if testssl_id in matcher:
+                return (flag, label)
+        elif matcher.search(testssl_id):
+            return (flag, label)
+    return ("-s", "standard cipher categories")
+
+
+def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
+    """Re-run testssl.sh narrowly against the finding's host:port and
+    return the row(s) matching the original check id.
+
+    Run is bounded by:
+      * subprocess timeout (90s — narrow flags finish in <30s typical),
+      * single testssl invocation per click (rate-limited by caller),
+      * jsonfile-pretty output captured to a tmp path under /tmp,
+        cleaned up regardless of exit code.
+    """
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    import os as _os
+
+    raw = finding.get("raw") or {}
+    testssl_id = raw.get("id") or finding.get("title") or ""
+    flag, flag_label = _pick_testssl_flag(testssl_id)
+
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or 443
+    target = f"{host}:{port}"
+
+    fd, json_path = _tempfile.mkstemp(prefix="ngd_test_tls_", suffix=".json")
+    _os.close(fd)
+    # --jsonfile (flat list of {id, severity, finding, ...} rows) — same
+    # shape the orchestrator already parses in scripts/orchestrator.py.
+    # The --jsonfile-pretty form wraps everything in a top-level dict
+    # under scanResult, which would force a second parsing pass for no
+    # value here.
+    cmd = ["testssl.sh", flag,
+           "--quiet", "--color", "0", "--warnings", "off",
+           "--openssl-timeout", "10", "--socket-timeout", "10",
+           "--jsonfile", json_path,
+           target]
+
+    t_start = time.monotonic()
+    proc_stdout = ""
+    proc_stderr = ""
+    proc_rc = -1
+    try:
+        proc = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=90.0, check=False,
+        )
+        proc_stdout = proc.stdout or ""
+        proc_stderr = proc.stderr or ""
+        proc_rc = proc.returncode
+    except _subprocess.TimeoutExpired:
+        return JSONResponse({
+            "ok": False, "error": "tls_timeout",
+            "message": ("testssl.sh timed out after 90s. Try the manual "
+                        "Challenge form on the full detail page if you "
+                        "need a deeper run."),
+        }, status_code=504)
+    except Exception as e:
+        return JSONResponse({
+            "ok": False, "error": "tls_runtime",
+            "message": f"{type(e).__name__}: {e}",
+        }, status_code=502)
+    finally:
+        try:
+            with open(json_path, "r", encoding="utf-8", errors="replace") as fh:
+                report_text = fh.read()
+        except OSError:
+            report_text = ""
+        try:
+            _os.unlink(json_path)
+        except OSError:
+            pass
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
+    rows: list[dict] = []
+    try:
+        rows = json.loads(report_text or "[]")
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        rows = []
+
+    # Filter to rows for the original check id (and any sibling row
+    # whose id contains the original — testssl sometimes nests results,
+    # e.g. cipherlist_aNULL is reported alongside cipherlist_NULL).
+    matched: list[dict] = []
+    if testssl_id:
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            rid = (r.get("id") or "").strip()
+            if rid == testssl_id:
+                matched.append(r)
+        # If nothing matched the exact id, surface every row from the
+        # narrow flag run — the analyst still wants to see what the
+        # current TLS posture looks like.
+        if not matched:
+            matched = [r for r in rows if isinstance(r, dict)][:50]
+    else:
+        matched = [r for r in rows if isinstance(r, dict)][:50]
+
+    # Verdict heuristic — mirror the analyst's reading:
+    #   * any matched row whose finding text indicates the issue is
+    #     present (offered, deprecated, vulnerable, no, missing)
+    #     → reproduced
+    #   * any matched row that says "not offered" / "ok" / "fine"
+    #     → not reproduced
+    #   * else inconclusive
+    BAD_PATTERNS = ("offered", "deprecated", "vulnerable",
+                    "not ok", "weak", "obsolete")
+    GOOD_PATTERNS = ("not offered", "not vulnerable", "ok ", "fine ",
+                     "supported", "passed")
+    verdict = "inconclusive"
+    for r in matched:
+        ftxt = (r.get("finding") or "").lower()
+        sev = (r.get("severity") or "").upper()
+        if sev in ("HIGH", "CRITICAL", "MEDIUM") and any(
+                p in ftxt for p in BAD_PATTERNS):
+            verdict = "reproduced"
+            break
+        if any(p in ftxt for p in GOOD_PATTERNS):
+            verdict = "not_reproduced"
+    if verdict == "inconclusive" and matched:
+        # Severity uplift alone — testssl's own severity is enough to
+        # call something reproduced even when the finding text is
+        # phrased neutrally.
+        if any((r.get("severity") or "").upper() in ("HIGH", "CRITICAL")
+               for r in matched):
+            verdict = "reproduced"
+
+    return JSONResponse({
+        "ok": True,
+        "kind": "tls",
+        "host": host,
+        "port": port,
+        "command": " ".join(cmd),
+        "elapsed_ms": elapsed_ms,
+        "exit_code": proc_rc,
+        "flag": flag,
+        "flag_label": flag_label,
+        "testssl_id": testssl_id,
+        "verdict": verdict,    # 'reproduced' | 'not_reproduced' | 'inconclusive'
+        "matched_rows": matched[:20],
+        "stdout_excerpt": (proc_stdout or "")[:8000],
+        "stderr_excerpt": (proc_stderr or "")[:2000],
+    })
+
+
 @app.post("/finding/{fid}/test")
 def finding_test(request: Request, fid: int):
     """Run the finding's reproduction request once, server-side, with a
@@ -2162,7 +2372,7 @@ def finding_test(request: Request, fid: int):
     if not a:
         raise HTTPException(404, "owning assessment is gone")
 
-    testable, reason = _finding_testable(f, a)
+    testable, reason, kind = _finding_testable(f, a)
     if not testable:
         return JSONResponse(
             {"ok": False, "error": "not_testable", "message": reason},
@@ -2204,6 +2414,14 @@ def finding_test(request: Request, fid: int):
                          "to send the request — Test is restricted to "
                          "external assessment targets only.")},
             status_code=409)
+
+    # TLS-flavoured test: testssl-source findings reflect transport
+    # posture (cipher list, protocol versions, vuln presence). An HTTP
+    # GET against the host wouldn't exercise the same surface, so we
+    # re-run testssl.sh with a narrowly scoped flag for the specific
+    # check id and surface the JSON row(s) that match.
+    if kind == "tls":
+        return _finding_test_tls(f, parsed)
 
     # One-shot HTTPS fetch via stdlib. The probe SafeClient lives under
     # /app/toolkit/lib and is loaded as a subprocess elsewhere — using

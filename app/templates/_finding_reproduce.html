@@ -62,8 +62,8 @@
       {% if io.testable %}
         <button type="button" class="primary"
                 onclick="runTest({{ f.id }})"
-                title="Send this exact request once from the server and show the live response. GET/HEAD only, scoped to the assessment FQDN.">
-          Test
+                title="{% if io.test_kind == 'tls' %}Re-run testssl.sh narrowly against this finding's host:port and show the matched rows.{% else %}Send this exact request once from the server and show the live response. GET/HEAD only, scoped to the assessment FQDN.{% endif %}">
+          {% if io.test_kind == 'tls' %}Test (TLS){% else %}Test{% endif %}
         </button>
       {% endif %}
       {% if io.validatable %}
