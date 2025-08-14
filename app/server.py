@@ -2110,12 +2110,48 @@ def _finding_testable(finding: dict,
         # against the host:port directly.
         return (True, "", "tls")
 
+    # Findings from non-testssl tools that are STILL clearly about
+    # certificate / SSL / TLS posture (e.g. Nikto's "wildcard
+    # certificate" notice). An HTTP GET would not surface the cert
+    # details the analyst needs — handshake-level information does.
+    if parsed.scheme == "https" and _looks_like_cert_finding(finding):
+        return (True, "", "tls_info")
+
     method = (finding.get("evidence_method") or "GET").upper()
     if method not in ("GET", "HEAD"):
         return (False,
                 f"only GET / HEAD are testable — finding is {method}",
                 "")
     return (True, "", "http")
+
+
+# Keywords that, when present in a finding's title or description,
+# indicate the finding is about certificate / TLS posture rather than
+# HTTP behavior. Conservative on purpose — we only divert to a TLS
+# probe when the user clearly cares about the handshake / cert.
+_CERT_FINDING_KEYWORDS = (
+    "wildcard certificate", "wildcard cert",
+    "ssl certificate", "tls certificate",
+    "certificate is", "certificate has",
+    "certificate revocation", "certificate chain",
+    "certificate expir", "expired certificate",
+    "self-signed", "self signed",
+    "subject alt", " san ",
+    " cn=",
+    "weak cert", "ssl/tls", "ssl info",
+    "ssl detail", "tls detail",
+)
+
+
+def _looks_like_cert_finding(finding: dict) -> bool:
+    """True when the finding's wording indicates a TLS / certificate
+    posture issue. Used to dispatch the Test button to a cert-info
+    probe (openssl s_client + x509 -text) instead of an HTTP GET."""
+    blob = " ".join([
+        (finding.get("title") or "").lower(),
+        (finding.get("description") or "").lower(),
+    ])
+    return any(k in blob for k in _CERT_FINDING_KEYWORDS)
 
 
 def _highlight_terms_for(finding: dict) -> list[str]:
@@ -2351,6 +2387,120 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     })
 
 
+def _finding_test_tls_info(parsed) -> JSONResponse:
+    """Surface live certificate + handshake info for a TLS-cert finding.
+
+    Runs `openssl s_client -connect host:port -servername host` once,
+    pipes the leaf cert through `openssl x509 -text -noout`, and
+    extracts the fields an analyst typically wants to see (Subject,
+    Issuer, Validity, SAN, Public Key, Signature Algorithm) plus the
+    negotiated protocol + cipher. Both binaries ship in the base image
+    (the Dockerfile installs openssl); each subprocess is bounded by a
+    short timeout. Read-only by definition — opens a TLS connection,
+    reads the cert, closes.
+    """
+    import subprocess as _sp
+    import re as _re
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    s_cmd = ["openssl", "s_client", "-connect", f"{host}:{port}",
+            "-servername", host, "-showcerts"]
+
+    t_start = time.monotonic()
+    try:
+        s_proc = _sp.run(
+            s_cmd, input=b"\n", capture_output=True, timeout=15,
+        )
+    except _sp.TimeoutExpired:
+        return JSONResponse(
+            {"ok": False, "error": "tls_info_timeout",
+             "message": "openssl s_client did not return within 15 s."},
+            status_code=504)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"ok": False, "error": "openssl_missing",
+             "message": "openssl binary is not available in this container."},
+            status_code=500)
+
+    handshake = (s_proc.stdout or b"").decode("utf-8", "replace")
+    s_stderr = (s_proc.stderr or b"").decode("utf-8", "replace")
+
+    # Pull negotiated protocol + cipher out of the handshake summary.
+    proto_m = _re.search(r"^\s*Protocol\s*:\s*(\S+)\s*$", handshake, _re.MULTILINE)
+    cipher_m = _re.search(r"^\s*Cipher\s*:\s*(\S+)\s*$", handshake, _re.MULTILINE)
+    sni_m = _re.search(r"^\s*Verification:\s*(.+)$", handshake, _re.MULTILINE)
+
+    # Extract every PEM block; the first one is the leaf certificate.
+    pem_blocks = _re.findall(
+        r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+        handshake, _re.DOTALL,
+    )
+    leaf_pem = pem_blocks[0] if pem_blocks else ""
+    chain_count = len(pem_blocks)
+
+    # Parse the leaf via `openssl x509 -text -noout`.
+    x509_text = ""
+    if leaf_pem:
+        try:
+            x_proc = _sp.run(
+                ["openssl", "x509", "-text", "-noout"],
+                input=leaf_pem.encode(), capture_output=True, timeout=10,
+            )
+            x509_text = (x_proc.stdout or b"").decode("utf-8", "replace")
+        except Exception:
+            x509_text = ""
+
+    # Pluck the fields most useful to an analyst.
+    def _pull(rx, default=""):
+        m = _re.search(rx, x509_text, _re.MULTILINE)
+        return m.group(1).strip() if m else default
+
+    subject = _pull(r"^\s*Subject:\s*(.+)$")
+    issuer = _pull(r"^\s*Issuer:\s*(.+)$")
+    not_before = _pull(r"^\s*Not Before\s*:\s*(.+)$")
+    not_after = _pull(r"^\s*Not After\s*:\s*(.+)$")
+    sig_algo = _pull(r"^\s*Signature Algorithm:\s*(.+)$")
+    pub_key = _pull(r"^\s*Public Key Algorithm:\s*(.+)$")
+    serial = _pull(r"^\s*Serial Number:\s*(.+)$")
+    # SAN spans multiple lines after "Subject Alternative Name:"; grab
+    # the next non-blank line of DNS entries.
+    san = ""
+    san_m = _re.search(
+        r"X509v3 Subject Alternative Name:\s*(?:critical)?\s*\n\s*(.+?)\n",
+        x509_text)
+    if san_m:
+        san = san_m.group(1).strip()
+
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+    return JSONResponse({
+        "ok": True,
+        "kind": "tls_info",
+        "host": host,
+        "port": port,
+        "command": (" ".join(s_cmd) +
+                    " </dev/null | openssl x509 -text -noout"),
+        "elapsed_ms": elapsed_ms,
+        "exit_code": s_proc.returncode,
+        "protocol": proto_m.group(1) if proto_m else "",
+        "cipher": cipher_m.group(1) if cipher_m else "",
+        "verification": sni_m.group(1).strip() if sni_m else "",
+        "chain_count": chain_count,
+        "cert": {
+            "subject": subject,
+            "issuer": issuer,
+            "not_before": not_before,
+            "not_after": not_after,
+            "san": san,
+            "signature_algorithm": sig_algo,
+            "public_key_algorithm": pub_key,
+            "serial": serial,
+        },
+        "x509_text_excerpt": (x509_text or "")[:8000],
+        "stderr_excerpt": (s_stderr or "")[:1500],
+    })
+
+
 @app.post("/finding/{fid}/test")
 def finding_test(request: Request, fid: int):
     """Run the finding's reproduction request once, server-side, with a
@@ -2422,6 +2572,12 @@ def finding_test(request: Request, fid: int):
     # check id and surface the JSON row(s) that match.
     if kind == "tls":
         return _finding_test_tls(f, parsed)
+
+    # Cert-info test: surface the live certificate + handshake details
+    # for findings whose wording is about TLS / cert posture but whose
+    # source tool isn't testssl (e.g. Nikto's "wildcard certificate").
+    if kind == "tls_info":
+        return _finding_test_tls_info(parsed)
 
     # One-shot HTTPS fetch via stdlib. The probe SafeClient lives under
     # /app/toolkit/lib and is loaded as a subprocess elsewhere — using

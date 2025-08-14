@@ -522,7 +522,8 @@
       return '<p class="warn"><strong>Cannot test:</strong> ' +
              escapeHTML(d.message || d.error || "unknown error") + '</p>';
     }
-    if (d.kind === "tls") return renderTlsTestBody(d);
+    if (d.kind === "tls")      return renderTlsTestBody(d);
+    if (d.kind === "tls_info") return renderTlsInfoBody(d);
     const s = Number(d.status || 0);
     let statusColor = "var(--muted, #888)";
     if (s >= 200 && s < 300)      statusColor = "var(--sev-low, #2ecc71)";
@@ -589,6 +590,69 @@
     if (n < 1024) return n + " B";
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
     return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  // Cert-info renderer. Shown when the Test button fires against a
+  // cert/SSL-flavoured finding (Nikto wildcard cert notice etc.).
+  // Surfaces the structured fields openssl x509 -text returns plus
+  // the handshake's negotiated protocol + cipher.
+  function renderTlsInfoBody(d) {
+    let html = '';
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; ';
+    html +=         'border-radius:4px; background:var(--accent, #5d8aa8); ';
+    html +=         'color:#fff; font-weight:600">TLS handshake</span>';
+    html +=   ' <span class="muted small">' +
+                escapeHTML(String(d.elapsed_ms)) + ' ms · target ' +
+                '<code>' + escapeHTML(d.host) + ':' +
+                escapeHTML(String(d.port)) + '</code></span>';
+    html += '</p>';
+    html += '<table style="width:100%; border-collapse:collapse; ';
+    html +=        'font-size:.9em; margin:.4em 0 .6em">';
+    html += '<tbody>';
+    const rows = [
+      ["Protocol",            d.protocol],
+      ["Cipher",              d.cipher],
+      ["Verification",        d.verification],
+      ["Subject",             d.cert && d.cert.subject],
+      ["Issuer",              d.cert && d.cert.issuer],
+      ["Subject Alt. Name",   d.cert && d.cert.san],
+      ["Not Before",          d.cert && d.cert.not_before],
+      ["Not After",           d.cert && d.cert.not_after],
+      ["Public Key",          d.cert && d.cert.public_key_algorithm],
+      ["Signature Algorithm", d.cert && d.cert.signature_algorithm],
+      ["Serial",              d.cert && d.cert.serial],
+      ["Cert chain length",   d.chain_count],
+    ];
+    for (const [label, value] of rows) {
+      if (!value && value !== 0) continue;
+      html += '<tr style="border-top:1px solid var(--border, #333)">';
+      html += '<td style="padding:.25em .55em; vertical-align:top; ';
+      html +=    'width:14em; color:var(--muted, #888)">' +
+                  escapeHTML(label) + '</td>';
+      html += '<td style="padding:.25em .55em; word-break:break-all">' +
+                '<code>' + escapeHTML(String(value)) + '</code></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+    html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; ';
+    html +=        'overflow:auto; white-space:pre-wrap; word-break:break-all">' +
+                   escapeHTML(d.command || "") + '</pre>';
+    if (d.x509_text_excerpt) {
+      html += '<details style="margin-top:.8em"><summary class="muted" ' +
+              'style="cursor:pointer">Raw <code>openssl x509 -text</code> output</summary>';
+      html += '<pre class="log" style="margin:.4em 0; padding:.6em; ' +
+              'max-height:25em; overflow:auto; white-space:pre-wrap; ' +
+              'word-break:break-word">' + escapeHTML(d.x509_text_excerpt) +
+              '</pre>';
+      html += '</details>';
+    }
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'TLS handshake only — no application-layer request was sent. ' +
+            'TLS verification is disabled to handle self-signed test certs ' +
+            'the same way the original DAST tools do.</p>';
+    return html;
   }
 
   // TLS test renderer. Driven by the JSON the /test endpoint returns
