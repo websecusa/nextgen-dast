@@ -3395,6 +3395,19 @@ def _run_finding_probe(finding: dict, probe: dict,
         config["allow_destructive"] = True
     if cookie:
         config["cookie"] = cookie  # picked up by SafeClient via Probe._build_client
+    # Pass the assessment's username (NOT password) into the config so
+    # identity-aware probes (e.g. admin_exposure) can detect when the
+    # username is reflected in a response body. The probes hash it
+    # before storing in evidence so the credential never lands in the
+    # persisted verdict in the clear. Probes that don't know about
+    # `auth_username` ignore it via the unknown-key path in
+    # Probe._config_from_stdin.
+    aid = finding.get("assessment_id")
+    if aid:
+        a = db.query_one(
+            "SELECT creds_username FROM assessments WHERE id = %s", (aid,))
+        if a and (a.get("creds_username") or "").strip():
+            config["auth_username"] = a["creds_username"].strip()
     if extra:
         config.update(extra)
     # Per-probe timeout = its typical budget × 2 seconds (worst case),

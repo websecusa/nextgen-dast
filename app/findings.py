@@ -612,10 +612,36 @@ _FFUF_SENSITIVE = [
 ]
 
 
-def _ffuf_classify(url: str) -> tuple[str, str, str, str]:
+# When ffuf returns 401 or 403 on a sensitive path the path *exists* but
+# is access-controlled — that's much less severe than a 200 OK on the same
+# path, and titling it "...exposed" / HIGH overstates the finding. We keep
+# the discovery as an informational signal (so the analyst still knows the
+# attack surface is there) but rewrite title + severity to match reality.
+# The new title for each category lives next to the original so the
+# downgrade is easy to read and audit.
+_FFUF_GATED_TITLE = {
+    "Sensitive dotfile/source-control directory exposed":
+        "Sensitive dotfile/source-control path discovered (access-protected)",
+    "Backup or archive file exposed":
+        "Backup or archive file path discovered (access-protected)",
+    "Administrative interface exposed":
+        "Administrative path discovered (access-protected)",
+    "Configuration or metadata file exposed":
+        "Configuration or metadata path discovered (access-protected)",
+}
+
+
+def _ffuf_classify(url: str, status: int | None = None) -> tuple[str, str, str, str]:
     """Classify a discovered path. Returns (severity, title, owasp, cwe).
+
     Falls back to a generic info-level finding for paths that don't match
-    any sensitive-pattern category."""
+    any sensitive-pattern category.
+
+    When `status` is 401 or 403, the path is access-controlled rather than
+    exposed — we keep the OWASP/CWE classification (it's still useful
+    surface-area context) but downgrade the severity to LOW and rewrite
+    the title so it doesn't claim the resource is "exposed" when the
+    server actually returned a deny."""
     # Match against the URL's path component. Strip query/fragment so a
     # benign /search?q=admin doesn't trip the admin classifier.
     try:
@@ -624,6 +650,12 @@ def _ffuf_classify(url: str) -> tuple[str, str, str, str]:
         path = url
     for pattern, sev, title, owasp, cwe in _FFUF_SENSITIVE:
         if pattern.search(path):
+            if status in (401, 403):
+                # Path exists but is gated — downgrade to LOW and use the
+                # discovery-flavored title for this category.
+                return ("low",
+                        _FFUF_GATED_TITLE.get(title, title),
+                        owasp, cwe)
             return sev, title, owasp, cwe
     return ("info",
             "Discovered path (content discovery)",
@@ -645,18 +677,17 @@ def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
         if not url:
             continue
         status = it.get("status")
-        sev, title, owasp, cwe = _ffuf_classify(url)
-        # 401/403 are interesting (something IS there, gated) — keep them
-        # but never let an info-level path with a 401/403 status escape
-        # without that signal in the description.
-        gating = ""
-        if status in (401, 403):
-            gating = f" (HTTP {status} — protected, but exists)"
+        sev, title, owasp, cwe = _ffuf_classify(url, status)
+        # Always surface the response status in the description so the
+        # analyst sees at a glance what ffuf actually got. For gated
+        # responses we already downgraded severity + retitled in
+        # _ffuf_classify, so the description here is purely informational.
+        status_note = f" (HTTP {status})" if status else ""
         yield {
             "source_tool": "ffuf",
             "severity": sev,
             "title": title,
-            "description": f"{url}{gating}",
+            "description": f"{url}{status_note}",
             "owasp_category": owasp,
             "cwe": cwe,
             "evidence_url": url,
