@@ -1,12 +1,10 @@
 {
   "author": "Tim Rice <tim.j.rice@hackrange.com>",
   "name": "breach_compression",
-  "version": "1.0",
+  "version": "1.1",
   "summary": "Validates a Nikto-style BREACH finding by checking the four preconditions (TLS + HTTP compression + reflected input + secret-shaped value in the same response).",
   "validates": [
-    "A02:2021-Cryptographic_Failures",
-    "CWE-310",
-    "CWE-326"
+    "CWE-310"
   ],
   "matches_titles": [
     "breach",
@@ -16,8 +14,7 @@
   ],
   "matches_tools": [
     "nikto",
-    "nuclei",
-    "testssl"
+    "nuclei"
   ],
   "safety_class": "probe",
   "request_budget_typical": 2,

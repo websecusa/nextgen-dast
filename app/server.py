@@ -2242,11 +2242,305 @@ def _pick_testssl_flag(testssl_id: str) -> tuple[str, str]:
     return ("-s", "standard cipher categories")
 
 
-def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
-    """Re-run testssl.sh narrowly against the finding's host:port and
-    return the row(s) matching the original check id.
+def _finding_test_cert_fast(host: str, port: int,
+                            testssl_id: str,
+                            finding: dict) -> JSONResponse:
+    """Fast verification for cert-shape testssl findings via a direct
+    TLS handshake. Sub-second for the common case.
 
-    Run is bounded by:
+    Returns the same JSON envelope as _finding_test_tls so the modal
+    can render it identically — the `command` field documents that
+    this run used the in-process handshake instead of testssl.sh, and
+    `matched_rows` is synthesized from the parsed cert so the existing
+    table renderer keeps working.
+
+    Verdicts:
+      reproduced     — the original finding's claim still holds against
+                       the live cert.
+      not_reproduced — the live cert no longer has the flagged property
+                       (e.g. cert was rotated, no longer wildcard).
+      inconclusive   — the handshake failed or the testssl_id maps to a
+                       check this fast path doesn't fully cover.
+    """
+    # Late import — keeps the toolkit/lib path off sys.path until we
+    # actually need it, and keeps the import error local if /app/toolkit
+    # isn't where we expect.
+    import sys as _sys
+    if "/app/toolkit" not in _sys.path:
+        _sys.path.insert(0, "/app/toolkit")
+    from lib.tls import fetch_cert
+
+    info = fetch_cert(host, port)
+    if not info.ok:
+        # Connection couldn't even be made — not the same as testssl
+        # timing out, but functionally inconclusive for the analyst.
+        return JSONResponse({
+            "ok": True,
+            "kind": "tls",
+            "host": host,
+            "port": port,
+            "command": f"in-process TLS handshake to {host}:{port} (fast path)",
+            "elapsed_ms": info.elapsed_ms,
+            "exit_code": -1,
+            "flag": "fast-path",
+            "flag_label": f"direct TLS handshake (cert-shape fast path: {testssl_id})",
+            "testssl_id": testssl_id,
+            "verdict": "inconclusive",
+            "matched_rows": [{
+                "id": testssl_id,
+                "severity": "INFO",
+                "finding": (f"TLS handshake failed: {info.error}. "
+                            "Run the full testssl.sh suite from the "
+                            "Challenge form if you need a deeper check."),
+            }],
+            "stdout_excerpt": "",
+            "stderr_excerpt": info.error or "",
+        })
+
+    # Per-id verdict logic. Each branch sets `verdict` and `finding_text`
+    # to mirror the row testssl would have produced.
+    verdict = "inconclusive"
+    finding_text = ""
+    severity_out = "INFO"
+
+    if testssl_id == "cert_trust_wildcard":
+        if info.has_wildcard_san:
+            verdict = "reproduced"
+            severity_out = "LOW"
+            finding_text = (f"Trust is via wildcard cert. SAN "
+                            f"{info.wildcard_sans!r} covers all "
+                            "subdomains under that pattern.")
+        else:
+            verdict = "not_reproduced"
+            finding_text = ("Cert no longer has a wildcard SAN. "
+                            f"Current SANs: {info.sans!r}")
+
+    elif testssl_id in ("cert_subjectAltName", "cert_commonName_wo_SAN"):
+        # SAN missing entirely (rare but real on legacy / self-signed)
+        if not info.sans:
+            verdict = "reproduced"
+            severity_out = "MEDIUM"
+            finding_text = ("Subject Alternative Name extension is "
+                            "absent from the leaf cert. Modern browsers "
+                            "(and CA/B Forum requirements) reject CN-only "
+                            "certs.")
+        else:
+            verdict = "not_reproduced"
+            finding_text = (f"SAN extension is present with "
+                            f"{len(info.sans)} DNS entries: {info.sans!r}")
+
+    elif testssl_id == "cert_commonName":
+        finding_text = (f"Subject CN: {info.common_name!r}. "
+                        f"SAN dnsNames: {info.sans!r}.")
+        # The original finding is essentially informational — surface
+        # the data and call it not_reproduced if SAN matches the host.
+        if info.sans and any(_san_matches_host(s, host) for s in info.sans):
+            verdict = "not_reproduced"
+        else:
+            verdict = "inconclusive"
+
+    elif testssl_id in ("cert_notAfter", "cert_validityPeriod",
+                        "cert_expirationStatus", "cert_extlifeSpan"):
+        d = info.days_until_expiry
+        finding_text = (f"Cert valid through {info.not_after} "
+                        f"({d} days from now).")
+        if d is None:
+            verdict = "inconclusive"
+        elif d < 0:
+            verdict = "reproduced"
+            severity_out = "HIGH"
+            finding_text = (f"Cert EXPIRED on {info.not_after} "
+                            f"({-d} days ago).")
+        elif d < 30:
+            verdict = "reproduced"
+            severity_out = "MEDIUM"
+            finding_text = (f"Cert expires in {d} days "
+                            f"(after {info.not_after}).")
+        else:
+            verdict = "not_reproduced"
+
+    elif testssl_id == "cert_notBefore":
+        from datetime import datetime, timezone
+        try:
+            nb = datetime.fromisoformat(info.not_before)
+            now = datetime.now(timezone.utc)
+            if nb > now:
+                verdict = "reproduced"
+                severity_out = "HIGH"
+                finding_text = (f"Cert is not yet valid. notBefore = "
+                                f"{info.not_before}, current time = "
+                                f"{now.isoformat()}.")
+            else:
+                verdict = "not_reproduced"
+                finding_text = (f"Cert is currently within its validity "
+                                f"window (notBefore = {info.not_before}).")
+        except Exception:
+            verdict = "inconclusive"
+            finding_text = (f"notBefore = {info.not_before}.")
+
+    elif testssl_id == "cert_signatureAlgorithm":
+        algo = (info.signature_algorithm or "").lower()
+        finding_text = f"Signature algorithm: {info.signature_algorithm}"
+        if any(weak in algo for weak in ("md5", "sha1", "sha-1")):
+            verdict = "reproduced"
+            severity_out = "HIGH"
+            finding_text = (f"Weak signature algorithm: "
+                            f"{info.signature_algorithm}. CA/B Forum "
+                            "deprecated SHA-1 in 2017; MD5 is broken.")
+        elif algo:
+            verdict = "not_reproduced"
+        else:
+            verdict = "inconclusive"
+
+    elif testssl_id == "cert_keySize":
+        size = info.public_key_size
+        algo = info.public_key_algorithm
+        finding_text = (f"Public key: {algo} {size} bits"
+                        if size else f"Public key: {algo}")
+        if size is None:
+            # Ed25519 / Ed448 don't have a meaningful "size" — they're
+            # always considered strong. Mark not_reproduced.
+            verdict = "not_reproduced"
+        elif algo.startswith("RSA") and size < 2048:
+            verdict = "reproduced"
+            severity_out = "HIGH"
+            finding_text = (f"RSA key is {size} bits — below the "
+                            "2048-bit minimum required by current "
+                            "CA/B Forum baseline requirements.")
+        elif algo.startswith("DSA") and size < 2048:
+            verdict = "reproduced"
+            severity_out = "HIGH"
+            finding_text = f"DSA {size}-bit key is too weak."
+        elif algo.startswith("EC") and size < 256:
+            verdict = "reproduced"
+            severity_out = "MEDIUM"
+            finding_text = f"EC {size}-bit curve is too weak."
+        else:
+            verdict = "not_reproduced"
+
+    elif testssl_id == "cert_chain_of_trust":
+        # We only fetch the leaf here — chain-of-trust verification
+        # needs the full chain plus a trust store. Surface what we
+        # know but call it inconclusive so the analyst knows the fast
+        # path didn't dig in.
+        if info.is_self_signed:
+            verdict = "reproduced"
+            severity_out = "HIGH"
+            finding_text = ("Leaf cert is self-signed (subject == issuer). "
+                            "No CA chain to verify.")
+        else:
+            verdict = "inconclusive"
+            finding_text = ("Leaf cert is CA-issued; full chain "
+                            "verification needs the testssl.sh -S run "
+                            "via the Challenge form for an authoritative "
+                            "answer.")
+
+    else:
+        # Defensive — _CERT_FAST_TESTSSL_IDS gate above prevents this in
+        # practice, but if a new id slips through, surface a benign row.
+        verdict = "inconclusive"
+        finding_text = (f"Cert-shape fast path has no specific check for "
+                        f"{testssl_id!r}. Cert summary: CN={info.common_name!r}, "
+                        f"SANs={info.sans!r}.")
+
+    # Synthesize the row shape testssl.sh would have produced so the
+    # modal's existing rendering ('matched_rows' table) keeps working
+    # without a special-case branch on the frontend.
+    matched_row = {
+        "id": testssl_id,
+        "severity": severity_out,
+        "finding": finding_text,
+        "ip": f"{host}/{host}",
+        "port": str(port),
+    }
+
+    return JSONResponse({
+        "ok": True,
+        "kind": "tls",
+        "host": host,
+        "port": port,
+        "command": (f"in-process TLS handshake to {host}:{port} "
+                    f"(cert-shape fast path: {testssl_id})"),
+        "elapsed_ms": info.elapsed_ms,
+        "exit_code": 0,
+        "flag": "fast-path",
+        "flag_label": "direct TLS handshake — leaf cert inspection",
+        "testssl_id": testssl_id,
+        "verdict": verdict,
+        "matched_rows": [matched_row],
+        "stdout_excerpt": json.dumps({
+            "protocol": info.protocol,
+            "cipher": info.cipher,
+            "subject": info.subject,
+            "issuer": info.issuer,
+            "common_name": info.common_name,
+            "sans": info.sans,
+            "san_ips": info.san_ips,
+            "not_before": info.not_before,
+            "not_after": info.not_after,
+            "days_until_expiry": info.days_until_expiry,
+            "signature_algorithm": info.signature_algorithm,
+            "public_key_algorithm": info.public_key_algorithm,
+            "public_key_size": info.public_key_size,
+            "is_self_signed": info.is_self_signed,
+        }, indent=2)[:8000],
+        "stderr_excerpt": "",
+    })
+
+
+def _san_matches_host(san: str, host: str) -> bool:
+    """RFC 6125-ish wildcard match: '*.example.com' matches
+    'foo.example.com' but not 'example.com' or 'a.b.example.com'."""
+    san = (san or "").lower()
+    host = (host or "").lower()
+    if not san or not host:
+        return False
+    if san == host:
+        return True
+    if san.startswith("*."):
+        suffix = san[1:]      # '.example.com'
+        # Wildcard binds exactly one label.
+        if host.endswith(suffix):
+            head = host[:-len(suffix)]
+            return bool(head) and "." not in head
+    return False
+
+
+# Cert-shape testssl IDs that can be answered from a single TLS handshake
+# + leaf-cert parse. Routing through testssl.sh for these would take ~30s
+# for a question that's actually <200 ms when we just open a TLS socket
+# and read the cert directly. The fast path in _finding_test_cert_fast
+# returns the same JSON contract _finding_test_tls would have produced
+# (kind=tls, verdict, matched_rows, host, port, command, elapsed_ms) so
+# the modal doesn't need to know which branch ran.
+_CERT_FAST_TESTSSL_IDS = {
+    # SAN / hostname-shape findings
+    "cert_trust_wildcard",
+    "cert_subjectAltName",
+    "cert_commonName",
+    "cert_commonName_wo_SAN",
+    # Validity-window findings
+    "cert_extlifeSpan",
+    "cert_notAfter",
+    "cert_notBefore",
+    "cert_validityPeriod",
+    "cert_expirationStatus",
+    # Algorithm / key-strength findings
+    "cert_signatureAlgorithm",
+    "cert_keySize",
+    # Self-signed / chain-shape findings answerable from the leaf alone
+    "cert_chain_of_trust",
+}
+
+
+def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
+    """Verify a testssl-source finding by re-checking the live TLS
+    posture. For cert-shape check IDs (see _CERT_FAST_TESTSSL_IDS) we
+    short-circuit to a direct TLS handshake — sub-second instead of the
+    ~30s a narrow testssl.sh -S run takes. Anything outside that set
+    falls through to the existing testssl.sh path below.
+
+    The testssl.sh path is bounded by:
       * subprocess timeout (90s — narrow flags finish in <30s typical),
       * single testssl invocation per click (rate-limited by caller),
       * jsonfile-pretty output captured to a tmp path under /tmp,
@@ -2258,10 +2552,15 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
 
     raw = finding.get("raw") or {}
     testssl_id = raw.get("id") or finding.get("title") or ""
-    flag, flag_label = _pick_testssl_flag(testssl_id)
 
     host = (parsed.hostname or "").lower()
     port = parsed.port or 443
+
+    # Fast path: cert-shape IDs answered from the leaf cert.
+    if testssl_id in _CERT_FAST_TESTSSL_IDS:
+        return _finding_test_cert_fast(host, port, testssl_id, finding)
+
+    flag, flag_label = _pick_testssl_flag(testssl_id)
     target = f"{host}:{port}"
 
     fd, json_path = _tempfile.mkstemp(prefix="ngd_test_tls_", suffix=".json")

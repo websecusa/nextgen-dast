@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "cert_wildcard",
+  "version": "1.0",
+  "summary": "Validates a wildcard-cert finding (testssl 'cert_trust_wildcard' or equivalent) by inspecting the live leaf certificate's Subject Alternative Name. Single TLS handshake, sub-second.",
+  "validates": [
+    "CWE-295"
+  ],
+  "matches_titles": [
+    "cert_trust_wildcard",
+    "trust is via wildcard",
+    "wildcard certificate",
+    "wildcard cert"
+  ],
+  "matches_tools": [
+    "testssl",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target URL (https://host[:port]) or bare hostname (required). The probe opens a single TLS connection to host:port and inspects the leaf cert's SAN extension."
+  }
+}
