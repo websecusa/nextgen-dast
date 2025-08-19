@@ -1,0 +1,30 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "login_page_check",
+  "version": "1.0",
+  "summary": "Validates a 'login page found' finding (Nikto's 'admin login page/section found' and equivalents) by fetching the URL once and counting login-form signals: password input, user/email input, login-shaped form action, login keyword in title, submit button text. 2-of-5 ⇒ validated.",
+  "validates": [],
+  "matches_titles": [
+    "admin login page/section found",
+    "admin login page",
+    "admin login section",
+    "login page found",
+    "login form found",
+    "login page/section",
+    "sign in page",
+    "sign-in page",
+    "authentication page found"
+  ],
+  "matches_tools": [
+    "nikto",
+    "nuclei",
+    "wapiti"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target URL to inspect (required). The probe issues a single anonymous GET and parses the response body for login-form signals.",
+    "--cookie": "Optional cookie to send. Login-page detection works equally well anonymously, and authenticated requests often redirect away from the login URL — anon is the right default."
+  }
+}
