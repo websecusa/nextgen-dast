@@ -133,8 +133,22 @@ NIKTO_LINE = re.compile(r"^\+\s*(?:\[(\d+)\]\s*)?(.+)$")
 # against the scan target. Without this, every Nikto finding inherited
 # the bare-host fallback and the reproduction curl tested the wrong URL.
 NIKTO_PATH_PREFIX = re.compile(r"^(\/\S*?):\s+(.+)$")
+# Lines Nikto echoes as part of its scan-config header (before the actual
+# scan starts) or as bookkeeping at the end. None of these are findings —
+# they're Nikto reporting how IT was configured, not anything about the
+# target. Each entry is a startswith() prefix; matched lines are dropped.
+#
+# The "Proxy:" / "SSL Info:" / "Cookie(s):" lines specifically were
+# leaking through pre-fix — when the orchestrator runs Nikto via mitmproxy
+# they show "Proxy: 127.0.0.1:<port>" which an analyst could easily
+# misread as an internal-IP disclosure on the target. They're scan
+# bookkeeping; suppress them at ingest.
 NIKTO_NOISE = (
+    # Connection / target metadata Nikto echoes before scanning starts
     "Server:", "Target IP", "Target Hostname", "Target Port",
+    "Proxy:", "SSL Info:", "Cookie:", "Cookies:",
+    "Allowed HTTP Methods", "Cipher:", "Site Link",
+    # Run-state lines Nikto emits at the bottom of the report
     "Start Time", "End Time", "Scan terminated", "0 errors and",
     "host(s) tested", "Platform:",
 )

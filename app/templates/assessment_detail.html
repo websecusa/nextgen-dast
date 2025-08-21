@@ -524,6 +524,7 @@
     }
     if (d.kind === "tls")      return renderTlsTestBody(d);
     if (d.kind === "tls_info") return renderTlsInfoBody(d);
+    if (d.kind === "nuclei")   return renderNucleiTestBody(d);
     const s = Number(d.status || 0);
     let statusColor = "var(--muted, #888)";
     if (s >= 200 && s < 300)      statusColor = "var(--sev-low, #2ecc71)";
@@ -732,6 +733,91 @@
     html += '<p class="muted small" style="margin-top:.6em">' +
             'No payloads or destructive ciphers were sent — testssl.sh runs in ' +
             'read-only mode against the configured target.</p>';
+    return html;
+  }
+
+  // Nuclei test result renderer — same layout as renderTlsTestBody but
+  // with nuclei-shaped columns (template id, matcher name, matched-at,
+  // and any extracted-results values).
+  function renderNucleiTestBody(d) {
+    let badge, badgeColor;
+    if (d.verdict === "reproduced")          { badge = "✓ Reproduced";      badgeColor = "var(--sev-high, #c0392b)"; }
+    else if (d.verdict === "not_reproduced") { badge = "✗ Not reproduced";  badgeColor = "var(--sev-low, #2ecc71)"; }
+    else                                      { badge = "— Inconclusive";   badgeColor = "var(--muted, #888)"; }
+    let html = "";
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:' +
+              badgeColor + '; color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+    html +=   ' <span class="muted small">nuclei <code>-id ' +
+              escapeHTML(d.template_id || "") + '</code> · ' +
+              escapeHTML(String(d.elapsed_ms)) + ' ms · target <code>' +
+              escapeHTML(d.host) + ':' + escapeHTML(String(d.port)) + '</code></span>';
+    html += '</p>';
+    html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+    html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; ' +
+            'overflow:auto; white-space:pre-wrap; word-break:break-all">' +
+            escapeHTML(d.command || "") + '</pre>';
+    if (d.matched_rows && d.matched_rows.length) {
+      html += '<h4 style="margin:.8em 0 .3em">nuclei matched events</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:.88em">';
+      html += '<thead><tr style="text-align:left">' +
+              '<th style="padding:.25em .5em">Template</th>' +
+              '<th style="padding:.25em .5em">Severity</th>' +
+              '<th style="padding:.25em .5em">Matcher</th>' +
+              '<th style="padding:.25em .5em">Finding</th>' +
+              '<th style="padding:.25em .5em">Matched at</th>' +
+              '</tr></thead><tbody>';
+      for (const r of d.matched_rows) {
+        const sev = (r.severity || "").toUpperCase();
+        let sevColor = "var(--muted, #888)";
+        if (sev === "CRITICAL")     sevColor = "#c0392b";
+        else if (sev === "HIGH")    sevColor = "#e67e22";
+        else if (sev === "MEDIUM")  sevColor = "#f1c40f";
+        else if (sev === "LOW")     sevColor = "#3498db";
+        else if (sev === "INFO")    sevColor = "#2ecc71";
+        const isMatch = (r.matcher_name || "") &&
+                        (r.matcher_name || "") === (d.matcher_name || "");
+        html += '<tr style="border-top:1px solid var(--border, #333); ' +
+                  (isMatch ? 'background:rgba(255,245,157,0.08)' : '') + '">';
+        html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.id || "") + '</code></td>';
+        html += '<td style="padding:.3em .5em"><span style="color:' + sevColor +
+                '; font-weight:600">' + escapeHTML(r.severity || "") + '</span></td>';
+        html += '<td style="padding:.3em .5em"><code>' +
+                escapeHTML(r.matcher_name || "") + '</code></td>';
+        html += '<td style="padding:.3em .5em">' + escapeHTML(r.finding || "") + '</td>';
+        html += '<td style="padding:.3em .5em; word-break:break-all"><code>' +
+                escapeHTML(r.matched_at || "") + '</code></td>';
+        html += '</tr>';
+        if (r.extracted_results && r.extracted_results.length) {
+          html += '<tr><td colspan="5" style="padding:.1em .5em .35em 1.5em" ' +
+                  'class="muted small">extracted: <code>' +
+                  escapeHTML(r.extracted_results.join(", ")) + '</code></td></tr>';
+        }
+      }
+      html += '</tbody></table>';
+      if (d.matcher_name) {
+        html += '<p class="muted small" style="margin-top:.4em">' +
+                'Highlighted row is the original matcher (<code>' +
+                escapeHTML(d.matcher_name) + '</code>) from this finding.</p>';
+      }
+    } else {
+      html += '<p class="warn" style="margin-top:.6em">' +
+              'nuclei produced no matched events for template <code>' +
+              escapeHTML(d.template_id || "") +
+              '</code>. Exit code: <code>' +
+              escapeHTML(String(d.exit_code)) +
+              '</code> — the matcher likely no longer fires.</p>';
+    }
+    if (d.stderr_excerpt && d.stderr_excerpt.trim()) {
+      html += '<details style="margin-top:.8em"><summary class="muted" ' +
+              'style="cursor:pointer">nuclei stderr</summary>';
+      html += '<pre class="log" style="margin:.4em 0; padding:.6em; ' +
+              'max-height:18em; overflow:auto; white-space:pre-wrap; ' +
+              'word-break:break-word">' + escapeHTML(d.stderr_excerpt) + '</pre>';
+      html += '</details>';
+    }
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'Single-template, single-target nuclei run — no broader scan was triggered.</p>';
     return html;
   }
 

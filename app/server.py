@@ -2110,6 +2110,19 @@ def _finding_testable(finding: dict,
         # against the host:port directly.
         return (True, "", "tls")
 
+    if tool == "nuclei":
+        # Nuclei findings are template-matcher events. A bare HTTP GET
+        # wouldn't run the matcher logic, so a generic Test would just
+        # echo the response without saying whether the original
+        # template would still fire. Re-run nuclei narrowly with the
+        # specific template id so the analyst sees whether the
+        # matcher reproduces. Requires a usable template-id in the
+        # raw_data; if missing we fall through to the http path so
+        # there's still SOMETHING to click.
+        raw = finding.get("raw") or {}
+        if (raw.get("template-id") or "").strip():
+            return (True, "", "nuclei")
+
     # Findings from non-testssl tools that are STILL clearly about
     # certificate / SSL / TLS posture (e.g. Nikto's "wildcard
     # certificate" notice). An HTTP GET would not surface the cert
@@ -2686,6 +2699,185 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     })
 
 
+# Nuclei template-id format guard. nuclei template ids are conventionally
+# kebab-case lowercase ASCII (tech-detect, CVE-2021-1234, sql-injection,
+# etc.) — anything else risks shell metacharacter shenanigans. We refuse
+# anything outside this character set rather than escaping it, since a
+# valid id will never need escaping in the first place.
+_NUCLEI_TEMPLATE_ID_RE = re.compile(r"^[a-zA-Z0-9._\-]{1,128}$")
+
+
+def _finding_test_nuclei(finding: dict, url: str) -> JSONResponse:
+    """Re-run nuclei narrowly with the finding's template-id against
+    the finding's URL and return the matched events.
+
+    Run is bounded by:
+      * subprocess timeout (60s — single-template runs finish in <15s
+        typical),
+      * one nuclei invocation per click (rate-limited by caller),
+      * jsonl output captured to a tmp path under /tmp, cleaned up
+        regardless of exit code.
+
+    Same JSON envelope as _finding_test_tls so the modal can render
+    both kinds of test results identically: kind, host, port, command,
+    elapsed_ms, exit_code, verdict ('reproduced' / 'not_reproduced' /
+    'inconclusive'), matched_rows, stdout/stderr excerpts.
+
+    The verdict is decided on whether nuclei emitted any matched event
+    for the template — if the matcher fired again, the original finding
+    reproduces; if nuclei ran cleanly but emitted nothing, the matcher
+    no longer fires (likely the underlying tech / config has changed).
+    """
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    import os as _os
+
+    raw = finding.get("raw") or {}
+    template_id = (raw.get("template-id") or "").strip()
+    matcher_name = (raw.get("matcher-name") or "").strip()
+
+    if not _NUCLEI_TEMPLATE_ID_RE.match(template_id):
+        return JSONResponse({
+            "ok": False, "error": "bad_template_id",
+            "message": (f"Template id {template_id!r} does not match the "
+                        "expected nuclei id format and was rejected as "
+                        "an extra precaution."),
+        }, status_code=400)
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    fd, jsonl_path = _tempfile.mkstemp(prefix="ngd_test_nuclei_", suffix=".jsonl")
+    _os.close(fd)
+    # -id <template-id>     run only the matching template(s)
+    # -u <url>              single target, no scope expansion
+    # -jsonl-export <path>  write structured events for parsing
+    # -silent               no banner / progress noise on stdout
+    # -no-color             plain text, no ANSI in stderr / logs
+    # -disable-update-check skip the network round-trip to GitHub
+    # -timeout 10           per-request timeout
+    # -rl 20 -c 5           rate-limit + concurrency low — single-target
+    cmd = ["nuclei",
+           "-u", url,
+           "-id", template_id,
+           "-jsonl-export", jsonl_path,
+           "-silent", "-no-color",
+           "-disable-update-check",
+           "-timeout", "10",
+           "-rl", "20", "-c", "5"]
+
+    t_start = time.monotonic()
+    proc_stdout = ""
+    proc_stderr = ""
+    proc_rc = -1
+    try:
+        proc = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=60.0, check=False,
+        )
+        proc_stdout = proc.stdout or ""
+        proc_stderr = proc.stderr or ""
+        proc_rc = proc.returncode
+    except _subprocess.TimeoutExpired:
+        return JSONResponse({
+            "ok": False, "error": "nuclei_timeout",
+            "message": ("nuclei timed out after 60s. Try the manual "
+                        "Challenge form on the full detail page if you "
+                        "need a deeper run."),
+        }, status_code=504)
+    except FileNotFoundError:
+        return JSONResponse({
+            "ok": False, "error": "nuclei_missing",
+            "message": "nuclei binary is not available in this container.",
+        }, status_code=500)
+    except Exception as e:
+        return JSONResponse({
+            "ok": False, "error": "nuclei_runtime",
+            "message": f"{type(e).__name__}: {e}",
+        }, status_code=502)
+    finally:
+        try:
+            with open(jsonl_path, "r", encoding="utf-8", errors="replace") as fh:
+                report_text = fh.read()
+        except OSError:
+            report_text = ""
+        try:
+            _os.unlink(jsonl_path)
+        except OSError:
+            pass
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
+    # Each line of the jsonl export is one matched event. Parse and
+    # synthesize a row that mirrors what _finding_test_tls produces so
+    # the existing modal table can render it without a special case.
+    rows: list[dict] = []
+    for line in (report_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        info = event.get("info") or {}
+        rows.append({
+            "id": event.get("template-id") or "",
+            "severity": (info.get("severity") or "info").upper(),
+            "finding": (info.get("name")
+                        or event.get("matcher-name")
+                        or info.get("description")
+                        or "matcher fired"),
+            # Surface the bits the analyst usually wants in the table:
+            # what the matcher saw, where, and any extracted fields.
+            "matcher_name": event.get("matcher-name") or "",
+            "matched_at": event.get("matched-at") or "",
+            "extracted_results": event.get("extracted-results") or [],
+        })
+
+    # Filter to rows for the original matcher when the finding had
+    # one — nuclei's tech-detect template, for instance, fires once
+    # per detected technology; an analyst clicking Test on the
+    # 'bootstrap' row only wants to see whether 'bootstrap' still
+    # matches, not the whole tech inventory.
+    matched: list[dict] = rows
+    if matcher_name:
+        narrowed = [r for r in rows if r.get("matcher_name") == matcher_name]
+        # Only narrow if we still have something — otherwise show all
+        # results so the analyst sees whatever did fire.
+        if narrowed:
+            matched = narrowed
+
+    # Verdict: any matched event ⇒ reproduced. Empty output but a clean
+    # exit ⇒ not_reproduced. Anything weirder (non-zero exit + empty
+    # output) ⇒ inconclusive.
+    if matched:
+        verdict = "reproduced"
+    elif proc_rc == 0:
+        verdict = "not_reproduced"
+    else:
+        verdict = "inconclusive"
+
+    return JSONResponse({
+        "ok": True,
+        "kind": "nuclei",
+        "host": host,
+        "port": port,
+        "command": " ".join(cmd),
+        "elapsed_ms": elapsed_ms,
+        "exit_code": proc_rc,
+        "template_id": template_id,
+        "matcher_name": matcher_name,
+        "verdict": verdict,
+        "matched_rows": matched[:20],
+        "stdout_excerpt": (proc_stdout or "")[:8000],
+        "stderr_excerpt": (proc_stderr or "")[:2000],
+    })
+
+
 def _finding_test_tls_info(parsed) -> JSONResponse:
     """Surface live certificate + handshake info for a TLS-cert finding.
 
@@ -2871,6 +3063,13 @@ def finding_test(request: Request, fid: int):
     # check id and surface the JSON row(s) that match.
     if kind == "tls":
         return _finding_test_tls(f, parsed)
+
+    # Nuclei test: re-run nuclei narrowly with the original template-id
+    # so the matcher logic actually executes against the live target.
+    # An HTTP GET would just echo the response without telling the
+    # analyst whether the same matcher still fires.
+    if kind == "nuclei":
+        return _finding_test_nuclei(f, url)
 
     # Cert-info test: surface the live certificate + handshake details
     # for findings whose wording is about TLS / cert posture but whose
