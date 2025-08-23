@@ -3013,6 +3013,17 @@ def finding_test(request: Request, fid: int):
     if not a:
         raise HTTPException(404, "owning assessment is gone")
 
+    # Decode raw_data BEFORE _finding_testable so the nuclei branch
+    # there can read raw['template-id']. (The other call site of
+    # _finding_testable, the finding-detail view, already decodes
+    # before calling — that path was fine; only finding_test was
+    # checking the testable flag against an undecoded raw field.)
+    if f.get("raw_data") and not f.get("raw"):
+        try:
+            f["raw"] = json.loads(f["raw_data"])
+        except Exception:
+            f["raw"] = None
+
     testable, reason, kind = _finding_testable(f, a)
     if not testable:
         return JSONResponse(
@@ -3034,13 +3045,6 @@ def finding_test(request: Request, fid: int):
                          f"{_TEST_RATE_LIMIT_WINDOW_S}s. "
                          f"Try again in {int(over) + 1}s.")},
             status_code=429)
-
-    # Decode raw_data once so highlight extraction sees structured fields.
-    if f.get("raw_data") and not f.get("raw"):
-        try:
-            f["raw"] = json.loads(f["raw_data"])
-        except Exception:
-            f["raw"] = None
 
     url = f["evidence_url"]
     method = (f.get("evidence_method") or "GET").upper()

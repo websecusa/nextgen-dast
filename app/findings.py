@@ -107,6 +107,19 @@ def parse_nuclei(scan_dir: Path) -> Iterable[dict]:
                 cwe_id = m.group(0)
         if cwe_id and not owasp:
             owasp = OWASP_BY_CWE.get(cwe_id)
+        # Pull the actual HTTP method out of the captured request line.
+        # Nuclei's `type` field is the protocol family (http / dns / tcp /
+        # ...), NOT the HTTP method — using it as evidence_method made
+        # every nuclei finding land with method="HTTP" and tripped the
+        # GET/HEAD-only gate on the inline Test button. The first token
+        # of the request blob is the real method.
+        method = "GET"
+        request_blob = r.get("request") or ""
+        if request_blob:
+            first = request_blob.split(None, 1)[0].upper() if request_blob.split() else ""
+            if first in ("GET", "HEAD", "POST", "PUT", "DELETE",
+                         "PATCH", "OPTIONS"):
+                method = first
         yield {
             "source_tool": "nuclei",
             "severity": sev,
@@ -116,7 +129,7 @@ def parse_nuclei(scan_dir: Path) -> Iterable[dict]:
             "cwe": cwe_id,
             "cvss": (info.get("classification", {}) or {}).get("cvss-score"),
             "evidence_url": r.get("matched-at") or r.get("host"),
-            "evidence_method": (r.get("type") or "http").upper(),
+            "evidence_method": method,
             "remediation": info.get("remediation") or "",
             "raw_data": r,
         }
