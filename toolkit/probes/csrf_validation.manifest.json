@@ -1,10 +1,9 @@
 {
   "author": "Tim Rice <tim.j.rice@hackrange.com>",
   "name": "csrf_validation",
-  "version": "1.0",
+  "version": "1.1",
   "summary": "Confirms (or refutes) a wapiti CSRF finding via cross-session token swap. Wapiti's stock check produces frequent false positives because it reuses one session; this probe runs the textbook server-side CSRF tests (no token / garbage token / cross-session token) and reports a high-confidence verdict.",
   "validates": [
-    "A01:2021-Broken_Access_Control",
     "CWE-352"
   ],
   "matches_titles": [

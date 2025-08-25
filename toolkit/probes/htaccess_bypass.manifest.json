@@ -1,10 +1,9 @@
 {
   "author": "Tim Rice <tim.j.rice@hackrange.com>",
   "name": "htaccess_bypass",
-  "version": "1.0",
+  "version": "1.1",
   "summary": "High-fidelity check of an alleged access-control bypass: distinguishes real bypass from 404 / unrestricted resource / 403 noise.",
   "validates": [
-    "A01:2021-Broken_Access_Control",
     "CWE-284",
     "CWE-285"
   ],
