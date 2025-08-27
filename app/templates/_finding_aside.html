@@ -90,19 +90,38 @@
 {# All write actions require admin. Forms render but the button is
    disabled for read-only viewers; the global middleware would reject
    the POST anyway -- this just removes the affordance. #}
+{# Untitled UI "search-refraction" — magnifying-glass with a small
+   refraction notch on the inner edge. Inline SVG using currentColor so
+   it inherits the button's text color, same pattern as the other
+   action-btn icons (Archive folder, Export share-02). #}
+{% set search_refraction_svg %}
+<svg class="icon" viewBox="0 0 24 24" fill="none"
+     stroke="currentColor" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true">
+  <path d="m21 21-4.35-4.35m-5.65-10.65c2.7614 0 5 2.23858 5 5m3 0c0 4.4183-3.5817 8-8 8-4.41828 0-8-3.5817-8-8 0-4.41828 3.58172-8 8-8 4.4183 0 8 3.58172 8 8z"/>
+</svg>
+{% endset %}
+{# 'Send to agent' uses the same .action-btn styling as the other
+   buttons so the text color, weight, and border match — earlier
+   versions added a `.primary` modifier which gave it a light-accent
+   background with near-black text and stood out inconsistently from
+   the rest of the action stack. #}
 {% if probe %}
 <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
       onsubmit="return confirm('Challenge this finding with the {{ probe.name }} probe? Read-only HTTP.');">
-  <button type="submit" class="action-btn primary"
+  <button type="submit" class="action-btn"
           {% if not is_admin %}disabled title="Read-only account"{% endif %}>
-    🔍 Send to agent
-    <small style="opacity:.85; font-weight:500; margin-left:auto">{{ probe.name }}</small>
+    {{ search_refraction_svg }}
+    Send to agent
+    <small style="opacity:.7; margin-left:auto">{{ probe.name }}</small>
   </button>
 </form>
 {% else %}
 <button class="action-btn" disabled
         title="No toolkit probe is mapped to this finding's signature.">
-  🔍 Send to agent
+  {{ search_refraction_svg }}
+  Send to agent
   <small style="opacity:.7; margin-left:auto">no probe</small>
 </button>
 {% endif %}
