@@ -1935,38 +1935,75 @@ def _finding_io_evidence(f: dict) -> dict:
             base = f"Reflected XSS payload: {payload}"
             out["indicator"] = base + (f" via parameter {param}" if param else "")
     elif tool == "enhanced_testing":
-        # Enhanced-testing probes don't store the full HTTP round-trip
-        # but they DO store enough to reconstruct a useful summary:
-        # url + method + status + size + a body snippet that triggered
-        # detection. Synthesize a request and response so the same
-        # Scan-request / Scan-response modal that nuclei populates with
-        # real bytes also works here, with explicit "synthesized from
-        # scan evidence" headers so the analyst is not misled.
+        # Enhanced-testing probes don't always store the full HTTP
+        # round-trip but they DO store enough to reconstruct a useful
+        # summary: url + method + status + size + a body snippet (or,
+        # for probes that opt in, the request_body and a clipped
+        # response_body_excerpt). Synthesize a request and response so
+        # the same Scan-request / Scan-response modal that nuclei
+        # populates with real bytes also works here, with explicit
+        # "synthesized from scan evidence" headers so the analyst is
+        # not misled.
         ev = raw.get("evidence") or {}
         confirmed = ev.get("confirmed") or []
         attempts = ev.get("attempts") or []
-        first = (confirmed[0] if isinstance(confirmed, list) and confirmed
-                 else attempts[0] if isinstance(attempts, list) and attempts
-                 else None)
+        # `confirmed` is sometimes a single dict (auth-default-creds and
+        # similar single-shot probes) and sometimes a list of dicts
+        # (multi-finding probes). Coalesce both shapes; failing that,
+        # fall back to the first attempt row.
+        first = None
+        if isinstance(confirmed, dict):
+            first = confirmed
+        elif isinstance(confirmed, list) and confirmed:
+            first = confirmed[0]
+        elif isinstance(attempts, list) and attempts:
+            first = attempts[0]
         if isinstance(first, dict):
-            ent_method = (f.get("evidence_method") or "GET").upper()
+            # Prefer the row's own method when present (auth probes
+            # POST), otherwise fall back to the finding's
+            # evidence_method (mostly GET-shaped checks).
+            ent_method = (first.get("method")
+                          or f.get("evidence_method")
+                          or "GET").upper()
             ent_url = first.get("url") or f.get("evidence_url") or ""
             ent_status = first.get("status")
             ent_size = first.get("size")
             ent_family = first.get("error_family") or ""
             ent_snippet = first.get("snippet") or ""
             ent_label = first.get("label") or ""
+            # Newer enhanced_testing probes (auth_default_admin_credentials
+            # v1.1+) record the full request body and a clipped response
+            # body excerpt — use them in preference to the older
+            # url+status+snippet shape so the modal shows what was
+            # actually sent (e.g. the JSON {email, password} POST body)
+            # and what came back (e.g. the JWT response).
+            req_body = first.get("request_body") or ""
+            resp_excerpt = first.get("response_body_excerpt") or ""
             from urllib.parse import urlparse as _u
             host = _u(ent_url).hostname or ""
             req_lines = [f"{ent_method} {ent_url}"]
             if host:
                 req_lines.append(f"Host: {host}")
+            if req_body:
+                # Probes that POST a JSON body always send
+                # Content-Type: application/json — surface that here
+                # so the synthesized request is faithful enough to
+                # paste into curl.
+                req_lines.append("Content-Type: application/json")
             if ent_label:
                 req_lines.append(f"# Probe attempt: {ent_label}")
             req_lines.append("")
-            req_lines.append("# Synthesized from scan evidence — the "
-                             "enhanced_testing probe records the URL it "
-                             "sent but not full request headers.")
+            if req_body:
+                req_lines.append(req_body)
+                req_lines.append("")
+                req_lines.append("# Request reconstructed from scan "
+                                 "evidence (probe recorded url, method, "
+                                 "and full request body).")
+            else:
+                req_lines.append("# Synthesized from scan evidence — "
+                                 "the enhanced_testing probe recorded "
+                                 "the URL it sent but not full request "
+                                 "headers / body.")
             out["request"] = _clip("\n".join(req_lines))
 
             resp_lines = []
@@ -1977,16 +2014,30 @@ def _finding_io_evidence(f: dict) -> dict:
             if ent_family:
                 resp_lines.append(f"X-Detected-Error-Family: {ent_family}")
             resp_lines.append("")
-            if ent_snippet:
+            if resp_excerpt:
+                # Probes that capture a body excerpt: emit it
+                # untransformed so the analyst sees exactly what came
+                # back (JWT, error envelope, etc).
+                resp_lines.append(resp_excerpt)
+                resp_lines.append("")
+                resp_lines.append("# Response body excerpt as captured "
+                                  "by the probe (clipped at 1.5 KB).")
+            elif ent_snippet:
                 resp_lines.append("--- response body snippet that "
                                   "triggered detection ---")
                 resp_lines.append(ent_snippet)
                 resp_lines.append("--- end snippet ---")
+                resp_lines.append("")
+                resp_lines.append("# Synthesized from scan evidence — "
+                                  "only the detection snippet was "
+                                  "captured.")
             else:
-                resp_lines.append("[scanner did not capture a body snippet]")
-            resp_lines.append("")
-            resp_lines.append("# Synthesized from scan evidence — full "
-                              "response body was not captured by the probe.")
+                resp_lines.append("[scanner did not capture a body "
+                                  "snippet or excerpt]")
+                resp_lines.append("")
+                resp_lines.append("# Synthesized from scan evidence — "
+                                  "full response body was not captured "
+                                  "by the probe.")
             out["response"] = _clip("\n".join(resp_lines))
 
             indicator_bits = []
@@ -1996,6 +2047,13 @@ def _finding_io_evidence(f: dict) -> dict:
                 indicator_bits.append(f"'{ent_family}'")
             if ent_snippet:
                 indicator_bits.append(f"body contains '{ent_snippet}'")
+            # Default-credential confirmation: highlight the JWT-claim
+            # signal that proved the session was administrative,
+            # since that's the actual indicator the analyst looks for
+            # rather than just status code.
+            jwt_claim = first.get("jwt_admin_claim")
+            if jwt_claim:
+                indicator_bits.append(f"JWT carries {jwt_claim}")
             if indicator_bits:
                 out["indicator"] = ("Re-running the request should reproduce "
                                     + " · ".join(indicator_bits) + ".")

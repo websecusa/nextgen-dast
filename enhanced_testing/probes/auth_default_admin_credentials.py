@@ -77,38 +77,112 @@ LOGIN_PATHS = (
 #  - the {host} template is substituted at runtime so admin@<target>
 #    works without a hard-coded domain.
 DEFAULT_CREDENTIALS = (
-    # --- Juice Shop / known seeded ---
-    ("admin@juice-sh.op", "admin123"),
-    # --- email-shaped, generic ---
-    ("admin@{host}",      "admin123"),
-    ("admin@{host}",      "admin"),
-    ("admin@{host}",      "password"),
-    ("admin@admin.com",   "admin"),
-    ("admin@example.com", "admin"),
-    ("admin@example.com", "password"),
-    # --- bare-username, generic ---
-    ("admin",             "admin"),
-    ("admin",             "password"),
-    ("admin",             "admin123"),
-    ("admin",             "changeme"),
-    ("admin",             "letmein"),
-    ("admin",             "Admin@123"),
-    ("admin",             ""),               # empty password
-    ("administrator",     "administrator"),
-    ("administrator",     "password"),
-    ("administrator",     "admin"),
-    # --- root variants (rare on web apps but devastating when present) ---
-    ("root",              "root"),
-    ("root",              "toor"),
-    ("root",              "password"),
-    ("root",              ""),
-    # --- developer / staging leftovers ---
-    ("test",              "test"),
-    ("test",              "test123"),
-    ("guest",             "guest"),
-    ("demo",              "demo"),
-    ("user",              "user"),
-    ("user",              "password"),
+    # ----- Documented application seeds -----
+    # Apps that ship with a known admin account documented in the
+    # README / quickstart guides. These get tried FIRST because they
+    # have the highest hit-rate on test/staging environments where
+    # the seed wasn't replaced.
+    ("admin@juice-sh.op",     "admin123"),       # OWASP Juice Shop
+    ("admin@dvwa.local",      "admin"),          # DVWA-style installs
+    ("admin@example.com",     "admin"),
+    ("admin@example.com",     "password"),
+    ("admin@example.com",     "Admin@123"),
+    ("admin@example.org",     "admin"),
+    ("admin@admin.com",       "admin"),
+    ("admin@admin.local",     "admin"),
+    ("admin@localhost",       "admin"),
+    # ----- Email-shaped @ target host -----
+    # The {host} template is filled with the assessment's hostname,
+    # catching deploys where the seeded admin email follows the app's
+    # own domain (admin@<the app>).
+    ("admin@{host}",          "admin"),
+    ("admin@{host}",          "admin123"),
+    ("admin@{host}",          "password"),
+    ("admin@{host}",          "Admin@123"),
+    ("admin@{host}",          "Welcome1"),
+    ("admin@{host}",          "P@ssw0rd"),
+    ("admin@{host}",          "changeme"),
+    ("administrator@{host}",  "administrator"),
+    ("administrator@{host}",  "password"),
+    # ----- Bare-username admin variants -----
+    # Most internal back-office apps still use bare usernames rather
+    # than emails. The password list mixes the historical CIRT.net
+    # defaults with the top entries from the rockyou / SecLists
+    # admin-password set; ordering puts the historically-most-found
+    # pairs first so the probe stops fast on common cases.
+    ("admin",                 "admin"),
+    ("admin",                 "admin123"),
+    ("admin",                 "password"),
+    ("admin",                 "P@ssw0rd"),
+    ("admin",                 "Password1"),
+    ("admin",                 "Welcome1"),
+    ("admin",                 "Admin@123"),
+    ("admin",                 "admin@123"),
+    ("admin",                 "changeme"),
+    ("admin",                 "letmein"),
+    ("admin",                 "qwerty"),
+    ("admin",                 "12345"),
+    ("admin",                 "123456"),
+    ("admin",                 "12345678"),
+    ("admin",                 "iloveyou"),
+    ("admin",                 ""),                # empty password
+    ("administrator",         "administrator"),
+    ("administrator",         "password"),
+    ("administrator",         "admin"),
+    ("administrator",         "P@ssw0rd"),
+    # ----- Root-style accounts -----
+    # Web apps with shell-style admin accounts (typically forgotten
+    # dev installs). Devastating when present because root access
+    # implies pivot capability.
+    ("root",                  "root"),
+    ("root",                  "toor"),
+    ("root",                  "password"),
+    ("root",                  "admin"),
+    ("root",                  ""),
+    # ----- Developer / staging leftovers -----
+    # Accounts that get created during local development and survive
+    # to staging or even prod when the deploy doesn't strip them.
+    ("test",                  "test"),
+    ("test",                  "test123"),
+    ("test",                  "password"),
+    ("dev",                   "dev"),
+    ("developer",             "developer"),
+    ("qa",                    "qa"),
+    ("staging",               "staging"),
+    ("ci",                    "ci"),
+    ("build",                 "build"),
+    ("deploy",                "deploy"),
+    ("backup",                "backup"),
+    # ----- Generic operator accounts -----
+    # Vendor-neutral roles that show up across appliances and
+    # frameworks. A real hit here typically means a forgotten
+    # service account.
+    ("manager",               "manager"),
+    ("manager",               "manager123"),
+    ("operator",              "operator"),
+    ("service",               "service"),
+    ("sysadmin",              "sysadmin"),
+    ("support",               "support"),
+    ("guest",                 "guest"),
+    ("guest",                 ""),
+    ("demo",                  "demo"),
+    ("user",                  "user"),
+    ("user",                  "password"),
+    ("info",                  "info"),
+    ("default",               "default"),
+    # ----- Vendor pairs not covered by the fingerprint-first probe -----
+    # The companion auth_vendor_default_credentials probe handles
+    # Tomcat, WordPress, phpMyAdmin, Jenkins, Grafana, JBoss, Adminer,
+    # and Kibana via stack fingerprinting first. Pairs below are for
+    # vendors that don't fingerprint cleanly via path/header alone.
+    ("weblogic",              "weblogic"),
+    ("weblogic",              "weblogic1"),
+    ("oracle",                "oracle"),
+    ("oracle",                "oracle123"),
+    ("elastic",               "changeme"),       # Elasticsearch default
+    ("neo4j",                 "neo4j"),
+    ("kong",                  "kong"),
+    ("redmine",               "redmine"),
 )
 
 # Role-claim names that indicate administrative authority. Different
@@ -212,24 +286,70 @@ class DefaultAdminCredentialsProbe(Probe):
         # rate-limit applies to the endpoint, not the user.
         path_aborted: set[str] = set()
 
+        # If the first request returns connection-failed (status 0),
+        # the host:port has no listener — every subsequent attempt
+        # would fail the same way, burning the request budget. Mark
+        # every path aborted so the outer loop exits. Set once on
+        # first observation rather than per-path because a single
+        # connection refusal proves the target is unreachable.
+        host_unreachable = False
+
         for path in login_paths:
+            if host_unreachable:
+                break
             url = urljoin(origin, path)
             for email, pw in creds:
-                if path in path_aborted:
+                if path in path_aborted or host_unreachable:
+                    break
+                # If a previous attempt against this path already
+                # returned 404, the endpoint doesn't exist on this
+                # host — no point burning budget on the rest of the
+                # cred list. (path_aborted handles the 429/Retry-After
+                # case; this is the same idea for not-found.)
+                if attempts and attempts[-1].get("login_path") == path \
+                        and attempts[-1].get("status") == 404:
+                    path_aborted.add(path)
                     break
                 # one POST per (path, cred) pair. The body shape that
                 # works for ~all Express/Rails/Django login endpoints
                 # is JSON with email+password keys.
-                body = json.dumps({"email": email, "password": pw}).encode()
+                req_body = json.dumps({"email": email, "password": pw})
+                body = req_body.encode()
                 r = client.request(
                     "POST", url,
                     headers={"Content-Type": "application/json"},
                     body=body,
                 )
+                # Record the full attempt — including the password we
+                # tried and the request body we sent — so the analyst
+                # reading the finding can reproduce the exact request
+                # without inferring it from the probe source. These
+                # are documented public default credentials, NOT user
+                # secrets, so storing them in evidence is appropriate.
+                # Response body is clipped to keep evidence rows small;
+                # 1.5 KB is enough to show a JWT and any error envelope.
                 row: dict = {
-                    "login_path": path, "email": email,
-                    "status": r.status, "size": r.size,
+                    "login_path": path,
+                    "url": url,
+                    "method": "POST",
+                    "email": email,
+                    "password": pw,
+                    "status": r.status,
+                    "size": r.size,
+                    "request_body": req_body,
+                    "response_body_excerpt": (r.text or "")[:1536],
                 }
+                # Connection-failed (status 0): SafeClient signals an
+                # unreachable target this way. No HTTP server means
+                # every cred×path combination would fail identically,
+                # so we record one attempt and bail out of the entire
+                # probe rather than burning the request budget on
+                # certainties.
+                if r.status == 0:
+                    row["aborted_reason"] = "target unreachable (connection failed)"
+                    attempts.append(row)
+                    host_unreachable = True
+                    break
                 # Rate-limit signal — abort this path so we don't pile
                 # on while the server is already telling us to back off.
                 if r.status == 429 or r.headers.get("Retry-After") \
@@ -282,7 +402,8 @@ class DefaultAdminCredentialsProbe(Probe):
             return Verdict(
                 validated=True, confidence=0.97,
                 summary=(f"Confirmed: default administrative credentials "
-                         f"({confirmed['email']!r}) granted an admin "
+                         f"({confirmed['email']!r} / "
+                         f"{confirmed['password']!r}) granted an admin "
                          f"session at {origin}{confirmed['login_path']} "
                          f"(JWT claim: {confirmed['jwt_admin_claim']})."),
                 evidence={**evidence, "confirmed": confirmed},
