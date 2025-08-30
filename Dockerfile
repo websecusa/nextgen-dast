@@ -37,6 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-liberation \
         fonts-dejavu \
         fontconfig \
+        # mariadb-client provides mariadb-dump and the mariadb shell. The
+        # Settings → Database backup / restore feature shells out to both;
+        # without this package the orchestrator can dump rows via pymysql
+        # but cannot produce a faithful schema-aware backup.
+        mariadb-client \
+        # nmap is used by the testssl-style cipher-order reproduction to
+        # confirm server preference per protocol (ssl-enum-ciphers).
+        nmap \
     && rm -rf /var/lib/apt/lists/*
 
 # Nikto is a Perl script — install from upstream (not in Debian trixie main)

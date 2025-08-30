@@ -33,6 +33,7 @@ import auth as auth_mod
 import branding as branding_mod
 import cleanup as cleanup_mod
 import db
+import dbops as dbops_mod
 import enrichment as enrichment_mod
 import llm as llm_mod
 import reports as reports_mod
@@ -1864,6 +1865,75 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
 
 
+def _testssl_indicator(test_id: str, finding: str) -> Optional[str]:
+    """Map a testssl check id to a one-line 'what should the analyst see
+    in their re-run' string. The indicator is shown as the 'Look for:'
+    line under the curl in the Reproduce-&-verify panel, so it has to
+    be specific enough that the analyst can grep/eyeball for it without
+    interpreting testssl's output format.
+
+    Returned strings frame the *current* (vulnerable) state. The fix is
+    confirmed when the openssl / curl / testssl re-run no longer shows
+    the indicator (handshake failure, no header, grade A, etc.)."""
+    tid = (test_id or "").strip()
+    finding = (finding or "").strip()
+    if not tid and not finding:
+        return None
+
+    # Cipher offered against a specific protocol — openssl s_client
+    # negotiates it = vulnerable.
+    if re.match(r"^cipher-tls1(?:_1|_2|_3)?_x[0-9a-fA-F]+$", tid):
+        return ("Successful TLS handshake on the named protocol with the "
+                f"flagged cipher — testssl says: {finding}")
+    # Cipher-order checks: 'no preference' / 'client preference'.
+    if tid.startswith("cipher_order"):
+        return ("Server is not enforcing its own cipher preference — "
+                "nmap/testssl reports the protocol with no server-side "
+                "ordering. Current state: " + (finding or "no preference"))
+    # Cipherlist checks (NULL, aNULL, OBSOLETED, AVERAGE, 3DES).
+    if tid.startswith("cipherlist_"):
+        kind = tid.replace("cipherlist_", "")
+        return (f"At least one {kind} cipher is still offered. After the "
+                "cipher list is cleaned up, openssl s_client -cipher "
+                f"{kind} should fail with 'no cipher match'.")
+    # Protocol-availability checks: TLS1, TLS1_1, SSLv2/3.
+    if tid in ("TLS1", "TLS1_1", "SSLv2", "SSLv3"):
+        return (f"Protocol {tid} negotiates a successful handshake. "
+                "Disable it server-side; the openssl s_client command "
+                "above should then fail with 'protocol version'.")
+    if tid == "BREACH":
+        return ("Response carries a Content-Encoding header on HTTPS, "
+                "which is the precondition BREACH needs. After disabling "
+                "compression for sensitive responses, the curl --compressed "
+                "probe must omit the header.")
+    if tid.startswith("BEAST_CBC"):
+        return ("CBC ciphers are still negotiated on the named legacy "
+                "protocol. Removing TLS 1.0/1.1 (or all CBC suites) makes "
+                "this go away.")
+    if tid == "LUCKY13":
+        return ("CBC ciphers susceptible to Lucky13 are still in the "
+                "advertised list. Move to AEAD-only (AES-GCM, ChaCha20).")
+    if tid == "HSTS":
+        return ("Strict-Transport-Security header is missing or weak. "
+                "Look for 'max-age=63072000; includeSubDomains; preload' "
+                "in the curl -skI output once fixed.")
+    if tid.startswith("cert_trust"):
+        return ("Certificate uses a wildcard or anonymous trust path that "
+                "testssl flagged. The openssl s_client | x509 -text "
+                "command above shows the SAN list to confirm.")
+    if tid.startswith("FS"):
+        return ("Forward-secrecy posture is below the testssl threshold. "
+                "The narrowed --fs re-run scopes the table to the FS rows "
+                "for quick verification.")
+    if tid == "overall_grade":
+        return (f"testssl assigns this server an overall grade of "
+                f"'{finding or '?'}'. Aim for A (or A+ with HSTS preload "
+                "+ AEAD-only ciphers).")
+    # Unknown/uncovered check id — fall back to the original message but
+    # include enough context that the analyst can still act on it.
+    return (f"testssl check '{tid}' reported: {finding}").strip()
+
+
 def _finding_io_evidence(f: dict) -> dict:
     """Surface the per-tool 'reproduce & verify' evidence for the panel.
 
@@ -1911,11 +1981,15 @@ def _finding_io_evidence(f: dict) -> dict:
         elif info:
             out["indicator"] = info
     elif tool == "testssl":
+        # testssl check ids encode WHICH lever the analyst should look at
+        # in their re-run. A blanket "testssl reported X" is useless for
+        # validating a fix — instead we pick the indicator that matches
+        # the test family (cipher offered, protocol reachable, header
+        # missing, grade letter, etc.) so the line tells the analyst
+        # exactly what state to confirm against.
         tid = raw.get("id") or ""
         finding = raw.get("finding") or ""
-        if tid or finding:
-            out["indicator"] = (
-                f"testssl check '{tid}' reported: {finding}".strip())
+        out["indicator"] = _testssl_indicator(tid, finding)
     elif tool == "nikto":
         line = raw.get("line") or ""
         if line:
@@ -1962,10 +2036,25 @@ def _finding_io_evidence(f: dict) -> dict:
             # Prefer the row's own method when present (auth probes
             # POST), otherwise fall back to the finding's
             # evidence_method (mostly GET-shaped checks).
+            # Some auth probes (auth_sql_login_bypass,
+            # auth_default_admin_credentials) store login_path rather
+            # than a full url, and don't bother recording the method
+            # because they always POST. Combine with the assessment
+            # origin and default the method to POST in that case so
+            # the synthesized request reflects what actually happened
+            # on the wire.
+            login_path = first.get("login_path") or ""
+            ent_url = first.get("url") or ""
+            if not ent_url:
+                origin = (raw.get("evidence") or {}).get("origin") or ""
+                if origin and login_path:
+                    ent_url = origin.rstrip("/") + login_path
+            if not ent_url:
+                ent_url = f.get("evidence_url") or ""
             ent_method = (first.get("method")
+                          or ("POST" if login_path else None)
                           or f.get("evidence_method")
                           or "GET").upper()
-            ent_url = first.get("url") or f.get("evidence_url") or ""
             ent_status = first.get("status")
             ent_size = first.get("size")
             ent_family = first.get("error_family") or ""
@@ -3651,6 +3740,140 @@ def admin_api_tokens_update(tid: int,
 def admin_api_tokens_delete(tid: int):
     api_mod.delete_token(tid)
     return redirect("/admin/api-tokens?msg=token+deleted")
+
+
+# Database backup & restore --------------------------------------------------
+#
+# Settings → Database. Lets an administrator dump the live MariaDB to a
+# gzipped .sql archive and restore from one. The heavy lifting (running
+# mariadb-dump / mariadb client, streaming through gzip) lives in
+# dbops_mod — this section is just the routes and the template wiring.
+
+@app.get("/admin/database", response_class=HTMLResponse)
+def admin_database_page(request: Request, msg: str = ""):
+    """Render the backup / restore landing page. Shows the list of
+    existing dumps with size + age, plus the buttons that trigger the
+    backup / upload-and-restore flows."""
+    return templates.TemplateResponse(
+        "admin/database.html",
+        ctx(request,
+            backups=dbops_mod.list_backups(),
+            max_restore_bytes=dbops_mod.MAX_RESTORE_BYTES,
+            msg=msg),
+    )
+
+
+@app.post("/admin/database/backup")
+def admin_database_backup_create():
+    """Run mariadb-dump → gzip into a fresh file under /data/backups.
+    The user gets redirected back to the page with a success/error
+    message. We deliberately do NOT stream the dump straight to the
+    browser — saving server-side first means a half-finished download
+    still leaves us with a usable file, and the page can show the size
+    + offer a re-download."""
+    fname = dbops_mod.make_backup_filename()
+    result = dbops_mod.write_backup(fname)
+    if not result.get("ok"):
+        # urlencode the error so query-string parsing on the redirect
+        # target doesn't choke on '+' / '&' inside the message.
+        from urllib.parse import quote_plus
+        return redirect("/admin/database?msg=backup+failed:+"
+                        + quote_plus(result.get("error", "unknown error")))
+    size_mb = round(result["size_bytes"] / (1024 * 1024), 2)
+    return redirect(
+        f"/admin/database?msg=backup+saved:+{result['filename']}+"
+        f"({size_mb}+MB,+{result['elapsed_seconds']}s)")
+
+
+@app.get("/admin/database/backup/{filename}")
+def admin_database_backup_download(filename: str):
+    """Download a previously-created dump. The filename is validated
+    against the canonical backup pattern so this can't be coerced into
+    a path-traversal read of /data."""
+    safe = dbops_mod._safe_filename(filename)
+    if not safe:
+        raise HTTPException(400, "invalid backup filename")
+    target = (dbops_mod.BACKUPS_DIR / safe).resolve()
+    backups_dir = dbops_mod.BACKUPS_DIR.resolve()
+    if not str(target).startswith(str(backups_dir)) or not target.exists():
+        raise HTTPException(404)
+    return FileResponse(
+        str(target),
+        media_type="application/gzip",
+        filename=safe,
+    )
+
+
+@app.post("/admin/database/backup/{filename}/delete")
+def admin_database_backup_delete(filename: str):
+    """Remove a dump from /data/backups. Validated through dbops so a
+    crafted filename can't escape the backups directory."""
+    if not dbops_mod.delete_backup(filename):
+        return redirect("/admin/database?msg=delete+failed:+invalid+or+missing+file")
+    return redirect("/admin/database?msg=backup+deleted")
+
+
+@app.post("/admin/database/restore")
+async def admin_database_restore(file: UploadFile = File(...)):
+    """Stream the uploaded SQL (or gzipped SQL) into the mariadb client.
+    Auto-detects gzip from the file's first two bytes; the .sql.gz
+    extension is the conventional hint but not load-bearing — a plain
+    .sql also works.
+
+    The upload is processed in chunks via UploadFile.read(N) so the
+    request body never needs to fit in memory. Total bytes are capped
+    by dbops.MAX_RESTORE_BYTES."""
+    fname = (file.filename or "").lower()
+    forced_gzip = None
+    if fname.endswith(".sql.gz") or fname.endswith(".gz"):
+        forced_gzip = True
+    elif fname.endswith(".sql"):
+        forced_gzip = False
+
+    async def chunks():
+        # 1 MB at a time — same trade-off as the backup writer: large
+        # enough that python overhead is negligible, small enough that
+        # a multi-GB upload doesn't sit in RAM.
+        while True:
+            data = await file.read(1024 * 1024)
+            if not data:
+                break
+            yield data
+
+    # dbops.restore_from_stream wants a sync iterator. Drain the async
+    # generator into a list of in-memory chunks isn't acceptable for
+    # multi-GB inputs, so adapt with a small queue + thread.
+    import asyncio, queue, threading
+    q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=4)
+    result_holder = {}
+
+    def worker():
+        def sync_chunks():
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                yield item
+        result_holder["r"] = dbops_mod.restore_from_stream(
+            sync_chunks(), is_gzip=forced_gzip)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        async for c in chunks():
+            await asyncio.to_thread(q.put, c)
+    finally:
+        await asyncio.to_thread(q.put, None)
+    await asyncio.to_thread(t.join)
+    result = result_holder.get("r") or {"ok": False,
+                                        "error": "restore worker did not run"}
+    if not result.get("ok"):
+        from urllib.parse import quote_plus
+        return redirect("/admin/database?msg=restore+failed:+"
+                        + quote_plus(result.get("error", "unknown error")))
+    elapsed = result.get("elapsed_seconds", "?")
+    return redirect(
+        f"/admin/database?msg=restore+complete+(elapsed+{elapsed}s)")
 
 
 # Reports ---------------------------------------------------------------------
