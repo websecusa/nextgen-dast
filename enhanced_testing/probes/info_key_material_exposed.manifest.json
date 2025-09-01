@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_key_material_exposed",
+  "version": "1.0",
+  "summary": "Re-fetches each key-material path the original probe found reachable and confirms whether -----BEGIN... markers are still served.",
+  "validates": [
+    "CWE-200",
+    "CWE-540",
+    "CWE-552"
+  ],
+  "matches_titles": [
+    "info_key_material_exposed",
+    "key material exposed",
+    "private key exposed",
+    "exposed key"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 8,
+  "request_budget_max": 24,
+  "args": {
+    "--url": "Site origin to scan for known key-material paths"
+  }
+}

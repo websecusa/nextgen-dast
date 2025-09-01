@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_verbose_error",
+  "version": "1.0",
+  "summary": "Re-issues the broken query that triggered a verbose error and asserts whether the framework / DB engine error fingerprint is still present.",
+  "validates": [
+    "CWE-209",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_verbose_error",
+    "verbose error",
+    "stack trace exposure"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 3,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "URL with the error-tickling query string"
+  }
+}

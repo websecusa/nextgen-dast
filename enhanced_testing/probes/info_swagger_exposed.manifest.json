@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_swagger_exposed",
+  "version": "1.0",
+  "summary": "Re-fetches the Swagger / OpenAPI endpoint and confirms whether the spec is still public.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_swagger_exposed",
+    "swagger exposed",
+    "openapi exposed",
+    "public swagger"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Site origin to probe for common Swagger paths"
+  }
+}

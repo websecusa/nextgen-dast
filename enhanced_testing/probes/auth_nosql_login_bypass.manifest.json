@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_nosql_login_bypass",
+  "version": "1.0",
+  "summary": "Re-runs the NoSQL-injection login probe: POST a MongoDB operator payload ({\"$ne\": null}) into the login form and confirm whether the server issues a session.",
+  "validates": [
+    "CWE-89",
+    "CWE-943",
+    "CWE-287"
+  ],
+  "matches_titles": [
+    "auth_nosql_login_bypass",
+    "nosql injection",
+    "mongodb injection",
+    "nosql login"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin URL (the probe sweeps common login paths)"
+  }
+}

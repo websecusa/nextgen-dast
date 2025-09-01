@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "path_traversal_extension_bypass",
+  "version": "1.0",
+  "summary": "Re-fetches the bypass URL that exploits %2500 / NUL-byte tricks against the extension allowlist and asserts whether the protected file is still served.",
+  "validates": [
+    "CWE-22",
+    "CWE-434",
+    "CWE-23"
+  ],
+  "matches_titles": [
+    "path_traversal_extension_bypass",
+    "path traversal",
+    "extension bypass",
+    "directory traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin (the probe re-tries the recorded base + filename combinations)"
+  }
+}

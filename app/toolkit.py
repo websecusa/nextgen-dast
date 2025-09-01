@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 TOOLKIT_DIR = Path("/app/toolkit")
 PROBES_DIR = TOOLKIT_DIR / "probes"
+# Enhanced-testing probes ship in their own directory because they're
+# also invoked during the `premium` scan profile (the orchestrator
+# queues them there). They share the same Probe / Verdict / SafeClient
+# scaffolding from toolkit/lib, so once a manifest is in place they're
+# fully usable as Validate / Challenge probes too — that's how a
+# finding emitted by, say, auth_sql_login_bypass during a scan can be
+# re-validated on demand by the analyst clicking Challenge.
+ENHANCED_PROBES_DIR = Path("/app/enhanced_testing/probes")
 
 # Probe name format guard (used in any path-sensitive lookup).
 PROBE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,32}$")
@@ -54,39 +62,59 @@ def _routing_cwes(validates: list[str] | None) -> list[str]:
 
 
 def list_probes() -> list[dict]:
-    if not PROBES_DIR.is_dir():
-        return []
-    out = []
-    for manifest_path in sorted(PROBES_DIR.glob("*.manifest.json")):
-        try:
-            data = json.loads(manifest_path.read_text())
-        except Exception:
+    """Return all probes available to the orchestrator. Walks two
+    directories: the canonical toolkit (validation probes invoked from
+    the Challenge / Validate UI) and the enhanced-testing tree (probes
+    that also run during scans). The enhanced-testing entries are only
+    included when a `*.manifest.json` is present next to the probe;
+    older probes that don't ship one remain undiscoverable here, which
+    is intentional — without a manifest we don't know how to route to
+    them anyway."""
+    out: list[dict] = []
+    seen_names: set[str] = set()
+    for probes_dir in (PROBES_DIR, ENHANCED_PROBES_DIR):
+        if not probes_dir.is_dir():
             continue
-        name = data.get("name") or manifest_path.stem.replace(".manifest", "")
-        script = PROBES_DIR / f"{name}.py"
-        if not script.is_file():
-            continue
-        # Nudge probe authors away from the recurring over-claim trap:
-        # if `validates` lists a top-level OWASP category, that entry
-        # will be ignored at routing time anyway (see _routing_cwes).
-        # Warn once per probe per process so the message is visible
-        # but not spammy.
-        owasp_entries = [v for v in (data.get("validates") or [])
-                         if v and _OWASP_TOP_RE.match(v)]
-        if owasp_entries and name not in _OWASP_WARNED:
-            _OWASP_WARNED.add(name)
-            logger.warning(
-                "probe manifest %r lists top-level OWASP category(ies) "
-                "%r in `validates`. These are ignored for routing — "
-                "they're catch-alls that match every finding of the "
-                "shape and produce false probe matches at scale. Use "
-                "specific CWE-* entries instead, or rely on "
-                "matches_titles for tier-1 routing.",
-                name, owasp_entries,
-            )
-        data["script_path"] = str(script)
-        data["available"] = True
-        out.append(data)
+        for manifest_path in sorted(probes_dir.glob("*.manifest.json")):
+            try:
+                data = json.loads(manifest_path.read_text())
+            except Exception:
+                continue
+            name = (data.get("name")
+                    or manifest_path.stem.replace(".manifest", ""))
+            # First-seen wins. The toolkit directory is iterated first,
+            # so a probe of the same name in enhanced_testing is
+            # ignored — keeps the routing deterministic when both
+            # trees ship a probe with the same identifier.
+            if name in seen_names:
+                continue
+            script = probes_dir / f"{name}.py"
+            if not script.is_file():
+                continue
+            # Nudge probe authors away from the recurring over-claim
+            # trap: if `validates` lists a top-level OWASP category,
+            # that entry will be ignored at routing time anyway (see
+            # _routing_cwes). Warn once per probe per process so the
+            # message is visible but not spammy.
+            owasp_entries = [v for v in (data.get("validates") or [])
+                             if v and _OWASP_TOP_RE.match(v)]
+            if owasp_entries and name not in _OWASP_WARNED:
+                _OWASP_WARNED.add(name)
+                logger.warning(
+                    "probe manifest %r lists top-level OWASP category(ies) "
+                    "%r in `validates`. These are ignored for routing — "
+                    "they're catch-alls that match every finding of the "
+                    "shape and produce false probe matches at scale. Use "
+                    "specific CWE-* entries instead, or rely on "
+                    "matches_titles for tier-1 routing.",
+                    name, owasp_entries,
+                )
+            data["script_path"] = str(script)
+            data["available"] = True
+            data["origin"] = ("toolkit" if probes_dir == PROBES_DIR
+                              else "enhanced_testing")
+            seen_names.add(name)
+            out.append(data)
     return out
 
 
