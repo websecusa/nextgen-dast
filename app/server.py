@@ -1843,16 +1843,27 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     io = _finding_io_evidence(f)
     # The Validate button (inline, modal) is only offered when a probe
     # is matched, the probe is declared read-only, and we have a URL to
-    # send it to. Anything else falls back to the existing Challenge
-    # form on the standalone /finding/<id> page, where the analyst sees
-    # the probe budget and confirms before running.
+    # send it to. Anything else falls back to the inline Challenge
+    # button — same modal, but the action submits to /challenge_inline
+    # (admin-only) and accepts probe-class as well as read-only. Only
+    # 'destructive' probes still require the standalone form.
+    has_url = bool((f.get("evidence_url") or "").strip())
     io["validatable"] = bool(
         probe
         and (probe.get("safety_class") == "read-only")
-        and (f.get("evidence_url") or "").strip()
+        and has_url
     )
-    if io["validatable"]:
+    io["challengeable"] = bool(
+        probe
+        and (probe.get("safety_class") in ("read-only", "probe"))
+        and has_url
+        and not io["validatable"]    # don't double-render when validate fits
+    )
+    if io["validatable"] or io["challengeable"]:
         io["probe_name"] = probe.get("name")
+        io["probe_safety"] = probe.get("safety_class")
+        io["probe_budget_typical"] = probe.get("request_budget_typical")
+        io["probe_budget_max"] = probe.get("request_budget_max")
     # The Test button is the no-probe sibling: just fires the bare
     # reproduction request once and surfaces the response. Allowed for
     # any GET / HEAD against a host inside the assessment scope.
@@ -4356,6 +4367,104 @@ def finding_validate_inline(fid: int):
     # Hand the modal a stable, lightweight payload. We pass through the
     # parts the analyst actually reads (verdict, summary, hits, request
     # round-trip) and skip the bulky catalog metadata.
+    audit = verdict.get("audit_log") or []
+    last_req = audit[-1] if audit else {}
+    return JSONResponse({
+        "ok": bool(verdict.get("ok", True)),
+        "validated": verdict.get("validated"),
+        "confidence": verdict.get("confidence"),
+        "summary": verdict.get("summary") or "",
+        "remediation": verdict.get("remediation") or "",
+        "severity_uplift": verdict.get("severity_uplift"),
+        "status": new_status,
+        "probe": probe.get("name"),
+        "evidence": verdict.get("evidence") or {},
+        "audit": [{
+            "method": e.get("method"),
+            "url":    e.get("url"),
+            "status": e.get("status"),
+            "size":   e.get("size"),
+        } for e in audit[:10]],
+        "last_status": last_req.get("status"),
+        "error": verdict.get("error"),
+    })
+
+
+@app.post("/finding/{fid}/challenge_inline")
+def finding_challenge_inline(request: Request, fid: int):
+    """JSON sibling of /finding/<id>/challenge for the workspace 'Challenge'
+    button. Runs the matched probe IF it isn't classified `destructive`
+    (those still require the standalone form so an analyst types the
+    confirmation), then returns the verdict as JSON so the workspace
+    modal can render it inline.
+
+    The difference from /validate is the safety gate: /validate refuses
+    anything not 'read-only' (one-click semantics), while this endpoint
+    accepts 'read-only' AND 'probe' classes — which covers the auth
+    probes (auth_sql_login_bypass, auth_default_admin_credentials) that
+    POST a single login attempt with a non-mutating payload. Admin role
+    is required because a probe-class run still issues live HTTP traffic
+    against the target.
+    """
+    user = current_user(request) or {}
+    if user.get("role") != "admin":
+        return JSONResponse(
+            {"ok": False, "error": "forbidden",
+             "message": "Challenge runs require admin role."},
+            status_code=403)
+    f = db.query_one("SELECT * FROM findings WHERE id = %s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    probe = toolkit_mod.find_probe_for_finding(f)
+    if not probe:
+        return JSONResponse(
+            {"ok": False, "error": "no_probe",
+             "message": "No validation probe matches this finding's signature."},
+            status_code=409)
+    if probe.get("safety_class") == "destructive":
+        return JSONResponse(
+            {"ok": False, "error": "not_safe",
+             "message": (f"Probe '{probe.get('name')}' is classified "
+                         "'destructive'. Use the Challenge form on the "
+                         "full detail page so the budget and scope are "
+                         "visible before it runs.")},
+            status_code=409)
+    if not (f.get("evidence_url") or "").strip():
+        return JSONResponse(
+            {"ok": False, "error": "no_url",
+             "message": "Finding has no evidence URL to test against."},
+            status_code=409)
+
+    session_cookie, auth_diag = _resolve_challenge_cookie(f, manual_cookie="")
+    verdict = _run_finding_probe(f, probe, cookie=session_cookie)
+
+    if isinstance(verdict, dict):
+        verdict.setdefault("auth", {}).update(auth_diag)
+        for entry in verdict.get("audit_log") or []:
+            if "headers" in entry:
+                entry["headers"].pop("Cookie", None)
+
+    new_status = _verdict_to_status(verdict)
+    new_finding_status = ("false_positive" if new_status == "false_positive"
+                          else None)
+    if new_finding_status:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s, status = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000],
+             new_finding_status, fid),
+        )
+    else:
+        db.execute(
+            "UPDATE findings SET validation_status = %s, "
+            "validation_probe = %s, validation_run_at = NOW(), "
+            "validation_evidence = %s WHERE id = %s",
+            (new_status, probe["name"][:64],
+             json.dumps(verdict, default=str)[:65000], fid),
+        )
+
     audit = verdict.get("audit_log") or []
     last_req = audit[-1] if audit else {}
     return JSONResponse({

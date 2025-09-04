@@ -351,6 +351,52 @@
     if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
   }
 
+  // Inline finding challenger. POSTs to /finding/<id>/challenge_inline
+  // (admin-only on the server) and renders the verdict in the same
+  // modal Validate uses. The Challenge button surfaces this for
+  // probe-class probes (single POST, non-mutating) — read-only probes
+  // use Validate instead. Destructive probes still need the standalone
+  // /finding/<id> page so the analyst sees the budget / scope first.
+  async function runChallenge(fid, probeName, safetyClass,
+                              budgetTypical, budgetMax) {
+    const budget = budgetTypical
+      ? ('~' + budgetTypical + ' requests' +
+         (budgetMax ? ', max ' + budgetMax : ''))
+      : 'a few requests';
+    const msg = "Run probe " + probeName +
+                " (" + safetyClass + " class) against this finding?\n\n" +
+                "Budget: " + budget + ".\n" +
+                (safetyClass === "probe"
+                  ? "The probe will send POST requests with non-mutating "
+                  + "payloads (e.g. login attempts). No data changes "
+                  + "server-side."
+                  : "");
+    if (!confirm(msg)) return;
+    const modal = document.getElementById("io-modal");
+    const titleEl = document.getElementById("io-modal-title");
+    const validateEl = document.getElementById("io-validate-body");
+    const ioBody = document.getElementById("io-modal-body");
+    if (!modal || !validateEl) return;
+    titleEl.textContent = "Challenging finding #" + fid + " with " + probeName + "…";
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    document.getElementById("io-copy-btn").hidden = true;
+    validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+    if (typeof modal.showModal === "function") modal.showModal();
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_inline", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Challenge result · finding #" + fid;
+      validateEl.innerHTML = renderValidateBody(data);
+    } catch (err) {
+      validateEl.innerHTML =
+        '<p class="warn">Challenge request failed: ' +
+        escapeHTML(String(err)) + '</p>';
+    }
+  }
+
   // Inline finding validator. POSTs to /finding/<id>/validate (read-only
   // probes only — the server enforces this) and renders the verdict
   // inside the existing modal. The modal swaps from raw-text mode to a

@@ -26,7 +26,7 @@
     * finding_panel.html  — the assessment-workspace middle pane
     * finding_detail.html — the standalone /finding/<id> page
 #}
-{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.testable)) %}
+{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.challengeable or io.testable)) %}
 <h3 class="section">Reproduce &amp; verify</h3>
 <ol class="repro-steps" style="margin:.25em 0 .8em 1.2em; padding:0">
   {% if repro and repro.curl %}
@@ -39,7 +39,7 @@
   {% if io and io.indicator %}
   <li><strong>Look for:</strong> {{ io.indicator }}</li>
   {% endif %}
-  {% if io and (io.request or io.response or io.validatable or io.testable) %}
+  {% if io and (io.request or io.response or io.validatable or io.challengeable or io.testable) %}
   <li>
     {% if io.request or io.response %}
       <span>Compare against the captured round-trip from the scan:</span>
@@ -73,7 +73,29 @@
           Validate
         </button>
       {% endif %}
+      {% if io.challengeable %}
+        <button type="button" class="primary"
+                onclick="runChallenge({{ f.id }}, '{{ io.probe_name|e }}', '{{ io.probe_safety|e }}', {{ io.probe_budget_typical or 'null' }}, {{ io.probe_budget_max or 'null' }})"
+                title="Re-run the {{ io.probe_name }} probe ({{ io.probe_safety }} class) against this URL and show the result. Probe-class probes send a small number of POST requests with non-mutating payloads (e.g. login attempts) — admin role required.">
+          Challenge with <code>{{ io.probe_name }}</code>
+        </button>
+      {% endif %}
     </div>
+    {# Show a discoverability note when the probe is matched so it's
+       visible BEFORE the analyst clicks. Helps non-pentesters understand
+       what the button is going to do. #}
+    {% if io and (io.validatable or io.challengeable) %}
+      <p class="muted small" style="margin:.4em 0 0 0">
+        Probe matched: <code>{{ io.probe_name }}</code>
+        {% if io.probe_safety %}
+          · safety class <code>{{ io.probe_safety }}</code>
+        {% endif %}
+        {% if io.probe_budget_typical %}
+          · ~{{ io.probe_budget_typical }} HTTP requests
+          (max {{ io.probe_budget_max or '?' }})
+        {% endif %}
+      </p>
+    {% endif %}
   </li>
   {% endif %}
 </ol>

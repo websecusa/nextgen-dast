@@ -393,6 +393,49 @@ function copyIO() {
   if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
 }
 
+async function runChallenge(fid, probeName, safetyClass,
+                            budgetTypical, budgetMax) {
+  // Mirror of the workspace runChallenge — see assessment_detail.html
+  // for the rationale. Lives here too because the standalone /finding/
+  // <id> page reaches its own scripts (no parent workspace context).
+  const budget = budgetTypical
+    ? ('~' + budgetTypical + ' requests' +
+       (budgetMax ? ', max ' + budgetMax : ''))
+    : 'a few requests';
+  const msg = "Run probe " + probeName +
+              " (" + safetyClass + " class) against this finding?\n\n" +
+              "Budget: " + budget + ".\n" +
+              (safetyClass === "probe"
+                ? "The probe will send POST requests with non-mutating "
+                + "payloads (e.g. login attempts). No data changes "
+                + "server-side."
+                : "");
+  if (!confirm(msg)) return;
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = "Challenging finding #" + fid + " with " + probeName + "…";
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/challenge_inline', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = "Challenge result · finding #" + fid;
+    validateEl.innerHTML = renderValidateBody(data);
+  } catch (err) {
+    validateEl.innerHTML =
+      '<p class="warn">Challenge request failed: ' +
+      escapeHTML(String(err)) + '</p>';
+  }
+}
+
 async function runValidate(fid) {
   const modal = document.getElementById('io-modal');
   const titleEl = document.getElementById('io-modal-title');
