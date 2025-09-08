@@ -4179,6 +4179,14 @@ def _run_finding_probe(finding: dict, probe: dict,
         "max_requests": int(probe.get("request_budget_max") or 30),
         "max_rps": 5.0,
         "dry_run": False,
+        # Pass the finding's title and raw_data through so probes that
+        # need source-tool-specific context (the testssl test id, the
+        # nuclei matcher name, the wapiti vulnerable parameter, ...)
+        # can extract it without the analyst typing it. Probes that
+        # don't know about these keys silently absorb them via the
+        # unknown-key path in Probe._config_from_stdin.
+        "title": finding.get("title") or "",
+        "raw_data": finding.get("raw_data") or "",
     }
     # Probes whose manifest declares requires_post need the destructive-
     # method gate opened so the SafeClient will accept their POSTs. The
