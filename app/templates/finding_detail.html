@@ -64,11 +64,24 @@
     {% endif %}
   </p>
 
-  <div style="display:flex; gap:.6em; flex-wrap:wrap; margin-top:.6em">
-    {# Challenge form — only when a toolkit probe is matched. #}
+  {# Stack the action forms (Challenge + Reopen / False positive) on their
+     own rows so each one renders flush left. The earlier shared-flex-row
+     parent left the Challenge form competing for cross-axis alignment
+     with the global `form { flex-direction: column; align-items: ... }`
+     rule, which centred the button instead of leaving it left-aligned. #}
+  <div style="display:flex; flex-direction:column; gap:.7em; margin-top:.6em;
+              align-items:flex-start">
+    {# Challenge form — only when a toolkit probe is matched. The
+       inline `flex-direction: row` here is load-bearing: the global
+       stylesheet sets `form { flex-direction: column }`, and an
+       inline display:flex without an explicit direction inherits
+       that column layout, which combined with align-items:center
+       reads as a centered button instead of a flush-left one. #}
     {% if probe %}
       <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
-            style="display:flex; gap:.5em; align-items:center; flex-wrap:wrap">
+            style="display:flex; flex-direction:row; gap:.5em;
+                   align-items:center; flex-wrap:wrap;
+                   justify-content:flex-start; width:100%">
         <button type="submit" {% if not is_admin %}disabled{% endif %}>
           Challenge with <code>{{ probe.name }}</code>
         </button>
