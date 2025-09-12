@@ -4222,9 +4222,21 @@ def _run_finding_probe(finding: dict, probe: dict,
 def _verdict_to_status(verdict: dict) -> str:
     """Map a probe verdict into the findings.validation_status enum.
     The probe schema uses validated=True/False/None; we collapse that
-    plus 'ok' / 'error' into the four enum values supported by the DB."""
-    if not verdict.get("ok", True) or verdict.get("error"):
+    plus 'ok' / 'error' into the four enum values supported by the DB.
+
+    Distinguish a real crash (subprocess exception, safety violation —
+    `error` field is set) from a soft refusal (probe ran cleanly but
+    decided it could not produce a verdict — `ok=False`, `error=None`).
+    Soft refusals map to 'inconclusive' so the analyst sees a neutral
+    badge rather than a red 'errored' state for a probe that simply
+    didn't have the inputs it needed."""
+    if verdict.get("error"):
         return "errored"
+    if not verdict.get("ok", True):
+        # Soft refusal — surface as inconclusive. The probe's own
+        # summary string carries the WHY ("--param is required",
+        # "no candidate endpoints found", etc.) for the analyst.
+        return "inconclusive"
     v = verdict.get("validated")
     if v is True:
         return "validated"
@@ -4297,7 +4309,18 @@ def finding_challenge(fid: int, cookie: str = Form("")):
             (new_status, probe["name"][:64],
              json.dumps(verdict, default=str)[:65000], fid),
         )
-    return redirect(f"/finding/{fid}?msg=challenge+result%3A+{new_status}")
+    # Surface the verdict's summary as a tail on the redirect message so
+    # the analyst sees *why* on the same page they came from. urlencode
+    # the summary so it survives the round-trip; clamp the total msg
+    # length so a verbose probe summary can't blow past sane URL bounds.
+    from urllib.parse import quote_plus
+    summary_tail = (verdict.get("summary") or "").strip()
+    if summary_tail and len(summary_tail) > 240:
+        summary_tail = summary_tail[:240] + "…"
+    msg = f"challenge result: {new_status}"
+    if summary_tail:
+        msg += f" — {summary_tail}"
+    return redirect(f"/finding/{fid}?msg={quote_plus(msg)}")
 
 
 @app.post("/finding/{fid}/validate")

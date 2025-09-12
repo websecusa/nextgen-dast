@@ -12,7 +12,10 @@
     "cross site scripting",
     "cross-site scripting",
     "reflected xss",
-    "xss"
+    "stored xss",
+    "dom xss",
+    "xss vulnerability",
+    "xss in"
   ],
   "matches_tools": [
     "wapiti",
