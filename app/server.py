@@ -7,6 +7,7 @@ Pentest proxy + scanner UI.
 - Launches wapiti / nikto scans against configurable targets.
 - Serves a small Jinja2 web UI on 127.0.0.1:8888.
 """
+import hmac
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import api as api_mod
+import audit as audit_mod
 import auth as auth_mod
 import branding as branding_mod
 import cleanup as cleanup_mod
@@ -546,6 +548,11 @@ async def auth_middleware(request: Request, call_next):
 
     cookie = request.cookies.get(sessions.COOKIE_NAME)
     user = sessions.verify(cookie) if cookie else None
+    # Sessions issued before the CSRF rollout do not carry a `csrf` field.
+    # Treat them as invalid so the user gets a fresh, CSRF-bound session
+    # the next time they sign in. One-time inconvenience at upgrade.
+    if user and not user.get("csrf"):
+        user = None
     if not user:
         return RedirectResponse(
             f"{ROOT_PATH}/login?next={path}", status_code=303
@@ -569,6 +576,44 @@ async def auth_middleware(request: Request, call_next):
 
 def current_user(request: Request) -> Optional[dict]:
     return getattr(request.state, "user", None) if hasattr(request, "state") else None
+
+
+# Account / auth surfaces that mutate state. CSRF is enforced by the
+# individual handlers (see check_csrf below) so the middleware does not
+# have to peek at request bodies. The list lives here so it is visible
+# next to the auth middleware that classifies these routes.
+CSRF_PROTECTED_PATHS = (
+    "/me/password",
+    "/admin/users",   # covers /admin/users, /admin/users/{uid}/...
+    "/logout",
+)
+
+
+def check_csrf(request: Request, token: str) -> None:
+    """Constant-time compare the form-supplied csrf_token against the
+    token bound to the session. Raise 403 on any mismatch."""
+    user = current_user(request) or {}
+    expected = user.get("csrf", "")
+    sent = (token or "").strip()
+    if not expected or not sent or not hmac.compare_digest(expected, sent):
+        raise HTTPException(status_code=403, detail="invalid CSRF token")
+
+
+def client_ip(request: Request) -> str:
+    """Best-effort client IP for audit logging. Honors X-Forwarded-For
+    (the app sits behind nginx → uvicorn over loopback), falling back
+    to the direct peer address if the header is missing."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        # First entry is the original client; the rest is the proxy
+        # chain inserted by intermediate hops.
+        return xff.split(",", 1)[0].strip()
+    real = request.headers.get("x-real-ip", "")
+    if real:
+        return real.strip()
+    if request.client:
+        return request.client.host
+    return ""
 
 
 def redirect(path: str, code: int = 303) -> RedirectResponse:
@@ -596,6 +641,10 @@ def ctx(request: Request, **extra) -> dict:
         "proxy_running": proxy_pid() is not None,
         "user": user,
         "is_admin": (user.get("role") == "admin") if user else False,
+        # csrf_token is rendered into the hidden field of every form that
+        # POSTs to a CSRF-protected endpoint. Empty string when the user
+        # is not logged in (templates handle that case themselves).
+        "csrf_token": (user or {}).get("csrf", ""),
         "brand": brand,
         "web": web_theme,
         **extra,
@@ -3415,8 +3464,12 @@ def user_agents_make_default(uid: int):
 # Auth ------------------------------------------------------------------------
 
 def _set_session_cookie(response, user: dict) -> None:
+    # Each new session carries a fresh CSRF token. Storing it inside
+    # the signed cookie payload means the attacker cannot forge a token
+    # without also breaking the HMAC, and we do not need a separate
+    # cookie or server-side store.
     payload = {"id": user["id"], "username": user["username"],
-               "role": user["role"]}
+               "role": user["role"], "csrf": sessions.new_csrf_token()}
     cookie = sessions.sign(payload)
     response.set_cookie(
         key=sessions.COOKIE_NAME, value=cookie,
@@ -3428,9 +3481,11 @@ def _set_session_cookie(response, user: dict) -> None:
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, next: str = "", error: str = ""):
-    # Already logged in? Send them on.
+    # Already logged in? Send them on. (Pre-CSRF sessions are filtered
+    # out the same way the auth middleware does it.)
     cookie = request.cookies.get(sessions.COOKIE_NAME)
-    if sessions.verify(cookie):
+    payload = sessions.verify(cookie)
+    if payload and payload.get("csrf"):
         return RedirectResponse(next or f"{ROOT_PATH}/", status_code=303)
     return templates.TemplateResponse(
         "login.html",
@@ -3444,12 +3499,26 @@ def login_submit(request: Request,
                  password: str = Form(...),
                  next: str = Form("")):
     u = users_mod.authenticate(username, password)
+    ip = client_ip(request)
     if not u:
+        # Don't disclose whether the username exists; the audit row only
+        # carries the attempted username so an operator can correlate.
+        audit_mod.log_event(
+            "login_failure", ok=False,
+            target={"id": None, "username": username},
+            ip=ip,
+        )
         return RedirectResponse(
             f"{ROOT_PATH}/login?error=Invalid+credentials"
             + (f"&next={next}" if next else ""),
             status_code=303,
         )
+    audit_mod.log_event(
+        "login_success",
+        actor=audit_mod.actor_from_user(u),
+        target=audit_mod.actor_from_user(u),
+        ip=ip,
+    )
     target = next if next.startswith(ROOT_PATH or "/") else f"{ROOT_PATH}/"
     response = RedirectResponse(target, status_code=303)
     _set_session_cookie(response, u)
@@ -3457,7 +3526,15 @@ def login_submit(request: Request,
 
 
 @app.post("/logout")
-def logout():
+def logout(request: Request, csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
+    me = current_user(request)
+    audit_mod.log_event(
+        "logout",
+        actor=audit_mod.actor_from_user(me),
+        target=audit_mod.actor_from_user(me),
+        ip=client_ip(request),
+    )
     response = RedirectResponse(f"{ROOT_PATH}/login", status_code=303)
     response.delete_cookie(sessions.COOKIE_NAME, path=ROOT_PATH or "/")
     return response
@@ -3484,7 +3561,9 @@ def admin_users_create(
     username: str = Form(...),
     role: str = Form("readonly"),
     password: str = Form(""),
+    csrf_token: str = Form(""),
 ):
+    check_csrf(request, csrf_token)
     username = username.strip()
     if not re.match(r"^[A-Za-z0-9_.\-]{2,64}$", username):
         raise HTTPException(400, "username must be 2–64 chars, [A-Za-z0-9_.-]")
@@ -3492,53 +3571,135 @@ def admin_users_create(
         raise HTTPException(400, "invalid role")
     if users_mod.get_by_username(username):
         return redirect(f"/admin/users?msg=user+already+exists")
+    # Blank field generates a random password — only allowed for the
+    # *create* path because a brand-new user has no prior credential to
+    # rotate. The /admin/users/{uid}/password endpoint below requires
+    # an explicit value to avoid the silent-rotation footgun.
     pw = password.strip() or users_mod.gen_password()
-    users_mod.create(username, pw, role)
+    new_uid = users_mod.create(username, pw, role)
+    audit_mod.log_event(
+        "user_created",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": new_uid, "username": username},
+        ip=client_ip(request),
+        extra={"role": role, "password_generated": not password.strip()},
+    )
     msg = f"created+{username}+pw={pw}"
     return redirect(f"/admin/users?msg={msg}")
 
 
 @app.post("/admin/users/{uid}/role")
-def admin_users_set_role(uid: int, role: str = Form(...)):
+def admin_users_set_role(request: Request, uid: int,
+                         role: str = Form(...),
+                         csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
     if role not in users_mod.ROLES:
         raise HTTPException(400, "invalid role")
     users_mod.set_role(uid, role)
+    target = users_mod.get_by_id(uid)
+    audit_mod.log_event(
+        "role_changed",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target=audit_mod.actor_from_user(target),
+        ip=client_ip(request),
+        extra={"new_role": role},
+    )
     return redirect("/admin/users?msg=role+updated")
 
 
 @app.post("/admin/users/{uid}/disabled")
-def admin_users_disabled(uid: int, disabled: str = Form("")):
-    users_mod.set_disabled(uid, bool(disabled))
+def admin_users_disabled(request: Request, uid: int,
+                         disabled: str = Form(""),
+                         csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
+    is_disabled = bool(disabled)
+    users_mod.set_disabled(uid, is_disabled)
+    target = users_mod.get_by_id(uid)
+    audit_mod.log_event(
+        "user_disabled" if is_disabled else "user_enabled",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target=audit_mod.actor_from_user(target),
+        ip=client_ip(request),
+    )
     return redirect("/admin/users?msg=disabled+updated")
 
 
 @app.post("/admin/users/{uid}/password")
-def admin_users_password(uid: int, password: str = Form("")):
-    pw = password.strip() or users_mod.gen_password()
+def admin_users_password(request: Request, uid: int,
+                         password: str = Form(""),
+                         csrf_token: str = Form("")):
+    """Set a specific user's password. The blank-generates-random
+    behavior was removed in 2.1.1: it produced a silent rotation when
+    a stray click fired the form. The admin must now type the new
+    password, or run scripts/reset.py for a rotation that also rewrites
+    the on-disk secrets file."""
+    check_csrf(request, csrf_token)
+    pw = password.strip()
+    if not pw:
+        return redirect(
+            f"/admin/users?msg=password+required+(blank+rotation+disabled)")
+    if len(pw) < 8:
+        return redirect(
+            f"/admin/users?msg=password+must+be+%E2%89%A5+8+characters")
     users_mod.set_password(uid, pw)
-    return redirect(f"/admin/users?msg=password+for+%23{uid}+set+to+{pw}")
+    target = users_mod.get_by_id(uid)
+    audit_mod.log_event(
+        "password_set",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target=audit_mod.actor_from_user(target),
+        ip=client_ip(request),
+        extra={"via": "admin_users_password"},
+    )
+    return redirect(
+        f"/admin/users?msg=password+updated+for+%23{uid}")
 
 
 @app.post("/admin/users/{uid}/delete")
-def admin_users_delete(request: Request, uid: int):
+def admin_users_delete(request: Request, uid: int,
+                       csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
     me = current_user(request) or {}
     if int(uid) == int(me.get("id", -1)):
         raise HTTPException(400, "cannot delete the account you're logged in as")
+    target = users_mod.get_by_id(uid)
     users_mod.delete(uid)
+    audit_mod.log_event(
+        "user_deleted",
+        actor=audit_mod.actor_from_user(me),
+        target=audit_mod.actor_from_user(target),
+        ip=client_ip(request),
+    )
     return redirect("/admin/users?msg=deleted")
 
 
 @app.post("/me/password")
 def me_password(request: Request,
                 current_password: str = Form(...),
-                new_password: str = Form(...)):
+                new_password: str = Form(...),
+                csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
     me = current_user(request) or {}
     u = users_mod.get_by_id(me.get("id", 0))
+    ip = client_ip(request)
     if not u or not users_mod.authenticate(u["username"], current_password):
+        audit_mod.log_event(
+            "password_set", ok=False,
+            actor=audit_mod.actor_from_user(me),
+            target=audit_mod.actor_from_user(u),
+            ip=ip,
+            extra={"via": "me_password", "reason": "current_password_invalid"},
+        )
         raise HTTPException(403, "current password incorrect")
     if len(new_password) < 8:
         raise HTTPException(400, "new password must be ≥ 8 characters")
     users_mod.set_password(u["id"], new_password)
+    audit_mod.log_event(
+        "password_set",
+        actor=audit_mod.actor_from_user(me),
+        target=audit_mod.actor_from_user(u),
+        ip=ip,
+        extra={"via": "me_password"},
+    )
     return redirect("/?msg=password+changed")
 
 

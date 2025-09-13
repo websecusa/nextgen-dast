@@ -121,6 +121,7 @@
           </div>
         </div>
         <form class="signout" method="post" action="{{ base }}/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit">Sign out</button>
         </form>
       {% endif %}

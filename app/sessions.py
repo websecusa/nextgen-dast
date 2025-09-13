@@ -10,11 +10,22 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 from typing import Optional
 
 COOKIE_NAME = "pp_session"
 DEFAULT_TTL = 60 * 60 * 8       # 8 hours
+
+# Length of the per-session CSRF token. 32 random bytes → 43 base64url
+# characters. Stored inside the signed session payload so an attacker
+# cannot forge a token without also forging the HMAC.
+CSRF_TOKEN_BYTES = 32
+
+
+def new_csrf_token() -> str:
+    """Generate a fresh, URL-safe CSRF token bound to a single session."""
+    return secrets.token_urlsafe(CSRF_TOKEN_BYTES)
 
 
 def _secret() -> bytes:
