@@ -74,7 +74,12 @@
   table { width: 100%; border-collapse: collapse; margin: .8em 0; }
   th, td { border: 1px solid #dde2eb; padding: .4em .6em; text-align: left; vertical-align: top; }
   th { background: #f3f5f8; font-weight: 700; font-size: 9pt; }
-  a { color: {{ brand.primary_color or '#5fb3d7' }}; text-decoration: none; }
+  /* Print-friendly hyperlink color, decoupled from brand.primary_color
+     (which doubles as the cover-page background and may be set to a
+     pale or grey tone that makes link text hard to read). #0645ad is
+     the same readable blue Wikipedia uses; the underline makes the
+     link recognizable as such even on a black-and-white printout. */
+  a { color: #0645ad; text-decoration: underline; }
 
   /* ---- Cover ---------------------------------------------------------- */
   .cover { page: cover; height: 100vh; padding: 0; margin: 0; position: relative;
