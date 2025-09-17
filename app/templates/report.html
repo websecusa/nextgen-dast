@@ -76,10 +76,12 @@
   th { background: #f3f5f8; font-weight: 700; font-size: 9pt; }
   /* Print-friendly hyperlink color, decoupled from brand.primary_color
      (which doubles as the cover-page background and may be set to a
-     pale or grey tone that makes link text hard to read). #0645ad is
-     the same readable blue Wikipedia uses; the underline makes the
-     link recognizable as such even on a black-and-white printout. */
-  a { color: #0645ad; text-decoration: underline; }
+     pale or grey tone that makes link text hard to read). pdf.link
+     defaults to Wikipedia's #0645ad — a readable blue that stays
+     legible on a black-and-white printout — but admins can override
+     it from the PDF branding page. The underline keeps the link
+     recognizable as such regardless of color. */
+  a { color: {{ pdf.link }}; text-decoration: underline; }
 
   /* ---- Cover ---------------------------------------------------------- */
   .cover { page: cover; height: 100vh; padding: 0; margin: 0; position: relative;

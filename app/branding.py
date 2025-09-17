@@ -55,6 +55,12 @@ PDF_DEFAULTS = {
     # sections — the severity itself is signaled by border-left and badge
     # color, so the *text* should read like any other paragraph.
     "body":         "#1f2630",
+    # Hyperlink color. Default is Wikipedia's #0645ad — a print-friendly
+    # blue that stays readable on a black-and-white printout. Decoupled
+    # from primary_color because brand primary often doubles as the
+    # cover-page background and may legitimately be set to a pale tone
+    # under which link text disappears.
+    "link":         "#0645ad",
 }
 # Magic bytes → (extension, content-type)
 MAGIC = {
@@ -147,6 +153,7 @@ def get_pdf() -> dict:
         "cover_text_rule":     _hex_to_rgba(cover_text, 0.4),
         "header":              b.get("pdf_header_color")     or d["header"],
         "body":                b.get("pdf_body_color")       or d["body"],
+        "link":                b.get("pdf_link_color")       or d["link"],
         # PDF logos: the legacy *_logo_filename columns are PDF-side
         "header_logo_filename": b.get("header_logo_filename"),
         "footer_logo_filename": b.get("footer_logo_filename"),
@@ -162,7 +169,7 @@ def update(fields: dict) -> None:
         # PDF
         "primary_color", "accent_color", "classification_color",
         "pdf_font_family", "pdf_cover_text_color",
-        "pdf_header_color", "pdf_body_color",
+        "pdf_header_color", "pdf_body_color", "pdf_link_color",
         "pdf_sev_critical", "pdf_sev_high", "pdf_sev_medium",
         "pdf_sev_low", "pdf_sev_info",
         # web

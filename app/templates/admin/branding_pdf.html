@@ -25,6 +25,9 @@
       <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_low }}">LOW</strong></td><td>Server-version banner exposed</td></tr>
       <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_info }}">INFO</strong></td><td>phpinfo not exposed</td></tr>
     </table>
+    <p style="font-family: {{ pdf.font }}; margin:1em 0 0; font-size:.9em; color:#1f2630">
+      Sample hyperlink: <a href="#preview-link" style="color: {{ pdf.link }}; text-decoration: underline">https://example.com/finding/CVE-2024-12345</a>
+    </p>
   </div>
 </section>
 
@@ -97,7 +100,11 @@
     <div class="grid" style="grid-template-columns: 1fr 1fr 1fr; gap:.6em">
       <label>Header text <input type="color" name="pdf_header_color" value="{{ brand.pdf_header_color or pdf.header }}" style="height:2.4em;padding:0"></label>
       <label>Body text   <input type="color" name="pdf_body_color"   value="{{ brand.pdf_body_color   or pdf.body }}"   style="height:2.4em;padding:0"></label>
+      <label>Hyperlink   <input type="color" name="pdf_link_color"   value="{{ brand.pdf_link_color   or pdf.link }}"   style="height:2.4em;padding:0"></label>
     </div>
+    <p class="muted small" style="margin:.4em 0 0">
+      Hyperlink color is decoupled from <em>Primary</em> on purpose — primary doubles as the cover-page background, so a pale brand primary would render link text invisible. Default is a print-friendly blue (<code>#0645ad</code>) that stays legible on a black-and-white printout.
+    </p>
 
     <button type="submit" style="margin-top:1em">Save PDF theme</button>
   </form>

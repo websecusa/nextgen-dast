@@ -147,6 +147,10 @@ ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_sev_info VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_cover_text_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_header_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_body_color VARCHAR(16);
+-- Hyperlink color for the rendered PDF report. Independent of primary
+-- color (which doubles as cover-page background) so admins can keep a
+-- pale brand primary without making linked text unreadable.
+ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_link_color VARCHAR(16);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role ENUM('admin','readonly') NOT NULL DEFAULT 'readonly';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login DATETIME;
