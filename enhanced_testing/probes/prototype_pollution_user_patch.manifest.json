@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "prototype_pollution_user_patch",
+  "version": "1.0",
+  "summary": "Re-runs the __proto__ pollution probe (off by default; pollutes Object.prototype for the Node process lifetime when --allow-destroy is set).",
+  "validates": [
+    "CWE-1321",
+    "CWE-915"
+  ],
+  "matches_titles": [
+    "prototype_pollution_user_patch",
+    "prototype pollution"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--verify-path": "Additional verify path (repeatable)",
+    "--allow-destroy": "Required — pollutes Object.prototype"
+  }
+}

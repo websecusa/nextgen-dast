@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "redos_b2b_orderlines",
+  "version": "1.0",
+  "summary": "Re-runs the B2B ReDoS time-delay probe.",
+  "validates": [
+    "CWE-1333",
+    "CWE-400"
+  ],
+  "matches_titles": [
+    "redos_b2b_orderlines",
+    "redos",
+    "regex denial of service"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional B2B path (repeatable)"
+  }
+}

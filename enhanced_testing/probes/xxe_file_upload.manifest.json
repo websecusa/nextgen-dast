@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "xxe_file_upload",
+  "version": "1.0",
+  "summary": "Re-runs the XXE upload probe: posts an XML file declaring an external entity and checks whether /etc/passwd contents leak in the response.",
+  "validates": [
+    "CWE-611",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "xxe_file_upload",
+    "xxe",
+    "xml external entity",
+    "xxe injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint (repeatable)",
+    "--field": "Multipart form-field name (default: file)"
+  }
+}

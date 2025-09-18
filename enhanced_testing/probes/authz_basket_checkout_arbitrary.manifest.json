@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_basket_checkout_arbitrary",
+  "version": "1.0",
+  "summary": "Re-runs the basket-checkout BOLA probe (off by default; creates an order row when --allow-destroy is set).",
+  "validates": [
+    "CWE-639",
+    "CWE-285",
+    "CWE-863"
+  ],
+  "matches_titles": [
+    "authz_basket_checkout_arbitrary",
+    "checkout idor",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--victim-bid": "Basket id to check out (default 1)",
+    "--allow-destroy": "Required — checkout creates an order"
+  }
+}

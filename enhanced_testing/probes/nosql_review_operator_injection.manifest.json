@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "nosql_review_operator_injection",
+  "version": "1.0",
+  "summary": "Re-runs the reviews operator-injection probe with id[$ne]=-1 and counts distinct product ids in the response.",
+  "validates": [
+    "CWE-943",
+    "CWE-89"
+  ],
+  "matches_titles": [
+    "nosql_review_operator_injection",
+    "nosql injection",
+    "operator injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

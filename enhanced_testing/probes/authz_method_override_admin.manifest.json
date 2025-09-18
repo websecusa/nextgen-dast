@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_method_override_admin",
+  "version": "1.0",
+  "summary": "Re-runs the HTTP method-override smuggle probe (off by default; mutates the throwaway user when --allow-destroy is set).",
+  "validates": [
+    "CWE-285",
+    "CWE-287",
+    "CWE-639"
+  ],
+  "matches_titles": [
+    "authz_method_override_admin",
+    "method override",
+    "x-http-method-override"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--allow-destroy": "Required — probe mutates the throwaway user"
+  }
+}

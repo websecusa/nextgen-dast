@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_role_mass_assignment",
+  "version": "1.0",
+  "summary": "Re-runs the registration mass-assignment probe: posts a registration body with a privileged role and checks whether the server accepts it.",
+  "validates": [
+    "CWE-915",
+    "CWE-269",
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "authz_role_mass_assignment",
+    "mass assignment",
+    "role assignment",
+    "privilege escalation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--register-path": "Additional registration endpoint to test (repeatable)"
+  }
+}

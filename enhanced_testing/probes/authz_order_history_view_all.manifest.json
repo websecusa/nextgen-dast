@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_order_history_view_all",
+  "version": "1.0",
+  "summary": "Re-runs the order-history BFLA probe: registers a throwaway user and asserts whether /rest/order-history/orders leaks foreign owners.",
+  "validates": [
+    "CWE-639",
+    "CWE-285",
+    "CWE-862"
+  ],
+  "matches_titles": [
+    "authz_order_history_view_all",
+    "broken function level authorization",
+    "bfla",
+    "order leak"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

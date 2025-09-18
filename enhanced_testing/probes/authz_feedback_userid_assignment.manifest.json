@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_feedback_userid_assignment",
+  "version": "1.0",
+  "summary": "Re-runs the feedback UserId mass-assignment probe: posts feedback with a foreign UserId and asserts whether the server impersonates that user.",
+  "validates": [
+    "CWE-639",
+    "CWE-915",
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "authz_feedback_userid_assignment",
+    "feedback idor",
+    "mass assignment",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--victim-uid": "UserId to impersonate (default 1)"
+  }
+}

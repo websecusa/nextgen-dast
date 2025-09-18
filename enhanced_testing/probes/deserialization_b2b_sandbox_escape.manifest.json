@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "deserialization_b2b_sandbox_escape",
+  "version": "1.0",
+  "summary": "Re-runs the vm2 / safe-eval sandbox-escape probe against the B2B endpoint using the Function-constructor reach-out.",
+  "validates": [
+    "CWE-94",
+    "CWE-95",
+    "CWE-693"
+  ],
+  "matches_titles": [
+    "deserialization_b2b_sandbox_escape",
+    "vm2 escape",
+    "safe-eval escape",
+    "sandbox bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional B2B endpoint (repeatable)",
+    "--cookie": "Cookie header value if the endpoint requires auth"
+  }
+}

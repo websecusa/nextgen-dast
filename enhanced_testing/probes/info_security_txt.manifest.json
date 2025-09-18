@@ -1,0 +1,23 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_security_txt",
+  "version": "1.0",
+  "summary": "Re-runs the /.well-known/security.txt presence probe.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_security_txt",
+    "security.txt",
+    ".well-known"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 3,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

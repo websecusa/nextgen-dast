@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "nosql_review_dos_where",
+  "version": "1.0",
+  "summary": "Re-runs the $where time-delay probe on the reviews endpoint.",
+  "validates": [
+    "CWE-943",
+    "CWE-95"
+  ],
+  "matches_titles": [
+    "nosql_review_dos_where",
+    "nosql injection",
+    "$where injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

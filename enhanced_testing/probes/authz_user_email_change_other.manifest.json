@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_user_email_change_other",
+  "version": "1.0",
+  "summary": "Re-runs the foreign-email-rewrite probe (off by default; mutates the victim record when --allow-destroy is set).",
+  "validates": [
+    "CWE-639",
+    "CWE-285",
+    "CWE-287"
+  ],
+  "matches_titles": [
+    "authz_user_email_change_other",
+    "account hijack",
+    "broken access control",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--victim-uid": "UserId to mutate (default 1)",
+    "--allow-destroy": "Required — probe rewrites another user's email"
+  }
+}

@@ -422,6 +422,41 @@ _PROBES_NEEDING_POST = {
                                        "phpMyAdmin, JBoss, Adminer, Kibana)",
     "auth_sql_login_bypass":           "SQL injection on login form (POST)",
     "auth_nosql_login_bypass":         "NoSQL operator-injection on login (POST)",
+    # ----- Round-3 critical batch -------------------------------------
+    "ssrf_profile_image_url":          "register/login + POST profile-image URL",
+    "xxe_file_upload":                 "multipart POST with XML external-entity payload",
+    "deserialization_b2b_eval":        "POST IIFE to /b2b/v2/orders to confirm eval",
+    "deserialization_b2b_sandbox_escape": "POST sandbox-escape Function() payload",
+    "authz_role_mass_assignment":      "POST /api/Users with role=admin",
+    "authz_basket_idor_walk":          "register/login then walk basket ids",
+    "authz_basket_manipulation":       "register/login + POST BasketItems with foreign BasketId",
+    "auth_oauth_password_from_email":  "POST base64(email) to login endpoint",
+    # ----- Round-4 high-authz batch -----------------------------------
+    "authz_feedback_userid_assignment": "register/login + POST /api/Feedbacks with foreign UserId",
+    "authz_feedback_delete":            "DELETE /api/Feedbacks/<id> (gated by --allow-destroy)",
+    "authz_product_review_edit":        "PATCH foreign review (gated by --allow-destroy)",
+    "authz_address_idor_walk":          "register/login then walk address ids",
+    "authz_basket_checkout_arbitrary":  "POST checkout on victim basket (gated)",
+    "authz_order_history_view_all":     "register/login + GET order-history",
+    "authz_method_override_admin":      "POST + X-HTTP-Method-Override: PATCH (gated)",
+    "authz_deluxe_membership_tamper":   "PATCH own role to deluxe (gated)",
+    "authz_user_email_change_other":    "PUT foreign user's email (gated)",
+    # ----- Round-5 authn / session batch ------------------------------
+    "auth_password_reset_weak_question": "POST reset-password with security-question answer",
+    "auth_jwt_no_expiration":            "register/login + replay tampered JWT",
+    "auth_logout_does_not_invalidate":   "register/login + GET/POST /logout + replay",
+    # ----- Round-6 injection batch ------------------------------------
+    "nosql_review_dos_where":            "PATCH reviews with $where time-delay",
+    "redos_b2b_orderlines":              "PATCH /b2b orderLinesData with backtracking payload",
+    "prototype_pollution_user_patch":    "PUT /api/Users with __proto__ payload (gated)",
+    "ssti_pug_username":                 "PUT username with Pug interpolation (gated)",
+    "xss_stored_lastloginip":            "register/login + GET /rest/saveLoginIp with iframe",
+    # ----- Round-8 medium batch ---------------------------------------
+    "auth_username_enum_timing":         "POST timing-statistical login probe",
+    "auth_no_brute_force_lockout":       "POST 20 failed logins (gated by trial count)",
+    "config_session_cookie_flags":       "POST trigger login + inspect Set-Cookie",
+    "auth_password_change_no_current":   "GET/POST change-password without current (gated)",
+    "info_graphql_endpoint":             "POST introspection query to /graphql",
 }
 
 

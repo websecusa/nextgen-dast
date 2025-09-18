@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_deluxe_membership_tamper",
+  "version": "1.0",
+  "summary": "Re-runs the deluxe-tier self-promotion probe (off by default; mutates the throwaway user when --allow-destroy is set).",
+  "validates": [
+    "CWE-285",
+    "CWE-639",
+    "CWE-269"
+  ],
+  "matches_titles": [
+    "authz_deluxe_membership_tamper",
+    "price tamper",
+    "role tamper",
+    "privilege escalation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--target-role": "Privileged role value (default deluxe)",
+    "--allow-destroy": "Required — probe mutates the throwaway user"
+  }
+}

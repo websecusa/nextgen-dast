@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "path_traversal_ftp_download",
+  "version": "1.0",
+  "summary": "Re-runs the named-file /ftp traversal probe (coupons, suspicious_errors.yml, package.json.bak, incident-support.kdbx).",
+  "validates": [
+    "CWE-22",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "path_traversal_ftp_download",
+    "ftp leak",
+    "path traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--filename": "Additional `path|regex|desc` (repeatable)"
+  }
+}

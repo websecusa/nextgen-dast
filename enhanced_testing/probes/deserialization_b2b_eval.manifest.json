@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "deserialization_b2b_eval",
+  "version": "1.0",
+  "summary": "Re-runs the B2B unsafe-eval probe: posts an arithmetic IIFE and checks whether the response echoes the evaluated result.",
+  "validates": [
+    "CWE-94",
+    "CWE-95",
+    "CWE-502"
+  ],
+  "matches_titles": [
+    "deserialization_b2b_eval",
+    "deserialization",
+    "unsafe eval",
+    "code injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional B2B endpoint (repeatable)",
+    "--cookie": "Cookie header value if the endpoint requires auth"
+  }
+}

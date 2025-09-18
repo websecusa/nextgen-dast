@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_product_review_edit",
+  "version": "1.0",
+  "summary": "Re-runs the foreign-review-edit probe (off by default; rewrites another user's review when --allow-destroy is set).",
+  "validates": [
+    "CWE-639",
+    "CWE-285",
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "authz_product_review_edit",
+    "review idor",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--allow-destroy": "Required — the probe rewrites another user's review"
+  }
+}

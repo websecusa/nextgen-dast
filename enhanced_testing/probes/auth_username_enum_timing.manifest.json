@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_username_enum_timing",
+  "version": "1.0",
+  "summary": "Re-runs the username-enumeration timing probe with multiple trials per branch.",
+  "validates": [
+    "CWE-203",
+    "CWE-208"
+  ],
+  "matches_titles": [
+    "auth_username_enum_timing",
+    "username enumeration",
+    "timing attack"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 10,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target origin URL",
+    "--known-email": "Email known to exist on the target",
+    "--unknown-email-prefix": "Prefix for fabricated unknown emails"
+  }
+}

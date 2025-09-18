@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "cmdi_video_subtitles",
+  "version": "1.0",
+  "summary": "Re-runs the /video subtitle path-traversal probe.",
+  "validates": [
+    "CWE-22",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "cmdi_video_subtitles",
+    "subtitle traversal",
+    "path traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--target-file": "Filesystem path to attempt (default etc/passwd)"
+  }
+}

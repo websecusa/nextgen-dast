@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_source_map_exposed",
+  "version": "1.0",
+  "summary": "Re-runs the source-map exposure probe by parsing the index and fetching the named .js.map.",
+  "validates": [
+    "CWE-200",
+    "CWE-540"
+  ],
+  "matches_titles": [
+    "info_source_map_exposed",
+    "source map",
+    "webpack source map"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--js-name": "Additional JS bundle name (repeatable)"
+  }
+}

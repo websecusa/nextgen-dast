@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_feedback_delete",
+  "version": "1.0",
+  "summary": "Re-runs the feedback DELETE probe (off by default; requires --allow-destroy because the request alters server state).",
+  "validates": [
+    "CWE-862",
+    "CWE-284",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "authz_feedback_delete",
+    "broken access control",
+    "missing authorization"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--feedback-id": "Feedback row id to delete (default 2)",
+    "--allow-destroy": "Required — off by default because DELETE alters state"
+  }
+}
