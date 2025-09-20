@@ -1,6 +1,6 @@
 -- Author: Tim Rice <tim.j.rice@hackrange.com>
 -- Part of nextgen-dast. See README.md for license and overall architecture.
--- pentest-proxy schema. Idempotent (CREATE IF NOT EXISTS).
+-- nextgen-dast schema. Idempotent (CREATE IF NOT EXISTS).
 -- Applied automatically by mariadb on first init via /docker-entrypoint-initdb.d.
 -- Re-applied programmatically by scripts/reset.py for upgrades / repairs.
 
@@ -74,7 +74,7 @@ INSERT IGNORE INTO user_agents (label, user_agent, is_default, is_seeded) VALUES
   ('Googlebot',           'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)', 0, 1),
   ('Bingbot',             'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)', 0, 1),
   ('curl',                'curl/8.5.0', 0, 1),
-  ('pentest-proxy',       'pentest-proxy/1.0 (authorized DAST scanner)', 0, 1);
+  ('nextgen-dast',        'nextgen-dast/1.0 (authorized DAST scanner)', 0, 1);
 
 CREATE TABLE IF NOT EXISTS assessments (
   id INT AUTO_INCREMENT PRIMARY KEY,

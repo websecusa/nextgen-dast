@@ -395,7 +395,7 @@ def reap_zombie_assessments(startup: bool = False) -> int:
     """Mark as 'error' any in-flight assessments whose worker process is gone.
 
     A row is considered a zombie when its `worker_pid` no longer exists in this
-    container's PID namespace — typically because the pentest-proxy container
+    container's PID namespace — typically because the nextgen-dast container
     was restarted (or OOM-killed) while a scan was mid-flight, leaving the
     assessment row stuck in 'running' / 'consolidating' forever.
 

@@ -58,7 +58,7 @@ class SafeClient:
         self.budget = budget
         self.audit = audit
         self.cookie = cookie
-        self.user_agent = user_agent or "pentest-proxy-toolkit/1.0"
+        self.user_agent = user_agent or "nextgen-dast-toolkit/1.0"
         self.default_headers = dict(default_headers or {})
         self.proxy = proxy
         self.verify_tls = verify_tls

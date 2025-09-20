@@ -177,7 +177,7 @@ def main() -> int:
                     help="Specific password to set (default: generate random)")
     ap.add_argument("--full", action="store_true",
                     help="TRUNCATE every table before seeding (data wipe)")
-    ap.add_argument("--app-name", default=os.environ.get("APP_NAME", "pentest-proxy"))
+    ap.add_argument("--app-name", default=os.environ.get("APP_NAME", "nextgen-dast"))
     ap.add_argument("--app-url", default=os.environ.get("APP_URL", ""))
     ap.add_argument("--seed-config-json", default=os.environ.get("SEED_CONFIG_JSON", ""),
                     help="JSON object of config key/value pairs to seed")

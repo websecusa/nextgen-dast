@@ -6,7 +6,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Sign in — pentest-proxy</title>
+  <title>Sign in — nextgen-dast</title>
   <link rel="stylesheet" href="{{ base }}/static/style.css">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
@@ -16,7 +16,7 @@
     <img src="{{ base }}/branding/logo/header" alt="" style="max-height:64px;width:auto"
          onerror="this.style.display='none'">
   </p>
-  <h1 style="text-align:center; color: var(--accent); font-weight:700">pentest-proxy</h1>
+  <h1 style="text-align:center; color: var(--accent); font-weight:700">nextgen-dast</h1>
   <section class="card">
     <h2>Sign in</h2>
     {% if error %}<p class="err">{{ error }}</p>{% endif %}
@@ -31,9 +31,6 @@
       <button type="submit">Sign in</button>
     </form>
   </section>
-  <p class="muted" style="text-align:center; font-size:.85em">
-    Bootstrap admin credentials are in <code>data/.sensitive_secrets_info_*</code> on the host.
-  </p>
 </main>
 </body>
 </html>

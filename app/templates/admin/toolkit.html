@@ -51,7 +51,7 @@
 
 <section class="card" style="margin-top:1.5em">
   <h2>Standalone use (any pentester, any target)</h2>
-  <pre>docker compose exec pentest-proxy python /app/toolkit/probes/sqli_boolean.py \
+  <pre>docker compose exec nextgen-dast python /app/toolkit/probes/sqli_boolean.py \
   --url 'https://target.example.com/products?id=1' \
   --param id \
   --cookie 'session=abc123' \

@@ -40,13 +40,13 @@ services:
       timeout: 3s
       retries: 30
 
-  pentest-proxy:
+  nextgen-dast:
     image: dockerregistry.fairtprm.com/nextgen-dast:2.1.1
     # Registry-pull deployment. To build locally for development:
     #   docker compose --env-file .env_<suffix> build
     # Then comment out the `image:` line above and uncomment the `build:`.
     # build: .
-    container_name: pentest-proxy
+    container_name: nextgen-dast
     network_mode: host
     restart: unless-stopped
     volumes:
