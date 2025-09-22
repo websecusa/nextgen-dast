@@ -572,8 +572,7 @@
        style="color:#1f2630; font-size:9pt; margin-top:.6em">
       <strong style="color:#1f2630">References:</strong>
       {% for label, url in f.repro.references %}
-        <a href="{{ url }}" target="_blank" rel="noopener noreferrer"
-           style="color: {{ pdf.primary }}; text-decoration: underline">{{ label }}</a>{{ ", " if not loop.last }}
+        <a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ label }}</a>{{ ", " if not loop.last }}
       {% endfor %}
     </p>
   {% endif %}
