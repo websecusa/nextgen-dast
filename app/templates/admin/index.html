@@ -40,5 +40,14 @@
        Tuned for multi-GB <code>raw_data</code> blobs (<code>max_allowed_packet=1G</code>).</p>
     <p><a href="{{ base }}/admin/database">Backup &amp; restore →</a></p>
   </div>
+  <div class="card">
+    <h2>SCA database</h2>
+    <p>Software-composition cache: observed packages, cached
+       vulnerability records (OSV / retire.js / nuclei / LLM /
+       manual), and last-refresh status. Includes a one-button
+       update for scanner binaries (nuclei, dalfox, ffuf,
+       osv-scanner) and signature DBs.</p>
+    <p><a href="{{ base }}/admin/sca">Open SCA →</a></p>
+  </div>
 </section>
 {% endblock %}

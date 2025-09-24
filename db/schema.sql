@@ -271,6 +271,120 @@ CREATE TABLE IF NOT EXISTS finding_enrichment (
     REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ---------------------------------------------------------------------------
+-- Software Composition Analysis (SCA)
+--
+-- Three tables make up the SCA layer:
+--
+--   sca_packages            — every (ecosystem, name, version) tuple we have
+--                             ever observed in any assessment, with first /
+--                             last seen timestamps. Lets the admin SCA page
+--                             list "what libraries are out there in our
+--                             customer base, and how stale are they."
+--
+--   sca_vulnerabilities     — the cached vulnerability database. One row
+--                             per (ecosystem, package, vulnerable_range,
+--                             cve_id). Populated from multiple feeds:
+--                               - 'osv'    OSV.dev offline DB
+--                               - 'retire' retire.js jsrepository.json
+--                               - 'nuclei' nuclei-templates CVE coverage
+--                               - 'llm'    on-demand LLM gap-fill for
+--                                          packages with no feed coverage
+--                               - 'manual' admin override (is_locked=1
+--                                          prevents automatic refresh)
+--                             SCA findings consult this table FIRST and only
+--                             escalate to a paid LLM call when no row exists.
+--
+--   sca_assessment_packages — per-assessment audit trail of which packages
+--                             were observed where, so the report renderer
+--                             can show "jQuery 3.4.1 was loaded from
+--                             /static/js/jquery.min.js on this scan."
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sca_packages (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  ecosystem VARCHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  version VARCHAR(128) NOT NULL,
+  latest_version VARCHAR(128),
+  first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_eco_name_ver (ecosystem, name, version),
+  KEY idx_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS sca_vulnerabilities (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  ecosystem VARCHAR(32) NOT NULL,
+  package_name VARCHAR(255) NOT NULL,
+  -- Free-form version range string in OSV / npm-semver / retire.js notation
+  -- (e.g. ">=1.0.3 <3.5.0", "<3.5.0", "= 1.12.4"). Resolved client-side by
+  -- app/sca.py before declaring a hit.
+  vulnerable_range VARCHAR(255) NOT NULL,
+  cve_id VARCHAR(64),
+  ghsa_id VARCHAR(64),
+  severity ENUM('critical','high','medium','low','info','unknown')
+    NOT NULL DEFAULT 'unknown',
+  cvss VARCHAR(16),
+  summary VARCHAR(512),
+  description TEXT,
+  fixed_version VARCHAR(128),
+  references_json TEXT,
+  source ENUM('osv','retire','nuclei','llm','manual') NOT NULL,
+  is_locked TINYINT(1) NOT NULL DEFAULT 0,
+  llm_endpoint_id INT NULL,
+  llm_model VARCHAR(128),
+  fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  notes TEXT,
+  -- A cve_id can apply to multiple version ranges of the same package
+  -- (e.g. fixed in 3.5 vs 4.0 backports). Allow duplicates per range.
+  UNIQUE KEY uk_eco_pkg_range_cve (ecosystem, package_name, vulnerable_range, cve_id),
+  KEY idx_pkg (ecosystem, package_name),
+  KEY idx_cve (cve_id),
+  KEY idx_severity (severity),
+  CONSTRAINT fk_sca_vuln_endpoint FOREIGN KEY (llm_endpoint_id)
+    REFERENCES llm_endpoints(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS sca_assessment_packages (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  assessment_id INT NOT NULL,
+  ecosystem VARCHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  version VARCHAR(128) NOT NULL,
+  -- Where on the target the package was observed: a JS URL, a manifest
+  -- path (/package.json), a HTML script tag, etc. Free-form for the
+  -- report renderer to display verbatim.
+  source_url VARCHAR(1024),
+  -- How we identified this package:
+  --   'retire'         retire.js fingerprint match
+  --   'manifest'       direct read of an exposed package manifest
+  --   'lockfile'       parsed from an exposed lockfile
+  --   'sourcemap'      reconstructed from an exposed *.map file
+  --   'html_script'    versioned URL in a <script src=...> tag
+  detection_method VARCHAR(32) NOT NULL,
+  -- JSON list of CVE ids matched against sca_vulnerabilities at scan time.
+  -- Cached on the row so the report doesn't re-query the vuln cache to
+  -- render the package's status months later.
+  matched_cves_json TEXT,
+  observed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_assessment (assessment_id),
+  KEY idx_pkg (ecosystem, name, version),
+  CONSTRAINT fk_sca_apkg_assess FOREIGN KEY (assessment_id)
+    REFERENCES assessments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- Single-row config keys consulted by the SCA / scanner-update background
+-- task. INSERT IGNOREd here so they show up on a fresh DB; the admin SCA
+-- page can edit them via the standard config table interface.
+-- ---------------------------------------------------------------------------
+INSERT IGNORE INTO config (`key`, value) VALUES
+  ('sca_update_interval_hours', '24'),
+  ('sca_signature_max_age_days', '7'),
+  ('sca_last_updated_at', ''),
+  ('sca_last_update_log', '');
+
 CREATE TABLE IF NOT EXISTS llm_analyses (
   id INT AUTO_INCREMENT PRIMARY KEY,
   target_type ENUM('flow','scan') NOT NULL,

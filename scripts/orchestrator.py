@@ -384,21 +384,82 @@ def insert_findings(assessment_id: int, scan_id: str, tool: str,
 # run_enhanced_testing(). Premium is the only profile that includes it.
 
 def plan_for_profile(profile: str) -> list[str]:
+    # Software Composition Analysis runs in every profile — retire.js
+    # against discovered JS, plus OSV-Scanner against any exposed
+    # manifest / lockfile, plus an LLM gap-fill for packages with no
+    # local cache hit. Cheap (~30 s for most targets) and catches the
+    # outdated-component class that the traditional scanners miss.
     if profile == "quick":
-        return ["testssl", "nuclei"]
+        return ["sca", "testssl", "nuclei"]
     if profile == "thorough":
         # ffuf runs first so its discovered paths can inform later passes
         # (ferent tooling reads the same scan_dir). Even when nothing else
         # consumes them, the discovered admin/backup/dotfile paths are
         # high-signal findings on their own.
-        return ["ffuf", "testssl", "nuclei", "nikto", "wapiti"]
+        return ["sca", "ffuf", "testssl", "nuclei", "nikto", "wapiti"]
     if profile == "premium":
         # Everything thorough does, plus sqlmap + dalfox + the
         # high-fidelity probe pass that targets bugs the traditional
         # tools systematically miss.
-        return ["ffuf", "testssl", "nuclei", "nikto", "wapiti",
+        return ["sca", "ffuf", "testssl", "nuclei", "nikto", "wapiti",
                 "sqlmap", "dalfox", "enhanced_testing"]
-    return ["testssl", "nuclei", "nikto", "wapiti"]  # standard
+    return ["sca", "testssl", "nuclei", "nikto", "wapiti"]  # standard
+
+
+# ---- SCA dispatch -----------------------------------------------------------
+#
+# 'sca' is a synthetic tool just like 'enhanced_testing': not a single
+# scanner subprocess but a multi-pass in-process runner (manifest hunt +
+# retire.js + osv-scanner + LLM augmentation). Implemented in
+# scripts/sca_runner.py; wraps the same scan_dir / meta.json / register-
+# up-front pattern as run_tool so the orphan sweeper treats it identically.
+
+def run_sca(target: str, profile: str, aid: int) -> str:
+    scan_id = new_scan_id()
+    sdir = SCANS_DIR / scan_id
+    sdir.mkdir(parents=True, exist_ok=True)
+    append_scan_id(aid, scan_id)
+    try:
+        return _run_sca_inner(target, scan_id, sdir, aid)
+    except BaseException:
+        detach_scan_id(aid, scan_id)
+        raise
+
+
+def _run_sca_inner(target: str, scan_id: str, sdir: Path,
+                   aid: int) -> str:
+    from scripts import sca_runner  # local import: keeps cold-start light
+    log = sdir / "output.log"
+    log_fh = open(log, "ab", buffering=0)
+    log_fh.write(f"$ sca_runner --target {target}\n".encode())
+    started = now()
+    try:
+        summary = sca_runner.run(target, sdir, assessment_id=aid,
+                                 use_llm=True)
+    except Exception as e:
+        # Don't crash the whole assessment because the SCA pass failed —
+        # log the error, mark the meta.json status as 'error', and let
+        # the rest of the profile run.
+        log_fh.write(f"sca_runner crashed: {type(e).__name__}: {e}\n".encode())
+        summary = {"target": target, "error": f"{type(e).__name__}: {e}"}
+        meta_status = "error"
+    else:
+        log_fh.write(json.dumps(summary, indent=2, default=str).encode())
+        log_fh.write(b"\n")
+        meta_status = "finished"
+
+    meta = {
+        "id": scan_id, "tool": "sca", "target": target, "extra": "",
+        "auth_profile": None, "auth_warning": None,
+        "cmd": ["sca_runner", target],
+        "pid": None, "status": meta_status,
+        "started_at": started, "finished_at": now(),
+        "exit_code": 0 if meta_status == "finished" else 2,
+        "summary": summary,
+    }
+    (sdir / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+    log_fh.close()
+    return scan_id
 
 
 # ---- enhanced_testing dispatch ---------------------------------------------
@@ -672,6 +733,20 @@ def main() -> int:
                     update(aid, current_step=f"enhanced_testing → {target}")
                     scan_id = run_enhanced_testing(target, profile, aid=aid)
                     added = insert_findings(aid, scan_id, "enhanced_testing",
+                                            endpoint=enrich_endpoint,
+                                            target=target)
+                    total_findings += added
+                    update(aid, total_findings=total_findings)
+                    continue
+                if tool == "sca":
+                    # Software Composition Analysis — manifest hunt +
+                    # retire.js + osv-scanner + LLM augmentation. Runs
+                    # once per scheme so https-only and http-only paths
+                    # are both inspected; the LLM cache de-dupes
+                    # repeated lookups across schemes.
+                    update(aid, current_step=f"sca → {target}")
+                    scan_id = run_sca(target, profile, aid=aid)
+                    added = insert_findings(aid, scan_id, "sca",
                                             endpoint=enrich_endpoint,
                                             target=target)
                     total_findings += added

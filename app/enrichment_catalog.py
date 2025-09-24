@@ -502,6 +502,60 @@ BY_OWASP = {
             "SSRF cannot reach internal infrastructure."
         ),
     },
+
+    "A06:2021-Vulnerable_and_Outdated_Components": {
+        "suggested_priority": "p2",
+        "description_long": (
+            "A third-party library, framework, or runtime component in "
+            "use is at a version with publicly known vulnerabilities. "
+            "These findings come from the SCA stage, which fingerprints "
+            "JavaScript libraries against retire.js, audits any exposed "
+            "lockfile via OSV-Scanner, and consults a local cache "
+            "(populated from OSV / retire / nuclei templates / LLM "
+            "lookups) for any package without a direct hit."
+        ),
+        "impact": (
+            "Vulnerable components import the bug into your application "
+            "verbatim. The blast radius depends on the specific CVE, but "
+            "the common cases are: client-side XSS via DOM-manipulation "
+            "library bugs, RCE via deserialization in server-side "
+            "frameworks, and information disclosure via debug or "
+            "diagnostic endpoints exposed by an old admin module."
+        ),
+        "remediation_long": (
+            "Upgrade to the patched version. Where an upgrade is not "
+            "immediately possible, mitigate the specific exploit path "
+            "(e.g. restrict which sinks consume untrusted input, add a "
+            "Subresource Integrity hash, or pin a CSP that blocks the "
+            "vulnerable behaviour). Add the package to a recurring SCA "
+            "report so the next disclosure is caught quickly."
+        ),
+        "remediation_steps": _steps(
+            "Identify the consuming code paths. Most upgrades are safe; "
+            "a small number require code changes for breaking API moves.",
+            "Upgrade to the first non-vulnerable version per the advisory.",
+            "Re-run the SCA stage to confirm the finding clears.",
+            "Add the package to a tracked dependency manifest checked "
+            "into source control so the upgrade is repeatable across "
+            "environments.",
+            "If you cannot upgrade, document the compensating control "
+            "(CSP, SRI, code-level input filter) and add a regression "
+            "test that asserts the control still applies.",
+        ),
+        "references": [
+            "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/",
+            "https://cheatsheetseries.owasp.org/cheatsheets/Vulnerable_Dependency_Management_Cheat_Sheet.html",
+            "https://cwe.mitre.org/data/definitions/1104.html",
+            "https://osv.dev/",
+            "https://retirejs.github.io/retire.js/",
+        ],
+        "user_story": (
+            "As an application owner, I want every third-party "
+            "component in our stack to be inventoried, watched for new "
+            "advisories, and upgraded on a defined cadence so that a "
+            "newly disclosed CVE never sits in production unnoticed."
+        ),
+    },
 }
 
 

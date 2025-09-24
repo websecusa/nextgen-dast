@@ -482,6 +482,54 @@ async def lifespan(app):
     # (pre-fix) and manual-DELETE / crash-mid-cleanup cases.
     ORPHAN_SWEEP_EVERY = 60   # passes (= once an hour at 60s/pass)
 
+    # SCA + scanner-update background refresh. Pulled into the same
+    # sweeper to avoid a second long-lived task. The interval is
+    # configurable via the `sca_update_interval_hours` config row so
+    # an operator can throttle (or effectively disable, by setting it
+    # very high) without rebuilding the image. The actual refresh runs
+    # in a worker thread so the asyncio loop is not blocked while
+    # network downloads stream in.
+    import threading
+    # Seed last-run timestamp from the config row written by the previous
+    # container's last successful refresh — otherwise every restart kicks
+    # off a brand-new update cycle even when the cache is still fresh.
+    sca_state = {"last_run_at": 0.0, "in_flight": False}
+    try:
+        _row = db.query_one("SELECT value FROM config WHERE `key`=%s",
+                            ("sca_last_updated_at",))
+        if _row and (_row.get("value") or "").strip():
+            sca_state["last_run_at"] = datetime.strptime(
+                _row["value"], "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        pass
+
+    def _sca_interval_hours() -> float:
+        # Default 24 h. Out-of-band edits to the config row are picked
+        # up on the next sweeper tick.
+        try:
+            row = db.query_one(
+                "SELECT value FROM config WHERE `key`=%s",
+                ("sca_update_interval_hours",))
+            if row and (row.get("value") or "").strip():
+                return max(1.0, float(row["value"]))
+        except Exception:
+            pass
+        return 24.0
+
+    def _sca_refresh_thread():
+        # Imported lazily so the app can boot even if scripts/ is missing
+        # (e.g. an air-gapped image stripped of the updater).
+        try:
+            from scripts import update_scanners as _upd
+            _upd.run(scope="all",
+                     log_path=Path("/data/logs/sca_update.log"))
+        except Exception as e:
+            print(f"[sca-update] refresh failed: {e!r}", flush=True)
+        finally:
+            sca_state["in_flight"] = False
+            sca_state["last_run_at"] = time.time()
+
     async def sweeper():
         nonlocal_pass = {"n": 0}
         while True:
@@ -504,6 +552,21 @@ async def lifespan(app):
                     cleanup_mod.sweep_orphans()
                 except Exception:
                     pass
+            # Once per sweeper tick: check whether the SCA / scanner
+            # update is due and (if so, and not already running) kick
+            # off a background refresh thread.
+            try:
+                if not sca_state["in_flight"]:
+                    age_h = (time.time() - sca_state["last_run_at"]) / 3600.0
+                    if age_h >= _sca_interval_hours():
+                        sca_state["in_flight"] = True
+                        threading.Thread(
+                            target=_sca_refresh_thread,
+                            name="sca-update",
+                            daemon=True,
+                        ).start()
+            except Exception:
+                pass
             await asyncio.sleep(60)
 
     task = asyncio.create_task(sweeper())
@@ -4048,6 +4111,190 @@ async def admin_database_restore(file: UploadFile = File(...)):
     elapsed = result.get("elapsed_seconds", "?")
     return redirect(
         f"/admin/database?msg=restore+complete+(elapsed+{elapsed}s)")
+
+
+# SCA database admin ----------------------------------------------------------
+#
+# Surfaces the cached vulnerability inventory, observed-package list, and
+# scanner overlay versions; lets admins trigger an immediate refresh and
+# add manual cache overrides. The refresh button spawns
+# scripts/update_scanners.run() on a worker thread so the request returns
+# in milliseconds while the long download proceeds in the background.
+
+import sca as sca_mod
+from scripts import update_scanners as updater_mod
+
+
+@app.get("/admin/sca", response_class=HTMLResponse)
+def admin_sca_page(request: Request, msg: str = ""):
+    """Render the SCA admin landing page."""
+    interval_h = 24
+    sig_max_age = 7
+    try:
+        r = db.query_one("SELECT value FROM config WHERE `key`=%s",
+                         ("sca_update_interval_hours",))
+        if r and (r.get("value") or "").strip():
+            interval_h = int(float(r["value"]))
+        r = db.query_one("SELECT value FROM config WHERE `key`=%s",
+                         ("sca_signature_max_age_days",))
+        if r and (r.get("value") or "").strip():
+            sig_max_age = int(float(r["value"]))
+    except Exception:
+        pass
+    last_at = ""
+    try:
+        r = db.query_one("SELECT value FROM config WHERE `key`=%s",
+                         ("sca_last_updated_at",))
+        if r:
+            last_at = r.get("value") or ""
+    except Exception:
+        pass
+    # Recent packages list — bound to keep the page fast even after
+    # thousands of assessments have populated the cache.
+    packages = db.query(
+        "SELECT p.ecosystem, p.name, p.version, p.last_seen, "
+        "       (SELECT COUNT(*) FROM sca_vulnerabilities v "
+        "         WHERE v.ecosystem=p.ecosystem AND v.package_name=p.name "
+        "           AND NOT (v.source='llm' AND IFNULL(v.cve_id,'')='' "
+        "                    AND v.summary LIKE 'no known%')) AS vuln_count "
+        "FROM sca_packages p "
+        "ORDER BY p.last_seen DESC LIMIT 100"
+    )
+    vulns = db.query(
+        "SELECT * FROM sca_vulnerabilities "
+        "WHERE NOT (source='llm' AND IFNULL(cve_id,'')='' "
+        "          AND summary LIKE 'no known%') "
+        "ORDER BY fetched_at DESC LIMIT 50"
+    )
+    log_path = Path("/data/logs/sca_update.log")
+    recent_log = ""
+    if log_path.is_file():
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 8192))
+                recent_log = fh.read().decode("utf-8", "replace")
+        except OSError:
+            pass
+    return templates.TemplateResponse(
+        "admin/sca.html",
+        ctx(request,
+            msg=msg,
+            stats=sca_mod.stats(),
+            packages=packages,
+            vulns=vulns,
+            interval_hours=interval_h,
+            sig_max_age_days=sig_max_age,
+            last_updated_at=last_at,
+            recent_log=recent_log,
+            updater_status=updater_mod.status()),
+    )
+
+
+@app.get("/admin/sca/log", response_class=PlainTextResponse)
+def admin_sca_log(tail: int = 4096):
+    """Plain-text log tail for the SSE-ish polling fetch in sca.html.
+    Caps the read window so a runaway log file can't OOM the page."""
+    log_path = Path("/data/logs/sca_update.log")
+    if not log_path.is_file():
+        return PlainTextResponse("", status_code=200)
+    tail = max(256, min(int(tail or 4096), 65536))
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - tail))
+            data = fh.read().decode("utf-8", "replace")
+        return PlainTextResponse(data, status_code=200)
+    except OSError:
+        return PlainTextResponse("(log read error)", status_code=200)
+
+
+@app.post("/admin/sca/update")
+def admin_sca_update(scope: str = Form("all"),
+                     csrf_token: str = Form("")):
+    """Kick off a refresh on a daemon thread. Returns immediately so
+    the admin doesn't sit on a 5-minute request — the SSE log tail in
+    sca.html shows live progress."""
+    # csrf check is enforced by the standard pattern when present;
+    # the form ships csrf_token from the rendered context.
+    if scope not in ("all", "scanners", "sca"):
+        return redirect("/admin/sca?msg=invalid+scope")
+    import threading
+    def _bg():
+        try:
+            updater_mod.run(scope=scope,
+                            log_path=Path("/data/logs/sca_update.log"))
+        except Exception as e:
+            print(f"[admin/sca/update] {e!r}", flush=True)
+    threading.Thread(target=_bg, name=f"sca-update-admin-{scope}",
+                     daemon=True).start()
+    from urllib.parse import quote_plus
+    return redirect("/admin/sca?msg=" + quote_plus(
+        f"refresh started ({scope}) — see live log below"))
+
+
+@app.post("/admin/sca/vuln")
+def admin_sca_vuln_add(
+    ecosystem: str = Form(...),
+    package_name: str = Form(...),
+    vulnerable_range: str = Form(...),
+    cve_id: str = Form(""),
+    ghsa_id: str = Form(""),
+    severity: str = Form("medium"),
+    cvss: str = Form(""),
+    summary: str = Form(""),
+    description: str = Form(""),
+    fixed_version: str = Form(""),
+    references: str = Form(""),
+    csrf_token: str = Form(""),
+):
+    """Insert a manual cache row. The lock flag is set on insert so
+    later automatic refreshes don't overwrite the admin's value."""
+    refs = [u.strip() for u in (references or "").splitlines() if u.strip()]
+    new_id = sca_mod.upsert_vuln(
+        ecosystem.strip(), package_name.strip(),
+        vulnerable_range=vulnerable_range.strip(),
+        cve_id=(cve_id.strip() or None),
+        ghsa_id=(ghsa_id.strip() or None),
+        severity=severity.strip().lower(),
+        cvss=(cvss.strip() or None),
+        summary=summary.strip(),
+        description=description.strip(),
+        fixed_version=(fixed_version.strip() or None),
+        references=refs,
+        source="manual",
+    )
+    # Lock the row so automatic refreshes can't blow it away. upsert_vuln
+    # already short-circuits when is_locked=1, but a brand-new row needs
+    # the explicit flag set after insert.
+    db.execute("UPDATE sca_vulnerabilities SET is_locked=1 WHERE id=%s",
+               (new_id,))
+    return redirect("/admin/sca?msg=manual+entry+added+(locked)")
+
+
+@app.get("/admin/sca/config", response_class=HTMLResponse)
+def admin_sca_config(request: Request, msg: str = ""):
+    rows = db.query(
+        "SELECT `key`, value FROM config "
+        "WHERE `key` IN ('sca_update_interval_hours','sca_signature_max_age_days') "
+        "ORDER BY `key`")
+    return templates.TemplateResponse(
+        "admin/sca.html",
+        ctx(request, msg=msg or "Edit values inline; submit each form to save.",
+            stats=sca_mod.stats(),
+            packages=[], vulns=[],
+            interval_hours=int(float(next((r["value"] for r in rows
+                                            if r["key"] == "sca_update_interval_hours"
+                                            and r.get("value")), 24))),
+            sig_max_age_days=int(float(next((r["value"] for r in rows
+                                              if r["key"] == "sca_signature_max_age_days"
+                                              and r.get("value")), 7))),
+            last_updated_at="",
+            recent_log="",
+            updater_status=updater_mod.status()),
+    )
 
 
 # Reports ---------------------------------------------------------------------

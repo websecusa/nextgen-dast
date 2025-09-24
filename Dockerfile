@@ -76,6 +76,38 @@ RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
     && chmod +x /usr/local/bin/dalfox \
     && rm /tmp/dalfox.tar.gz
 
+# Node.js — runtime for retire.js (and the npm/yarn/pnpm audit CLIs invoked
+# by the SCA stage when an exposed lockfile is retrieved). The Debian
+# `nodejs` package in trixie is current enough; we only use it for the
+# audit + retire.js binaries, never as a server runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nodejs \
+        npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm config set update-notifier false \
+    && npm install -g --no-fund --no-audit \
+        retire@5.2.5 \
+        yarn@1.22.22 \
+        pnpm@9.15.0
+
+# retire.js refreshes its signature DB at runtime, but we bake the
+# upstream `jsrepository.json` and a copy of the OSV-Scanner so the
+# image works fully offline on first boot. scripts/update_scanners.py
+# refreshes both periodically once the container has network access.
+RUN mkdir -p /opt/sca/retire \
+    && curl -sSL -o /opt/sca/retire/jsrepository.json \
+        "https://raw.githubusercontent.com/RetireJS/retire.js/master/repository/jsrepository.json"
+
+# OSV-Scanner — multi-ecosystem SCA from Google. One binary covers
+# npm, pypi, gem, maven, go, composer, cargo, nuget. We use it both
+# for online lookups (osv.dev) and against the offline OSV DB that
+# scripts/update_scanners.py refreshes into /data/sca/osv-db/.
+ARG OSV_SCANNER_VERSION=1.9.2
+RUN ARCH=$(dpkg --print-architecture | sed 's/x86_64/amd64/') \
+    && curl -sSL -o /usr/local/bin/osv-scanner \
+        "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_${ARCH}" \
+    && chmod +x /usr/local/bin/osv-scanner
+
 # ffuf — fast web fuzzer (Go binary). Used for content discovery
 # (paths) in the thorough/premium profiles. The wordlist is vendored
 # at toolkit/wordlists/web-content.txt (see toolkit/wordlists/SOURCES.md
@@ -137,7 +169,9 @@ COPY db/ /app/db/
 # probes have a single import path.
 COPY enhanced_testing/ /app/enhanced_testing/
 
-RUN mkdir -p /data/flows /data/logs /data/scans
+RUN mkdir -p /data/flows /data/logs /data/scans \
+             /data/sca /data/sca/osv-db /data/sca/manifests \
+             /data/scanners
 
 EXPOSE 8888 9443
 

@@ -1,0 +1,21 @@
+{
+  "name": "sca_js_libraries",
+  "version": "1.0",
+  "summary": "Identify outdated/vulnerable JS libraries on a target page using retire.js.",
+  "validates": [
+    "A06:2021-Vulnerable_and_Outdated_Components",
+    "CWE-1104"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 40,
+  "args": {
+    "--url":            "Target page URL (required)",
+    "--max-urls":       "Cap how many <script src> URLs to fetch (default 20)",
+    "--component":      "Validate only against this component name (e.g. jquery)",
+    "--min-severity":   "Minimum vuln severity that counts as validated (default medium)",
+    "--cookie":         "Cookie header value",
+    "--header":         "Extra header 'Name: value' (repeatable)",
+    "--user-agent":     "User-Agent override"
+  }
+}

@@ -724,6 +724,46 @@ def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
 
 # ---- dispatcher -------------------------------------------------------------
 
+# ---- sca --------------------------------------------------------------------
+#
+# The SCA stage (scripts/sca_runner.py) writes <scan_dir>/sca/findings.json
+# as a list of already-normalized finding dicts. Each entry conforms to
+# the same shape every other parser emits, so this parser is mostly a
+# JSON load + per-row sanity clamp (severity ∈ allowed enum, raw_data
+# round-trippable).
+
+def parse_sca(scan_dir: Path) -> Iterable[dict]:
+    p = scan_dir / "sca" / "findings.json"
+    if not p.exists():
+        return
+    try:
+        rows = json.loads(p.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(rows, list):
+        return
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        sev = (r.get("severity") or "info").lower()
+        if sev not in ("critical", "high", "medium", "low", "info"):
+            sev = "info"
+        yield {
+            "source_tool": "sca",
+            "severity": sev,
+            "title": (r.get("title") or "")[:500],
+            "description": r.get("description") or "",
+            "owasp_category": r.get("owasp_category") or
+                              "A06:2021-Vulnerable_and_Outdated_Components",
+            "cwe": r.get("cwe"),
+            "cvss": r.get("cvss"),
+            "evidence_url": r.get("evidence_url"),
+            "evidence_method": r.get("evidence_method") or "GET",
+            "remediation": r.get("remediation") or "",
+            "raw_data": r.get("raw_data") or {},
+        }
+
+
 PARSERS = {
     "nuclei":  parse_nuclei,
     "nikto":   parse_nikto,
@@ -732,6 +772,7 @@ PARSERS = {
     "sqlmap":  parse_sqlmap,
     "dalfox":  parse_dalfox,
     "ffuf":    parse_ffuf,
+    "sca":     parse_sca,
     "enhanced_testing": parse_enhanced_testing,
 }
 
