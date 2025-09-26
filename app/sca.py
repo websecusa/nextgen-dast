@@ -420,10 +420,13 @@ def stats() -> dict:
     try:
         out["packages"] = (db.query_one("SELECT COUNT(*) c FROM sca_packages")
                            or {}).get("c", 0)
+        # PyMySQL runs the query through Python's % formatting even when
+        # the args tuple is empty, so every literal % in SQL must be
+        # escaped as %% — including inside string-literals like LIKE.
         out["vulnerabilities"] = (
             db.query_one("SELECT COUNT(*) c FROM sca_vulnerabilities "
                          "WHERE NOT (source='llm' AND IFNULL(cve_id,'')='' "
-                         "          AND summary LIKE 'no known%')")
+                         "          AND summary LIKE 'no known%%')")
             or {}).get("c", 0)
         out["by_source"] = {
             r["source"]: r["c"] for r in db.query(
@@ -434,7 +437,7 @@ def stats() -> dict:
             r["severity"]: r["c"] for r in db.query(
                 "SELECT severity, COUNT(*) c FROM sca_vulnerabilities "
                 "WHERE NOT (source='llm' AND IFNULL(cve_id,'')='' "
-                "          AND summary LIKE 'no known%') "
+                "          AND summary LIKE 'no known%%') "
                 "GROUP BY severity")
         }
     except Exception:

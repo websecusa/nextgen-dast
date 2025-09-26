@@ -4151,19 +4151,21 @@ def admin_sca_page(request: Request, msg: str = ""):
         pass
     # Recent packages list — bound to keep the page fast even after
     # thousands of assessments have populated the cache.
+    # PyMySQL runs the query through Python's % formatting even with an
+    # empty args tuple — every literal % in SQL has to be escaped %%.
     packages = db.query(
         "SELECT p.ecosystem, p.name, p.version, p.last_seen, "
         "       (SELECT COUNT(*) FROM sca_vulnerabilities v "
         "         WHERE v.ecosystem=p.ecosystem AND v.package_name=p.name "
         "           AND NOT (v.source='llm' AND IFNULL(v.cve_id,'')='' "
-        "                    AND v.summary LIKE 'no known%')) AS vuln_count "
+        "                    AND v.summary LIKE 'no known%%')) AS vuln_count "
         "FROM sca_packages p "
         "ORDER BY p.last_seen DESC LIMIT 100"
     )
     vulns = db.query(
         "SELECT * FROM sca_vulnerabilities "
         "WHERE NOT (source='llm' AND IFNULL(cve_id,'')='' "
-        "          AND summary LIKE 'no known%') "
+        "          AND summary LIKE 'no known%%') "
         "ORDER BY fetched_at DESC LIMIT 50"
     )
     log_path = Path("/data/logs/sca_update.log")
