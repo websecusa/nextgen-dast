@@ -99,6 +99,11 @@ MANIFEST_PATHS: list[tuple[str, str, str]] = [
 # Cap how many JS URLs we feed to retire.js per target. Each URL is one
 # HTTP fetch — be polite.
 MAX_JS_URLS = 30
+# Cap how many *pages* we crawl in search of <script src> tags. The root
+# of an SPA often has zero scripts — login / dashboard / index pages are
+# where the real library refs live, so we walk a small fixed seed plus
+# any paths surfaced by a sibling ffuf run.
+MAX_CRAWL_PAGES = 20
 # Default per-request timeout. Targets behind misbehaving WAFs sometimes
 # stall; bound the runner instead of hanging the whole assessment.
 HTTP_TIMEOUT_S = 15
@@ -106,6 +111,21 @@ HTTP_TIMEOUT_S = 15
 # files can be huge but we only need the first ~2 MB for retire's
 # version-string fingerprint to work.
 MAX_BYTES = 2_000_000
+
+# Common landing pages where SPA / classic-app frameworks tend to load
+# their JS bundles. Fetched in addition to the target root so a target
+# whose `/` is a redirect or empty placeholder still gets its libraries
+# fingerprinted. Kept small + ordered by likelihood.
+CRAWL_SEED_PATHS: tuple[str, ...] = (
+    "/",
+    "/login", "/login.php", "/login.html",
+    "/signin", "/sign-in",
+    "/index", "/index.php", "/index.html",
+    "/home", "/dashboard",
+    "/admin", "/admin.php",
+    "/portal", "/console",
+    "/app", "/app/index.html",
+)
 
 
 # ---- HTTP helpers -----------------------------------------------------------
@@ -203,34 +223,106 @@ _SCRIPT_SRC_RE = re.compile(
 )
 
 
-def discover_js_urls(target: str) -> list[str]:
-    """Fetch the target's root HTML and extract every <script src=...>
-    and <link rel=modulepreload href=...> URL pointing at a JS asset.
-    Returns an absolute-URL list capped at MAX_JS_URLS."""
-    result = _fetch(target)
-    if not result:
+def _ffuf_paths_from_db(target: str,
+                        assessment_id: Optional[int]) -> list[str]:
+    """Pull every URL ffuf has already discovered for this assessment so
+    SCA can crawl pages it would otherwise have missed (e.g. /profile.php,
+    /user/dashboard). Returns an empty list when ffuf has not run yet or
+    the DB layer is unavailable."""
+    if _db is None or assessment_id is None:
         return []
-    status, body, _ = result
-    if status >= 400 or not body:
+    try:
+        rows = _db.query(
+            "SELECT evidence_url FROM findings "
+            "WHERE assessment_id=%s AND source_tool='ffuf' "
+            "  AND evidence_url IS NOT NULL AND evidence_url != ''",
+            (assessment_id,),
+        )
+    except Exception:
         return []
     urls: list[str] = []
     seen: set[str] = set()
-    for m in _SCRIPT_SRC_RE.finditer(body):
-        ref = m.group(1).decode("utf-8", "replace").strip()
-        if not ref or ref.startswith(("data:", "javascript:", "mailto:")):
+    target_host = urllib.parse.urlparse(target).netloc
+    for r in rows or []:
+        u = (r.get("evidence_url") or "").strip()
+        if not u:
             continue
-        absolute = urllib.parse.urljoin(target, ref)
-        # Skip non-JS assets — modulepreload may also link to fonts etc.
-        if not (absolute.split("?", 1)[0].endswith(".js") or
-                "/js/" in absolute or "/static/" in absolute):
+        # Limit to the same host so a stray cross-host evidence URL
+        # (rare, but possible) doesn't make us scan a third party.
+        if urllib.parse.urlparse(u).netloc != target_host:
             continue
-        if absolute in seen:
+        if u in seen:
             continue
-        seen.add(absolute)
-        urls.append(absolute)
-        if len(urls) >= MAX_JS_URLS:
-            break
+        seen.add(u)
+        urls.append(u)
     return urls
+
+
+def crawl_pages_for_js(target: str, *,
+                       assessment_id: Optional[int] = None
+                       ) -> tuple[list[str], list[str]]:
+    """Walk a small set of likely landing pages plus any ffuf-discovered
+    paths, harvesting every <script src> / <link rel=modulepreload> URL
+    that looks like a JS asset. Returns (js_urls, pages_visited).
+
+    The seed list is intentionally small + alphabetical-ish — we are
+    *not* a crawler. Pages that 404 are skipped; pages that do return
+    HTML are scraped for script tags. Order is deterministic so re-runs
+    are stable."""
+    base = target.rstrip("/")
+    pages_to_visit: list[str] = []
+
+    # Built-in seed pages relative to the target root.
+    for p in CRAWL_SEED_PATHS:
+        pages_to_visit.append(base + p if p != "/" else target)
+
+    # ffuf cross-pollination: any path ffuf already found is fair game.
+    for u in _ffuf_paths_from_db(target, assessment_id):
+        if u not in pages_to_visit:
+            pages_to_visit.append(u)
+
+    # Hard cap so a misbehaving ffuf scan can't make us hammer the target.
+    pages_to_visit = pages_to_visit[:MAX_CRAWL_PAGES]
+
+    js_urls: list[str] = []
+    seen: set[str] = set()
+    pages_visited: list[str] = []
+
+    for page in pages_to_visit:
+        result = _fetch(page)
+        if not result:
+            continue
+        status, body, _ = result
+        # Include 401/403 too — the body sometimes still references
+        # public JS even when the auth gate is in front of dynamic
+        # content (e.g. /admin gives a login screen with jquery).
+        if status >= 500 or not body:
+            continue
+        pages_visited.append(page)
+        for m in _SCRIPT_SRC_RE.finditer(body):
+            ref = m.group(1).decode("utf-8", "replace").strip()
+            if not ref or ref.startswith(("data:", "javascript:", "mailto:")):
+                continue
+            absolute = urllib.parse.urljoin(page, ref)
+            if not (absolute.split("?", 1)[0].endswith(".js") or
+                    "/js/" in absolute or "/static/" in absolute):
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            js_urls.append(absolute)
+            if len(js_urls) >= MAX_JS_URLS:
+                return js_urls, pages_visited
+    return js_urls, pages_visited
+
+
+# Backwards-compatible alias for callers (CLI, tests) that only have a
+# single target URL and don't carry an assessment context.
+def discover_js_urls(target: str) -> list[str]:
+    """Single-page legacy entry point. Prefer crawl_pages_for_js() for
+    integration with the orchestrator's per-assessment context."""
+    js_urls, _ = crawl_pages_for_js(target)
+    return js_urls
 
 
 # ---- retire.js wrapper ------------------------------------------------------
@@ -247,15 +339,37 @@ def _retire_signature_path() -> Optional[str]:
     return None
 
 
-def run_retire(js_urls: Iterable[str], scan_dir: Path) -> list[dict]:
-    """Invoke retire.js once per URL (it doesn't support batching from
-    the command line). Returns a list of {url, component, version,
-    vulnerabilities[]} dicts — one per detected library, multiple per URL
-    if the file bundles several frameworks. Failures are logged to
-    <scan_dir>/sca/retire.log and skipped silently in the return value."""
-    retire_bin = "/usr/bin/retire"
+def fetch_js_files(js_urls: Iterable[str],
+                   scan_dir: Path) -> list[tuple[str, Path]]:
+    """Download each JS URL into <scan_dir>/sca/js/. Returns a list of
+    (original_url, local_path) tuples. Failures (HTTP error, body too
+    large, write errors) are skipped silently. Caller deduplicates."""
+    saved: list[tuple[str, Path]] = []
+    for url in js_urls:
+        result = _fetch(url)
+        if not result:
+            continue
+        status, body, _ = result
+        if status >= 400 or not body:
+            continue
+        tmp = scan_dir / "sca" / "js" / urllib.parse.quote(url, safe="")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            tmp.write_bytes(body)
+        except OSError:
+            continue
+        saved.append((url, tmp))
+    return saved
+
+
+def run_retire(js_files: Iterable[tuple[str, Path]],
+               scan_dir: Path) -> list[dict]:
+    """Invoke retire.js once per saved JS file. Takes the (url, path)
+    tuples produced by fetch_js_files() so we never re-download — the
+    crawl pass already paid the HTTP cost. Returns a list of
+    {url, component, version, vulnerabilities[]} dicts."""
+    retire_bin = "/usr/local/bin/retire"
     if not Path(retire_bin).is_file():
-        # retire is installed via npm -g; resolve the actual location.
         proc = subprocess.run(["which", "retire"], capture_output=True, text=True)
         retire_bin = proc.stdout.strip() or "retire"
     sig_arg: list[str] = []
@@ -268,24 +382,7 @@ def run_retire(js_urls: Iterable[str], scan_dir: Path) -> list[dict]:
     log_fh = open(log_path, "ab", buffering=0)
 
     findings: list[dict] = []
-    for url in js_urls:
-        # Download into a temp file — retire.js scans paths, not URLs.
-        result = _fetch(url)
-        if not result:
-            log_fh.write(f"[skip] could not fetch {url}\n".encode())
-            continue
-        status, body, _ = result
-        if status >= 400 or not body:
-            continue
-        # Stable temp path so re-runs overwrite, and so the path
-        # in the audit log matches what an analyst would re-scan.
-        tmp = scan_dir / "sca" / "js" / urllib.parse.quote(url, safe="")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            tmp.write_bytes(body)
-        except OSError:
-            continue
-
+    for url, tmp in js_files:
         # retire 5.x dropped the legacy --js flag — the binary now scans
         # JS by default and only takes --path. Keeping --exitwith 0 so a
         # detection doesn't make us read a non-zero exit as a failure.
@@ -302,8 +399,6 @@ def run_retire(js_urls: Iterable[str], scan_dir: Path) -> list[dict]:
         log_fh.write((proc.stdout or "")[:2000].encode() + b"\n")
         if proc.returncode not in (0, 13):  # 13 = vulnerabilities found
             log_fh.write(f"[exit {proc.returncode}] {proc.stderr[:400]}\n".encode())
-        # retire emits one JSON object — top-level is a list of file results,
-        # each with .results[] of detected components.
         try:
             data = json.loads(proc.stdout) if proc.stdout.strip() else {}
         except json.JSONDecodeError:
@@ -319,6 +414,177 @@ def run_retire(js_urls: Iterable[str], scan_dir: Path) -> list[dict]:
                 })
     log_fh.close()
     return findings
+
+
+# ---- JS content fingerprinting ---------------------------------------------
+#
+# retire.js's signatures match by either (a) URL path patterns or (b)
+# code shapes from a curated `jsrepository.json`. Both miss when a
+# library is rolled into a webpack/vite bundle without preserving the
+# upstream filename or shape — the exact failure mode we hit on scan 24
+# (jQuery 3.2.1 inside `core.min.js`). The grep pass below catches the
+# common case where the bundler kept the runtime version assignment
+# intact, even after minification:
+#
+#   jQuery 3.x:     `jquery"`...`"3.2.1"` — `q.fn.jquery="3.2.1"`
+#   Bootstrap 4:    `bootstrap.VERSION="4.1.3"` (often shortened to
+#                   `t.VERSION="4.1.3"` after minification, but the
+#                   nearby string `bootstrap` survives)
+#   AngularJS 1.x:  `version:{full:"1.7.9"`
+#   Vue 2/3:        `Vue.version="2.6.14"` / `version:"3.4.21"` after
+#                   `class Vue` or `function Vue(`
+#   React:          `React.version="16.13.1"` (compat across class +
+#                   functional builds)
+#   lodash:         `lodash.VERSION="4.17.21"` or `LODASH:` comment
+#   moment:         `moment.version="2.29.4"`
+#
+# Each pattern is paired with a (component, ecosystem) tuple. Matches
+# emit synthetic retire-style records that flow through the same vuln
+# lookup path (osv + cache + LLM) as real retire findings.
+
+_JS_FINGERPRINTS: list[tuple[str, str, "re.Pattern"]] = [
+    # (component, ecosystem, pattern with one capturing group → version)
+    #
+    # ---- runtime version assignments (post-minification survivors) -----
+    ("jquery",     "npm",
+     re.compile(rb"""(?:jQuery|jquery)\s*[.,]\s*fn\s*[.,]\s*jquery\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("jquery",     "npm",
+     re.compile(rb"""['"]jquery['"]\s*[,:]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("bootstrap",  "npm",
+     re.compile(rb"""(?:bootstrap|Bootstrap)[\s\S]{0,80}?VERSION\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("bootstrap",  "npm",
+     re.compile(rb"""['"]bootstrap['"]\s*[,:]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("angular",    "npm",
+     re.compile(rb"""angular[\s\S]{0,40}?version\s*[:=]\s*\{?\s*full\s*:\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("vue",        "npm",
+     re.compile(rb"""Vue[.,]\s*version\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("react",      "npm",
+     re.compile(rb"""React[.,]\s*version\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("lodash",     "npm",
+     re.compile(rb"""(?:lodash|LODASH)[\s\S]{0,40}?VERSION\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+    ("moment",     "npm",
+     re.compile(rb"""moment[.,]\s*version\s*[:=]\s*['"](\d+\.\d+\.\d+)['"]""")),
+]
+
+
+# JSDoc-style banner: `@module Foo ... @version 1.2.3`. This is the
+# upstream comment header that survives most minifiers (uglify-js
+# preserves /** ... */ blocks by default; webpack copy-loader keeps
+# them; CDN copies always do). Caught the jQuery 3.2.1 banner that
+# minified-jquery.com files ship by default.
+_BANNER_RE = re.compile(
+    rb"""@module\s+([A-Za-z][A-Za-z0-9_.\-]+)[\s\S]{0,400}?@version\s+(\d+\.\d+\.\d+)""",
+    re.IGNORECASE,
+)
+# Same idea, but the inverse ordering some libraries use: `@version`
+# appears BEFORE `@module`, and a couple ship `@name` instead.
+_BANNER_INV_RE = re.compile(
+    rb"""@version\s+(\d+\.\d+\.\d+)[\s\S]{0,400}?@(?:module|name)\s+([A-Za-z][A-Za-z0-9_.\-]+)""",
+    re.IGNORECASE,
+)
+# Plenty of libraries ship a /*! Foo v1.2.3 */ banner at the top of
+# their bundle (Bootstrap 4 / 5 do; Vue's UMD build does; Tailwind plugin
+# bundles do). Match that conservatively — must be one of a known set
+# of names so we don't mis-tag a custom build artifact.
+_KNOWN_NAMES_RE = re.compile(
+    rb"""\b(jquery|jQuery|bootstrap|Bootstrap|angular|AngularJS|vue|Vue|"""
+    rb"""react|React|lodash|Lodash|moment|Moment|tinymce|"""
+    rb"""ckeditor|CKEditor|jsencrypt|d3|dompurify|axios|tweetnacl|"""
+    rb"""underscore|Underscore|backbone|Backbone|handlebars|"""
+    rb"""knockout|ember|Ember|popper|Popper|tether)\s+v?(\d+\.\d+\.\d+)\b""",
+)
+
+
+def _banner_fingerprints(sample: bytes) -> Iterable[tuple[str, str]]:
+    """Yield (component_lower, version) pairs from comment-banner
+    patterns. Iteration order is deterministic so tests are stable."""
+    for m in _BANNER_RE.finditer(sample):
+        yield m.group(1).decode("ascii", "replace").lower(), \
+              m.group(2).decode("ascii", "replace")
+    for m in _BANNER_INV_RE.finditer(sample):
+        yield m.group(2).decode("ascii", "replace").lower(), \
+              m.group(1).decode("ascii", "replace")
+    for m in _KNOWN_NAMES_RE.finditer(sample):
+        yield m.group(1).decode("ascii", "replace").lower(), \
+              m.group(2).decode("ascii", "replace")
+
+
+# Component-name aliases — banner names get normalized to the OSV/npm
+# canonical name so the cache key matches what osv-scanner / retire emit.
+_NAME_ALIASES = {
+    "angularjs": "angular",
+    "underscore": "underscore",
+    "ckeditor": "ckeditor",
+}
+
+
+def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
+                           ) -> list[dict]:
+    """Grep saved JS bodies for hard-coded library version strings.
+    Returns retire.js-style records the runner can merge with real
+    retire output before the OSV / LLM pass.
+
+    Three classes of pattern, in order of specificity:
+      1. Per-library runtime assignments (e.g. `jQuery.fn.jquery="3.2.1"`)
+         — survive minification but require the bundler to keep the
+         exact property access.
+      2. JSDoc-style banner (`@module Foo ... @version 1.2.3`) — almost
+         always preserved by minifiers and CDN copies.
+      3. Loose `Foo v1.2.3` banner — only when the name is in a known
+         allowlist, to avoid false positives on custom build IDs.
+    """
+    out: list[dict] = []
+    for url, path in js_files:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        # Only inspect the first ~256 KB — version banners and the
+        # closure preamble where retire-style assignments live both
+        # land at the top of the file. Cap bounds CPU on multi-MB
+        # bundles.
+        sample = data[:262_144]
+        seen_for_file: set[tuple[str, str]] = set()
+
+        # Class 1 — per-library runtime assignments.
+        for component, ecosystem, pattern in _JS_FINGERPRINTS:
+            m = pattern.search(sample)
+            if not m:
+                continue
+            try:
+                version = m.group(1).decode("ascii", "replace")
+            except (IndexError, AttributeError):
+                continue
+            key = (component, version)
+            if key in seen_for_file:
+                continue
+            seen_for_file.add(key)
+            out.append({
+                "url": url,
+                "component": component,
+                "version": version,
+                "vulnerabilities": [],
+                "_ecosystem": ecosystem,
+                "_detector": "content-fingerprint",
+            })
+
+        # Class 2 + 3 — banner-style matches. Yields both the JSDoc
+        # `@module`/`@version` form and the `Foo v1.2.3` short form.
+        for raw_name, version in _banner_fingerprints(sample):
+            component = _NAME_ALIASES.get(raw_name, raw_name)
+            key = (component, version)
+            if key in seen_for_file:
+                continue
+            seen_for_file.add(key)
+            out.append({
+                "url": url,
+                "component": component,
+                "version": version,
+                "vulnerabilities": [],
+                "_ecosystem": "npm",
+                "_detector": "content-fingerprint-banner",
+            })
+    return out
 
 
 # ---- osv-scanner wrapper ----------------------------------------------------
@@ -669,8 +935,10 @@ def run(target: str, scan_dir: Path, *,
     summary: dict = {
         "target": target,
         "manifests_found": 0,
+        "pages_crawled": 0,
         "js_urls_scanned": 0,
         "retire_findings": 0,
+        "fingerprint_findings": 0,
         "osv_findings": 0,
         "llm_augment_findings": 0,
         "packages_observed": 0,
@@ -680,12 +948,88 @@ def run(target: str, scan_dir: Path, *,
     manifest_hits = hunt_manifests(target, sca_dir / "manifests")
     summary["manifests_found"] = len(manifest_hits)
 
-    # Pass 2 — JS library scan via retire.js
-    js_urls = discover_js_urls(target)
+    # Pass 2 — broaden the crawl so a target whose `/` has no scripts
+    # (very common — auth gates, marketing redirects, SPA shells) still
+    # gets its real script tags discovered. Then download once, reuse
+    # the saved blobs for both retire.js and the content-fingerprint
+    # pass.
+    js_urls, pages_visited = crawl_pages_for_js(
+        target, assessment_id=assessment_id)
+    summary["pages_crawled"] = len(pages_visited)
     summary["js_urls_scanned"] = len(js_urls)
-    retire_results = run_retire(js_urls, scan_dir) if js_urls else []
+    saved_files = fetch_js_files(js_urls, scan_dir) if js_urls else []
+    retire_results = run_retire(saved_files, scan_dir) if saved_files else []
     summary["retire_findings"] = sum(1 for r in retire_results
                                      if r.get("vulnerabilities"))
+
+    # Pass 2b — content-fingerprint pass. retire.js misses libraries
+    # rolled into bundles where the upstream filename and code shape
+    # are gone but the runtime version assignment survives
+    # (e.g. jQuery 3.2.1 inside a custom core.min.js). Synthetic
+    # results flow through the same OSV / cache / LLM lookup as real
+    # retire findings.
+    fingerprint_results = fingerprint_js_content(saved_files)
+    summary["fingerprint_findings"] = len(fingerprint_results)
+
+    # Pass 2c — synthesise a virtual package-lock.json from the
+    # fingerprint results so osv-scanner can produce deterministic CVE
+    # matches even when no real manifest is exposed and no LLM is
+    # configured. Covers the most important real-world case (a target
+    # that simply embeds vulnerable libraries in its own bundles, like
+    # jQuery 3.2.1 inside core.min.js) without paying any LLM tokens.
+    #
+    # osv-scanner picks the extractor by *filename* (`package-lock.json`,
+    # `yarn.lock`, etc.), so the synthetic file lives in its own subdir
+    # under the canonical name. Duplicate (name, version) pairs share
+    # one entry; multiple versions of the same package use disambiguated
+    # nested-path keys so npm lockfile v3 still parses cleanly.
+    if fingerprint_results:
+        synthetic_dir = sca_dir / "manifests" / "_synthetic"
+        synthetic_dir.mkdir(parents=True, exist_ok=True)
+        synthetic_path = synthetic_dir / "package-lock.json"
+        synthetic_packages: dict = {}
+        seen_versions: dict[str, set[str]] = {}
+        for rf in fingerprint_results:
+            name = rf.get("component") or ""
+            version = rf.get("version") or ""
+            eco = rf.get("_ecosystem") or "npm"
+            if not (name and version and eco == "npm"):
+                continue
+            versions = seen_versions.setdefault(name, set())
+            if version in versions:
+                continue
+            versions.add(version)
+            # First instance of a package goes at the canonical
+            # `node_modules/<name>` key; additional versions go under a
+            # nested path so the keys stay unique per npm v3 spec.
+            if len(versions) == 1:
+                key = f"node_modules/{name}"
+            else:
+                key = f"node_modules/{name}/_v{len(versions)}/node_modules/{name}"
+            synthetic_packages[key] = {
+                "version": version,
+                "name": name,
+                "resolved": (f"https://registry.npmjs.org/{name}/-/"
+                             f"{name}-{version}.tgz"),
+            }
+        if synthetic_packages:
+            synthetic_path.write_text(json.dumps({
+                "name": "nextgen-dast-fingerprint-synthetic",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "packages": synthetic_packages,
+            }))
+            # Insert at the head so osv-scanner finds it; flagged kind=
+            # "synthetic" so the parser doesn't emit a "manifest exposed"
+            # finding for our own scratch file.
+            manifest_hits.insert(0, {
+                "path": "_synthetic/package-lock.json",
+                "url": target,
+                "ecosystem": "npm",
+                "kind": "synthetic",
+                "saved_to": str(synthetic_path),
+                "bytes": synthetic_path.stat().st_size,
+            })
 
     # Pass 3 — OSV-Scanner over each retrieved manifest / lockfile
     osv_results = run_osv_scanner(manifest_hits, scan_dir)
@@ -697,7 +1041,12 @@ def run(target: str, scan_dir: Path, *,
     seen_pkg: set[tuple] = set()
 
     for hit in manifest_hits:
-        if hit.get("kind") == "leak":
+        kind = hit.get("kind")
+        if kind == "synthetic":
+            # Internal scratch file we generated from fingerprint hits —
+            # not an exposed asset on the target, so no finding row.
+            continue
+        if kind == "leak":
             findings.append(_leak_finding(hit))
         else:
             findings.append(_leaked_manifest_finding(hit))
@@ -711,6 +1060,63 @@ def run(target: str, scan_dir: Path, *,
                 if key not in seen_pkg:
                     seen_pkg.add(key)
                     packages.append(pkg)
+
+    # Synthetic fingerprint hits: register the (ecosystem, name, version)
+    # so the LLM augmentation pass picks them up. We don't generate a
+    # finding row here on its own — the OSV/LLM lookup will produce
+    # per-CVE rows. If the lookup finds nothing we still want the
+    # observation visible in the assessment, so emit an info-tier "Library
+    # detected" row for each unique fingerprint.
+    for rf in fingerprint_results:
+        eco = rf.get("_ecosystem") or "npm"
+        name = rf.get("component") or ""
+        version = rf.get("version") or ""
+        if not (name and version):
+            continue
+        key = (eco, name, version)
+        if key in seen_pkg:
+            continue
+        seen_pkg.add(key)
+        packages.append({
+            "ecosystem": eco,
+            "name": name,
+            "version": version,
+            "source_url": rf.get("url"),
+            "detection_method": "content-fingerprint",
+            "matched_cves": [],
+        })
+        # Surface the detection itself as an info row so analysts can see
+        # what the fingerprinter pulled, even when no vulnerability is
+        # later attached. Severity gets uplifted by the OSV/LLM rows when
+        # those add real CVEs against the same package.
+        findings.append({
+            "source_tool": "sca",
+            "severity": "info",
+            "title": (f"Library detected (content fingerprint): "
+                      f"{name} {version}"),
+            "description": (
+                f"{name}@{version} was identified by matching a runtime "
+                f"version string inside the JavaScript body served from "
+                f"{rf.get('url')}. Cross-referenced against the SCA "
+                f"vulnerability cache; any matching CVE will appear as a "
+                f"separate finding."),
+            "owasp_category": "A06:2021-Vulnerable_and_Outdated_Components",
+            "cwe": "1104",
+            "cvss": None,
+            "evidence_url": rf.get("url"),
+            "evidence_method": "GET",
+            "remediation": (
+                "Confirm the library version, then check the upstream "
+                "release notes / OSV record for known issues affecting "
+                "this version."),
+            "raw_data": {
+                "detector": "content-fingerprint",
+                "component": name,
+                "version": version,
+                "ecosystem": eco,
+                "url": rf.get("url"),
+            },
+        })
 
     for rec in osv_results:
         f = _normalize_osv_finding(rec)

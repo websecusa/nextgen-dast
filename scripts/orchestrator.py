@@ -389,19 +389,20 @@ def plan_for_profile(profile: str) -> list[str]:
     # manifest / lockfile, plus an LLM gap-fill for packages with no
     # local cache hit. Cheap (~30 s for most targets) and catches the
     # outdated-component class that the traditional scanners miss.
+    #
+    # Where ffuf is part of the profile (thorough / premium), it must
+    # run BEFORE sca so SCA can crawl ffuf's discovered paths in
+    # addition to its built-in seed list. quick / standard have no
+    # ffuf, so SCA falls back to the seed list alone.
     if profile == "quick":
         return ["sca", "testssl", "nuclei"]
     if profile == "thorough":
-        # ffuf runs first so its discovered paths can inform later passes
-        # (ferent tooling reads the same scan_dir). Even when nothing else
-        # consumes them, the discovered admin/backup/dotfile paths are
-        # high-signal findings on their own.
-        return ["sca", "ffuf", "testssl", "nuclei", "nikto", "wapiti"]
+        return ["ffuf", "sca", "testssl", "nuclei", "nikto", "wapiti"]
     if profile == "premium":
         # Everything thorough does, plus sqlmap + dalfox + the
         # high-fidelity probe pass that targets bugs the traditional
         # tools systematically miss.
-        return ["sca", "ffuf", "testssl", "nuclei", "nikto", "wapiti",
+        return ["ffuf", "sca", "testssl", "nuclei", "nikto", "wapiti",
                 "sqlmap", "dalfox", "enhanced_testing"]
     return ["sca", "testssl", "nuclei", "nikto", "wapiti"]  # standard
 

@@ -261,6 +261,13 @@ def parse_nikto(scan_dir: Path) -> Iterable[dict]:
             continue
         if _nikto_is_status(text):
             continue
+        # Suppress nikto's "Server banner changed from X to mitmproxy ..."
+        # warning. We *are* the proxy that mutated the banner — flagging
+        # ourselves makes the report look unprofessional and confuses the
+        # customer. The real upstream banner is intentionally rewritten by
+        # mitmproxy, not by the target.
+        if "mitmproxy" in text.lower() and "server banner" in text.lower():
+            continue
         if text in seen:
             continue
         seen.add(text)
@@ -698,6 +705,19 @@ def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
         data = json.loads(p.read_text(errors="replace"))
     except Exception:
         return
+
+    # ffuf classifies each hit two ways: (a) sensitive-path matches like
+    # /admin, /.git/, /backup → keep as discrete findings (real signal),
+    # (b) generic 200/301/302 hits with no sensitive pattern → these are
+    # just sitemap entries that inflate the finding count without telling
+    # the analyst anything new. We aggregate (b) into one info-severity
+    # "Sitemap discovered" row whose description lists every path; (a)
+    # still yields one row per hit so the analyst can triage them.
+    GENERIC_TITLE = "Discovered path (content discovery)"
+    sitemap_paths: list[str] = []
+    sitemap_raw: list[dict] = []
+    primary_url: str = ""
+
     # ffuf JSON shape: {"results": [{"url": "...", "status": 301, ...}, ...]}
     for it in data.get("results", []) or []:
         url = it.get("url") or ""
@@ -705,10 +725,15 @@ def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
             continue
         status = it.get("status")
         sev, title, owasp, cwe = _ffuf_classify(url, status)
-        # Always surface the response status in the description so the
-        # analyst sees at a glance what ffuf actually got. For gated
-        # responses we already downgraded severity + retitled in
-        # _ffuf_classify, so the description here is purely informational.
+        if title == GENERIC_TITLE:
+            # Generic hit — fold into the sitemap aggregate.
+            if not primary_url:
+                primary_url = url
+            status_note = f" ({status})" if status else ""
+            sitemap_paths.append(f"{url}{status_note}")
+            sitemap_raw.append(it)
+            continue
+        # Sensitive-pattern hit — emit as its own finding.
         status_note = f" (HTTP {status})" if status else ""
         yield {
             "source_tool": "ffuf",
@@ -719,6 +744,26 @@ def parse_ffuf(scan_dir: Path) -> Iterable[dict]:
             "cwe": cwe,
             "evidence_url": url,
             "raw_data": it,
+        }
+
+    if sitemap_paths:
+        # One info row covers all generic hits. Caps the description so a
+        # 5,000-path discovery doesn't blow the DB column.
+        joined = "\n".join(sitemap_paths[:200])
+        more = (f"\n... and {len(sitemap_paths) - 200} more"
+                if len(sitemap_paths) > 200 else "")
+        yield {
+            "source_tool": "ffuf",
+            "severity": "info",
+            "title": (f"Sitemap: {len(sitemap_paths)} path(s) discovered "
+                      f"via content discovery"),
+            "description": ("Paths reachable on the target. These are not "
+                            "vulnerabilities themselves but help map "
+                            "attack surface.\n\n" + joined + more),
+            "owasp_category": "A05:2021-Security_Misconfiguration",
+            "cwe": "200",
+            "evidence_url": primary_url,
+            "raw_data": {"count": len(sitemap_paths), "results": sitemap_raw},
         }
 
 
