@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,10 +49,36 @@ SEV_DEMERIT_UNVALIDATED = {
     "critical": 12, "high": 6, "medium": 2.5, "low": 1, "info": 0,
 }
 
+# Maximum demerit any single OWASP category can contribute to the OVERALL
+# score. Without this cap, a posture that's clean across nine categories
+# but bleeding from one (typically a stale-component cluster) gets the
+# same letter grade as a posture that's bleeding everywhere — which
+# misrepresents systemic risk. Per-category SCORES are not capped; the
+# offending category still earns its honest letter on the scorecard.
+CATEGORY_DEMERIT_CAP = 25.0
+
+# Coverage bonus: when most OWASP categories grade A, the engagement has
+# demonstrated breadth-of-clean-posture and earns a small additive bonus
+# to the overall score. Set high enough to nudge a borderline grade up
+# one letter, low enough that it can't paper over real findings.
+COVERAGE_BONUS_THRESHOLD = 8   # categories that must be at "A"
+COVERAGE_BONUS_POINTS    = 3
+
+# Validation-aware floor: an engagement with zero confirmed exploitable
+# issues should not fail outright on the strength of unvalidated scanner
+# noise. Floors the overall grade at C when no critical/high exists and
+# no medium has been validated.
+VALIDATION_FLOOR_SCORE = 70
+
 
 def _grade_for(score: int) -> str:
-    """100-point scale → letter. Bias toward F because a clean
-    non-trivial assessment scoring < 60 means the basics are missing."""
+    """100-point scale → letter grade. The scale is deliberately
+    standard-academic (60 = D, 70 = C). The earlier "bias toward F"
+    threshold turned out to over-penalise SCA-heavy reports where the
+    underlying posture was actually fair; the per-category cap, the
+    diminishing-returns curve in `_score_findings`, and the validation
+    floor in `build_context` now do the work of separating real failure
+    from finding-volume noise."""
     if score >= 90: return "A"
     if score >= 80: return "B"
     if score >= 70: return "C"
@@ -65,10 +92,27 @@ def _grade_color(grade: str) -> str:
 
 
 def _score_findings(findings: list, *, scope: Optional[str] = None) -> dict:
-    """Compute a single 0–100 score from a list of findings. `scope`, when
+    """Compute a single 0-100 score from a list of findings. `scope`, when
     provided, restricts the calculation to a single OWASP category — used
-    for per-category grades."""
-    demerit = 0.0
+    for per-category grades.
+
+    Two refinements over the naive "sum every demerit" approach:
+
+    1. Diminishing returns within a category. The Nth same-severity
+       finding in the same OWASP bucket is rarely an Nth independent
+       risk — it's usually the same root cause (one outdated library,
+       a dozen CVEs). Successive findings contribute weight / sqrt(rank),
+       so the first finding lands at full weight, the fourth at half,
+       the sixteenth at a quarter.
+
+    2. Per-category cap (overall score only). Even after diminishing
+       returns, one truly bad bucket is capped at CATEGORY_DEMERIT_CAP
+       so it can't tank an otherwise clean engagement. The per-category
+       grade itself is uncapped — a failing category should still read
+       as failing on its own scorecard."""
+    # Bucket findings by OWASP category so we can apply diminishing
+    # returns and the per-category cap independently in each bucket.
+    by_cat: dict[str, list[float]] = {}
     contributing = 0
     for f in findings:
         if scope and f.get("owasp_category") != scope:
@@ -76,9 +120,28 @@ def _score_findings(findings: list, *, scope: Optional[str] = None) -> dict:
         sev = f.get("severity") or "info"
         validated = (f.get("validation_status") == "validated")
         table = SEV_DEMERIT_VALIDATED if validated else SEV_DEMERIT_UNVALIDATED
-        demerit += table.get(sev, 0)
+        weight = table.get(sev, 0)
+        if weight <= 0:
+            # info-level findings carry no demerit by design
+            continue
+        cat = f.get("owasp_category") or "Other"
+        by_cat.setdefault(cat, []).append(float(weight))
         contributing += 1
-    score = max(0, int(round(100 - demerit)))
+
+    total_demerit = 0.0
+    for cat, weights in by_cat.items():
+        # Heaviest finding takes full weight; the rest decay so a pile
+        # of low-severity dupes can't out-punish a single real high.
+        weights.sort(reverse=True)
+        cat_demerit = sum(w / math.sqrt(rank) for rank, w in enumerate(weights, 1))
+        # Per-category cap only applies to the OVERALL grade. Per-category
+        # scoring (scope set) leaves the demerit uncapped so a failing
+        # category still earns its honest letter on the scorecard.
+        if scope is None:
+            cat_demerit = min(cat_demerit, CATEGORY_DEMERIT_CAP)
+        total_demerit += cat_demerit
+
+    score = max(0, int(round(100 - total_demerit)))
     return {"score": score, "grade": _grade_for(score),
             "color": _grade_color(_grade_for(score)),
             "contributing": contributing}
@@ -244,6 +307,38 @@ def _gather(assessment_id: int) -> Optional[dict]:
         overall["grade"] = _grade_for(overall["score"])
         overall["color"] = _grade_color(overall["grade"])
         overall["pqc_bonus_applied"] = True
+
+    # Coverage bonus — when most OWASP categories already grade A, the
+    # engagement has demonstrated breadth-of-clean-posture. A small
+    # additive bonus reflects that signal, which the per-category demerit
+    # math alone cannot express.
+    a_grade_count = sum(1 for c in category_scores if c["grade"] == "A")
+    if a_grade_count >= COVERAGE_BONUS_THRESHOLD:
+        overall["score"] = min(100, overall["score"] + COVERAGE_BONUS_POINTS)
+        overall["grade"] = _grade_for(overall["score"])
+        overall["color"] = _grade_color(overall["grade"])
+        overall["coverage_bonus_applied"] = True
+        overall["coverage_a_count"] = a_grade_count
+
+    # Validation-aware floor — when the toolkit found nothing
+    # critical/high and validated no medium-severity issues, the report is
+    # describing hardening gaps and unconfirmed scanner suspicions, not
+    # confirmed exploitability. Floor the overall grade at C so a SCA
+    # blizzard cannot drag the rating below "could be better" into "fail".
+    has_critical_or_high = any(
+        f.get("severity") in ("critical", "high") for f in findings
+    )
+    has_validated_medium = any(
+        f.get("severity") == "medium"
+        and f.get("validation_status") == "validated"
+        for f in findings
+    )
+    if not has_critical_or_high and not has_validated_medium:
+        if overall["score"] < VALIDATION_FLOOR_SCORE:
+            overall["score"] = VALIDATION_FLOOR_SCORE
+            overall["grade"] = _grade_for(overall["score"])
+            overall["color"] = _grade_color(overall["grade"])
+            overall["validation_floor_applied"] = True
 
     return {
         "a": a,

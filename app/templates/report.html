@@ -260,7 +260,7 @@
         <dt>Started</dt>       <dd>{{ a.started_at or a.created_at }}</dd>
         <dt>Finished</dt>      <dd>{{ a.finished_at or "in progress" }}</dd>
         <dt>Generated</dt>     <dd>{{ now.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
-        <dt>Risk rating</dt>   <dd>{{ risk_label }} (score {{ risk_score }})</dd>
+        <dt>Risk rating</dt>   <dd>{{ risk_label }} &mdash; overall grade {{ overall_score.grade }} ({{ overall_score.score }}/100)</dd>
         {% if brand.contact_email %}
         <dt>Contact</dt>       <dd>{{ brand.contact_email }}</dd>
         {% endif %}
@@ -309,8 +309,21 @@
     </div>
     <p style="margin: .8em 0 0; font-size: 9.5pt; color: #555">
       Validated findings carry {{ '~2.1×' }} the demerit weight of unvalidated
-      ones — the toolkit's verdict is what drives this grade. Higher score
-      means fewer/less-severe confirmed issues.
+      ones &mdash; the toolkit's verdict is what drives this grade. Repeat
+      findings inside one OWASP category contribute with diminishing returns
+      (an outdated library with ten CVEs counts heavily once, not ten times),
+      and any single category caps at a fixed share of the overall demerit so
+      one bad bucket cannot dominate the grade.
+      {% if overall_score.coverage_bonus_applied %}
+      A coverage bonus of +{{ overall_score.get('coverage_bonus_points', 3) }}
+      was applied because {{ overall_score.coverage_a_count }} of 10 OWASP
+      categories grade A.
+      {% endif %}
+      {% if overall_score.validation_floor_applied %}
+      With no critical/high findings and no validated medium-severity issue,
+      the grade was floored at C to reflect that no exploitable risk was
+      confirmed.
+      {% endif %}
     </p>
   </div>
 </div>
@@ -436,8 +449,12 @@
   {% endif %}
   </p>
   <p>The overall risk rating for this engagement is
-    <strong><span class="sev sev-{{ risk_label|lower }}">{{ risk_label }}</span></strong>
-    (weighted score {{ risk_score }} / 100).
+    <strong><span class="sev sev-{{ risk_label|lower }}">{{ risk_label }}</span></strong>,
+    derived from a severity-weighted finding count of {{ risk_score }}/100. The
+    overall posture grade ({{ overall_score.grade }} &mdash; {{ overall_score.score }}/100)
+    reflects the demerit math described in section 2 and is the headline number
+    on the executive scorecard; the rating above is a complementary view of
+    finding volume.
   </p>
 {% endif %}
 
