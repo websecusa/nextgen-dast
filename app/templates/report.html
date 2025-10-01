@@ -324,6 +324,13 @@
       the grade was floored at C to reflect that no exploitable risk was
       confirmed.
       {% endif %}
+      {% if overall_score.exploit_cap_applied %}
+      Exploitability gate: the letter grade was capped at
+      <strong>{{ overall_score.exploit_cap_applied }}</strong>
+      because {{ overall_score.exploit_cap_reason }}. The score number
+      reflects the demerit math; the letter reflects what the toolkit
+      could actually do.
+      {% endif %}
     </p>
   </div>
 </div>

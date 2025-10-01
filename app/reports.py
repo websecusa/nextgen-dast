@@ -147,6 +147,108 @@ def _score_findings(findings: list, *, scope: Optional[str] = None) -> dict:
             "contributing": contributing}
 
 
+# Exploitability tiers — likelihood-of-exploitation classifier driven by
+# (source_tool, validation_status, severity). Severity alone misrepresents
+# real risk: a "validated critical" from testssl is a TLS config
+# observation that needs an on-path attacker to exploit, while a
+# "validated high" from enhanced_testing is a proof-of-compromise (the
+# probe actually authenticated, forged a token, exfiltrated data, etc.).
+# These tiers feed into _exploitability_grade_cap below to ensure the
+# letter grade reflects what the toolkit could actually do.
+#
+#   T1   toolkit broke in (enhanced_testing validated crit/high)
+#   T2   validated critical from any other tool (config evidence,
+#        e.g. testssl null/anon ciphers, TLS 1.0/1.1 acceptance)
+#   T2b  validated high from non-enhanced tools (nuclei/wapiti/nikto
+#        template matched and was confirmed)
+#   T3   validated medium (XSS proven, IDOR confirmed, etc.)
+#   T4   unconfirmed scanner finding (unvalidated/inconclusive)
+#   T5   excluded (false_positive/errored)
+def _exploit_tier(f: dict) -> str:
+    sev = f.get("severity") or "info"
+    val = f.get("validation_status") or "unvalidated"
+    tool = f.get("source_tool") or ""
+    if val == "validated":
+        if tool == "enhanced_testing" and sev in ("critical", "high"):
+            return "T1"
+        if sev == "critical":
+            return "T2"
+        if sev == "high":
+            return "T2b"
+        if sev == "medium":
+            return "T3"
+        # Validated low/info has limited grade-shaping signal; fall
+        # through to T4 so it doesn't drive the grade by itself.
+        return "T4"
+    if val in ("unvalidated", "inconclusive"):
+        return "T4"
+    return "T5"
+
+
+# Letter ranking for "worst-wins" grade resolution. Lower number = worse.
+_GRADE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+
+
+def _worst_grade(*grades: str) -> str:
+    """Return the lowest-ranked letter from the inputs (worst wins)."""
+    candidates = [g for g in grades if g in _GRADE_RANK]
+    if not candidates:
+        return "A"
+    return min(candidates, key=lambda g: _GRADE_RANK[g])
+
+
+def _exploitability_grade_cap(findings: list) -> Optional[dict]:
+    """Decide the worst letter the engagement is allowed to earn given
+    the exploitability evidence. Returns {'grade': 'F'|'D', 'reason': ...}
+    or None when no cap applies and the demerit math controls.
+
+    The thresholds encode a "likelihood of exploitation" ladder:
+
+      * Any T1 means an attacker path was demonstrated end-to-end —
+        always F regardless of how clean the rest looks.
+      * Three or more T2 (validated criticals) is the Juice-Shop-class
+        TLS catastrophe — multiple independent failings, F.
+      * Two or more T2b (validated highs from non-enhanced tools) is
+        also catastrophic — the scanner verified multiple serious flaws.
+      * A single T2 / T2b / T3 keeps the grade at D — real but isolated
+        exposure, not full compromise.
+      * A volume of unconfirmed criticals (>=5 T4 critical) is itself
+        a posture signal even when nothing was validated, and earns D.
+    """
+    counts = {"T1": 0, "T2": 0, "T2b": 0, "T3": 0, "T4_critical": 0}
+    for f in findings:
+        tier = _exploit_tier(f)
+        if tier == "T4" and (f.get("severity") == "critical"):
+            counts["T4_critical"] += 1
+        elif tier in counts:
+            counts[tier] += 1
+
+    if counts["T1"] >= 1:
+        return {"grade": "F",
+                "reason": (f"{counts['T1']} confirmed-compromise finding(s) "
+                           "from the validation toolkit")}
+    if counts["T2"] >= 3:
+        return {"grade": "F",
+                "reason": (f"{counts['T2']} validated critical findings — "
+                           "multiple independent serious failings")}
+    if counts["T2b"] >= 2:
+        return {"grade": "F",
+                "reason": (f"{counts['T2b']} validated high findings — "
+                           "multiple confirmed serious flaws")}
+    if counts["T2"] >= 1 or counts["T2b"] >= 1:
+        return {"grade": "D",
+                "reason": "one validated critical/high finding"}
+    if counts["T3"] >= 1:
+        return {"grade": "D",
+                "reason": (f"{counts['T3']} validated medium-severity "
+                           "finding(s)")}
+    if counts["T4_critical"] >= 5:
+        return {"grade": "D",
+                "reason": (f"{counts['T4_critical']} unconfirmed critical "
+                           "findings — volume signal")}
+    return None
+
+
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     h = (h or "").lstrip("#")
     if len(h) != 6:
@@ -255,11 +357,32 @@ def _gather(assessment_id: int) -> Optional[dict]:
                    and not (filter_info and f.get("severity") == "info")]
 
     # Decode raw_data JSON for each finding (used for reproduction details).
+    # While we're here, scrub any captured password out of user-visible
+    # text fields. The probe stores its summary into `description` at
+    # scan-time and may have embedded the plaintext password before this
+    # masking pass existed; we redact at render-time so the PDF is
+    # always clean regardless of what's in the DB.
     for f in findings:
         try:
             f["raw"] = json.loads(f["raw_data"]) if f.get("raw_data") else None
         except Exception:
             f["raw"] = None
+        # The probe stores the confirmed credential pair under
+        # evidence.confirmed (and the per-attempt log under
+        # evidence.attempts[]). We pull the password from there to
+        # drive the mask substitution.
+        ev = (f["raw"] or {}).get("evidence") or {} if isinstance(f["raw"], dict) else {}
+        confirmed = ev.get("confirmed") if isinstance(ev, dict) else None
+        if isinstance(confirmed, list) and confirmed:
+            confirmed = confirmed[0]
+        captured_pw = (confirmed.get("password")
+                       if isinstance(confirmed, dict) else None)
+        if captured_pw:
+            masked = _mask_secret(captured_pw)
+            for field in ("description", "title", "remediation", "summary"):
+                v = f.get(field)
+                if isinstance(v, str) and captured_pw in v:
+                    f[field] = v.replace(captured_pw, masked)
         f["repro"] = _repro_for(f)
 
     sev_counts = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
@@ -340,6 +463,23 @@ def _gather(assessment_id: int) -> Optional[dict]:
             overall["color"] = _grade_color(overall["grade"])
             overall["validation_floor_applied"] = True
 
+    # Exploitability gate — letter grade cannot exceed what the evidence
+    # supports. Toolkit-confirmed compromise (T1) or multiple validated
+    # critical/high findings force F regardless of math; a single
+    # validated critical/high or any validated medium caps at D. The
+    # score number is left as the demerit math produced it so the report
+    # still differentiates "F at 0/100" from "F at 60/100" — the letter
+    # alone is the categorical signal, the number is its severity within
+    # the letter.
+    exploit_cap = _exploitability_grade_cap(findings)
+    if exploit_cap is not None:
+        capped = _worst_grade(overall["grade"], exploit_cap["grade"])
+        if capped != overall["grade"]:
+            overall["grade"] = capped
+            overall["color"] = _grade_color(capped)
+            overall["exploit_cap_applied"] = exploit_cap["grade"]
+            overall["exploit_cap_reason"] = exploit_cap["reason"]
+
     return {
         "a": a,
         "findings": findings,
@@ -358,6 +498,29 @@ def _gather(assessment_id: int) -> Optional[dict]:
         "now": datetime.now(timezone.utc),
         "report_id": datetime.now().strftime("%Y%m%d-%H%M%S"),
     }
+
+
+def _mask_secret(s: str) -> str:
+    """Mask a secret for display in the rendered report. Keeps the first
+    and last character of the original and replaces the middle with
+    asterisks of equal length, so the visual length matches the source
+    (e.g. 'admin123' -> 'a******3'). Strings shorter than three
+    characters are fully redacted because a one- or two-character mask
+    would leak too much. Returns '' for empty/None input.
+
+    The PDF gets shared with auditors, customers, and incident-response
+    channels — printing a captured password in plaintext is the kind of
+    leak that lands the report itself on a breach disclosure later, so
+    every renderable site that names a captured password runs through
+    here. Curl reproductions reference the value via the `$PW` shell
+    variable, which the analyst sets from the toolkit's findings table
+    before replay."""
+    if not s:
+        return ""
+    s = str(s)
+    if len(s) < 3:
+        return "*" * len(s)
+    return s[0] + ("*" * (len(s) - 2)) + s[-1]
 
 
 def _shell_q(s: str) -> str:
@@ -631,12 +794,16 @@ PAYLOAD
         login_path = first.get("login_path") or "/rest/user/login"
         email = first.get("email") or "admin@example.com"
         password = first.get("password") or "<documented-default-password>"
+        masked_password = _mask_secret(password)
         target = (first.get("url")
                   or (origin.rstrip("/") + login_path if origin else login_path))
         # Common shipping-default pairs an analyst should also rule out
-        # while they're in here. Test creds — never used for production.
+        # while they're in here. The captured pair is intentionally NOT
+        # included in this list — it's already exercised in Step 1, and
+        # repeating it here would re-print the captured password in the
+        # rendered PDF. These pairs are publicly-documented vendor
+        # defaults — listing them is appropriate.
         common_defaults = [
-            (email, password),
             ("admin", "admin"),
             ("admin", "password"),
             ("administrator", "admin"),
@@ -655,18 +822,23 @@ PAYLOAD
 # the documented seed account for this product and the server issued a
 # valid administrative session.
 #
-# Captured account: {email} / {password}
+# Captured account: {email} / {masked_password}
+#
+# Before running: set PW to the captured value. The toolkit stores it
+# under findings.raw_data.password for this finding (Findings table →
+# this row → "Raw data"). It is NOT printed in this PDF on purpose.
 # ──────────────────────────────────────────────────────────────────────
 
 URL={_shell_q(target)}
+PW="<paste-captured-password-here>"
 
 # ----------------------------------------------------------------------
 # Step 1 — Replay the exact request the probe made.
 # ----------------------------------------------------------------------
 curl -sk -i -X POST "$URL" \\
   -H 'Content-Type: application/json' \\
-  --data-binary @- <<'BODY'
-{{"email": "{email}", "password": "{password}"}}
+  --data-binary @- <<BODY
+{{"email": "{email}", "password": "$PW"}}
 BODY
 
 # Expected when VULNERABLE:  HTTP 200 with a JSON body containing
@@ -679,8 +851,8 @@ BODY
 # ----------------------------------------------------------------------
 curl -sk -X POST "$URL" \\
   -H 'Content-Type: application/json' \\
-  --data-binary @- > /tmp/login_response.json <<'BODY'
-{{"email": "{email}", "password": "{password}"}}
+  --data-binary @- > /tmp/login_response.json <<BODY
+{{"email": "{email}", "password": "$PW"}}
 BODY
 
 python3 - <<'PY'
@@ -734,8 +906,8 @@ done
             "hint": (
                 "Default credentials <code>"
                 f"{html.escape(email)}</code> / <code>"
-                f"{html.escape(password)}</code> still work and grant an "
-                "administrative session. After rotation, step&nbsp;1 must "
+                f"{html.escape(masked_password)}</code> still work and grant "
+                "an administrative session. After rotation, step&nbsp;1 must "
                 "return HTTP&nbsp;401 and step&nbsp;2 must print "
                 "<code>No JWT — credentials no longer accepted.</code>"),
         }

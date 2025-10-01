@@ -399,11 +399,18 @@ class DefaultAdminCredentialsProbe(Probe):
 
         evidence = {"origin": origin, "attempts": attempts}
         if confirmed:
+            # Mask the password in the user-visible summary — the
+            # rendered PDF gets shared widely. The unmasked value still
+            # lives in `evidence.confirmed.password` so the toolkit and
+            # an analyst working from the findings table can replay.
+            pw = confirmed["password"]
+            masked_pw = (pw[0] + "*" * (len(pw) - 2) + pw[-1]
+                         if pw and len(pw) >= 3 else "*" * len(pw or ""))
             return Verdict(
                 validated=True, confidence=0.97,
                 summary=(f"Confirmed: default administrative credentials "
                          f"({confirmed['email']!r} / "
-                         f"{confirmed['password']!r}) granted an admin "
+                         f"{masked_pw!r}) granted an admin "
                          f"session at {origin}{confirmed['login_path']} "
                          f"(JWT claim: {confirmed['jwt_admin_claim']})."),
                 evidence={**evidence, "confirmed": confirmed},
