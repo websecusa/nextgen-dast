@@ -1,0 +1,34 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "sca_finding_validate",
+  "version": "1.0",
+  "summary": "Validate a specific SCA finding by fetching the cited file and detecting the JS library version actually present, comparing it to the vulnerable range and the fixed version.",
+  "validates": [
+    "CWE-1104"
+  ],
+  "matches_tools": [
+    "sca"
+  ],
+  "matches_titles": [
+    "library detected (content fingerprint)",
+    "jquery",
+    "bootstrap",
+    "popper",
+    "lodash",
+    "moment",
+    "angular",
+    "vue.js",
+    "react"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Direct URL to the JS file flagged by SCA (required)",
+    "--component": "Component name override (e.g. jquery). Normally pulled from raw_data.package.name.",
+    "--claimed-version": "Version SCA recorded as installed (defaults to raw_data.package.version)",
+    "--fixed-version": "First non-vulnerable upstream version (defaults to raw_data.cached_vuln.fixed_version)",
+    "--vulnerable-range": "Vulnerable semver range (defaults to raw_data.cached_vuln.vulnerable_range)",
+    "--cve-id": "CVE identifier for the finding (defaults to raw_data.cached_vuln.cve_id)"
+  }
+}

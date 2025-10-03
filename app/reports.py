@@ -1676,6 +1676,146 @@ def _repro_generic(f: dict) -> dict:
     return {"curl": "curl -ski -X " + method + " " + _shell_q(url)}
 
 
+def _repro_sca(f: dict, raw: dict) -> dict:
+    """Reproduction for findings emitted by the SCA stage.
+
+    A SCA finding's evidence is the URL of the file that carried the
+    flagged library — typically a minified .js asset. The actionable
+    reproduction is therefore: fetch the file, surface the version
+    banner the library leaves in its leading comment block, and
+    contrast that against the fixed release. An analyst running this
+    locally answers, in one paste, "is this still the version we
+    flagged, and are we shipping the fixed release yet?". The output
+    matches the verdict the sca_finding_validate probe would produce
+    when the analyst clicks Challenge — same data, different surface.
+
+    The `raw` dict is the parsed raw_data the SCA runner stored, so
+    package metadata (name, claimed version, fixed version, CVE) is
+    available for inline comparison without another DB hit."""
+    url = f.get("evidence_url") or ""
+    if not url:
+        return {}
+    pkg = (raw.get("package") or {}) if isinstance(raw, dict) else {}
+    vuln = (raw.get("cached_vuln") or {}) if isinstance(raw, dict) else {}
+    component = (pkg.get("name") or "").strip() or "<library>"
+    claimed = (pkg.get("version") or "").strip() or "<version>"
+    fixed = (vuln.get("fixed_version") or "").strip() or "<patched-version>"
+    vrange = (vuln.get("vulnerable_range") or "").strip() or "(see advisory)"
+    cve_id = (vuln.get("cve_id") or "").strip() or ""
+
+    # Pick a grep pattern tuned to the named component so the analyst
+    # gets a one-line answer rather than a pile of file headers. Falls
+    # back to a generic "v<X.Y.Z>" sniff when we don't know the lib.
+    component_lc = component.lower()
+    if "jquery" in component_lc and "migrate" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'jQuery Migrate[ -]+v?[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "jquery" in component_lc and "ui" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'jQuery UI[ -]+v?[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "jquery" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'jQuery v[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "bootstrap" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'Bootstrap v[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "popper" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE '[Pp]opper(\\.js)? v?[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "vue" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'Vue\\.js v[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "react" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'React v[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "angular" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'AngularJS v[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "lodash" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'lodash[^v]*v?[0-9]+\\.[0-9]+\\.[0-9]+'")
+    elif "moment" in component_lc:
+        version_grep = (
+            r"grep -m1 -oE 'moment[^0-9]*[0-9]+\\.[0-9]+\\.[0-9]+'")
+    else:
+        # Generic banner sniff scoped to the component name. This is
+        # imperfect but typically gets the right line because the
+        # banner is the first comment in the file.
+        component_q = re.escape(component_lc)
+        version_grep = (
+            f"grep -m1 -oiE '{component_q}[ -]+v?[0-9]+\\.[0-9]+\\.[0-9]+'")
+
+    cve_line = f"# CVE: {cve_id}\n" if cve_id else ""
+    curl = f"""\
+# ──────────────────────────────────────────────────────────────────────
+# SCA validation. The scan flagged this file as shipping a library
+# version with at least one published vulnerability. This block fetches
+# the file from the live target and prints the version banner so you
+# can confirm the deployment is (still) on the vulnerable release.
+#
+# Component:        {component}
+# Installed (SCA):  {claimed}
+# Fixed in:         {fixed}
+# Vulnerable range: {vrange}
+{cve_line}# File:             {url}
+# ──────────────────────────────────────────────────────────────────────
+
+URL={_shell_q(url)}
+
+# ----------------------------------------------------------------------
+# Step 1 — Pull the file head and extract the library's own version
+# banner. Most libraries preserve `/*! <name> v<X.Y.Z> */` even after
+# minification, so a grep on the first few KB is reliable.
+# ----------------------------------------------------------------------
+INSTALLED=$(curl -sk "$URL" | head -c 8192 | {version_grep} | head -1)
+echo "Installed (now):  ${{INSTALLED:-not-detected}}"
+echo "Installed (SCA):  {claimed}"
+echo "Fixed in:         {fixed}"
+echo "Vulnerable range: {vrange}"
+
+# Expected when STILL VULNERABLE: ${{INSTALLED}} matches the SCA-recorded
+# version (e.g. '{claimed}') and falls inside the vulnerable range.
+# Expected when FIXED:            ${{INSTALLED}} is at or above {fixed}
+# (and falls OUTSIDE the vulnerable range), or the file no longer ships.
+
+# ----------------------------------------------------------------------
+# Step 2 — Confirm intent. Run the actual probe via the toolkit so the
+# answer goes into the findings audit log and the report regenerates
+# with the validated/not-validated verdict the next time it's built.
+# Click "Challenge" on this finding in the UI, or invoke the probe
+# directly:
+# ----------------------------------------------------------------------
+# python3 /app/toolkit/probes/sca_finding_validate.py \\
+#   --url "$URL" --component {_shell_q(component)} \\
+#   --claimed-version {_shell_q(claimed)} \\
+#   --fixed-version   {_shell_q(fixed)} \\
+#   --vulnerable-range {_shell_q(vrange)}
+
+# ──────────────────────────────────────────────────────────────────────
+# Remediation summary
+#   * Upgrade {component} to {fixed} or later.
+#   * If a transitive dependency pins the older release, refresh the
+#     lockfile and rebuild — most JS libraries are ABI-stable across
+#     patch / minor releases for this class of CVE.
+#   * Add Subresource Integrity (SRI) hashes to each <script> tag so a
+#     downgrade or CDN substitution fails closed.
+#   * Ship a deploy-time check that fails the build if any bundle still
+#     contains the flagged version banner.
+# ──────────────────────────────────────────────────────────────────────
+"""
+    hint = (
+        f"SCA flagged <code>{html.escape(component)}</code> "
+        f"<code>{html.escape(claimed)}</code> at "
+        f"<code>{html.escape(url)}</code>; the fixed release is "
+        f"<code>{html.escape(fixed)}</code>. Step&nbsp;1 prints the "
+        "version banner the file is currently advertising so you can "
+        "confirm whether the deployment is still on the vulnerable "
+        "release. Step&nbsp;2 routes through the validation toolkit to "
+        "re-grade the finding."
+    )
+    return {"curl": curl, "hint": hint}
+
+
 def _repro_for(f: dict) -> dict:
     """Build a 'reproduction steps' block for one finding, dispatched by
     source tool. Each builder returns {curl, hint}; we then layer on the
@@ -1705,6 +1845,8 @@ def _repro_for(f: dict) -> dict:
         repro = _repro_dalfox(f, raw)
     elif tool == "sqlmap":
         repro = _repro_sqlmap(f, raw)
+    elif tool == "sca":
+        repro = _repro_sca(f, raw)
     else:
         repro = _repro_generic(f)
     if not isinstance(repro, dict):
