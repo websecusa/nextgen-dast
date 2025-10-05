@@ -75,10 +75,18 @@ class SCAJSLibrariesProbe(Probe):
             return Verdict(ok=False, validated=None,
                            summary=f"failed to fetch {args.url}: {e}",
                            error=str(e))
-        body_bytes = r.content if hasattr(r, "content") else (r.body or b"")
-        if r.status_code >= 400 or not body_bytes:
+        # SafeClient.Response exposes .status / .body. The getattr
+        # fallbacks tolerate a future client built on requests / httpx
+        # where the conventional names are status_code / content.
+        status = getattr(r, "status", None)
+        if status is None:
+            status = getattr(r, "status_code", 0)
+        body_bytes = getattr(r, "body", None)
+        if body_bytes is None:
+            body_bytes = getattr(r, "content", b"") or b""
+        if status >= 400 or not body_bytes:
             return Verdict(ok=False, validated=None,
-                           summary=f"target returned HTTP {r.status_code}")
+                           summary=f"target returned HTTP {status}")
 
         # Discover JS URLs and dedupe.
         body = body_bytes.decode("utf-8", "replace")
@@ -112,9 +120,14 @@ class SCAJSLibrariesProbe(Probe):
                 jr = client.get(u)
             except Exception:
                 continue
-            if jr.status_code >= 400:
+            jr_status = getattr(jr, "status", None)
+            if jr_status is None:
+                jr_status = getattr(jr, "status_code", 0)
+            if jr_status >= 400:
                 continue
-            data = jr.content if hasattr(jr, "content") else (jr.body or b"")
+            data = getattr(jr, "body", None)
+            if data is None:
+                data = getattr(jr, "content", b"") or b""
             if not data:
                 continue
             local = tmp / urllib.parse.quote(u, safe="")
