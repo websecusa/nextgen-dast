@@ -51,6 +51,20 @@
           {% if reports %}Regenerate PDF{% else %}Generate PDF{% endif %}
         </button>
       </form>
+      {# Bulk-Challenge button. Spawns scripts.challenge_runner against
+         this assessment, running every matched probe class (including
+         payload-injecting probes like xss_reflect / sqli_boolean) so
+         the analyst can re-validate findings without clicking each
+         row. Read-only probes ALSO ran automatically at the end of
+         the scan, so this button is most useful when the analyst
+         wants to include the unsafe-class probes too, or to re-run
+         after triage. Progress shows in the same `current_step`
+         field the status badge already polls. #}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/challenge_all"
+            style="display:inline"
+            onsubmit="return confirm('Run every matched toolkit probe against the {{ counts.open }} open finding(s) on this assessment? Some probes (xss_reflect, sqli_boolean, …) inject payloads — only run against systems you are authorized to test. Progress will appear in the status field.')">
+        <button type="submit" class="ghost">Challenge all findings</button>
+      </form>
       <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
             style="display:inline"
             onsubmit="return confirm('Permanently delete assessment #{{ a.id }} ({{ a.fqdn }}) and all of its scan files? This cannot be undone.')">
@@ -148,11 +162,21 @@
            class="{% if filter_status == 'all' %}active{% endif %}">All ({{ counts.all }})</a>
       </div>
       <div style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
+        {# Severity dropdown also exposes "False positives" as a
+           pseudo-severity. Picking it overrides the Open/Closed/All
+           tab filter on the server (see assessment_detail handler) so
+           the analyst sees every suppressed finding regardless of the
+           tab they were on. The count comes from the unfiltered
+           rollup so it stays accurate across selections. #}
         <select name="sev" onchange="this.form.submit()">
           <option value="">All severities</option>
           {% for sev in ['critical','high','medium','low','info'] %}
             <option value="{{ sev }}" {% if filter_sev == sev %}selected{% endif %}>{{ sev|capitalize }}</option>
           {% endfor %}
+          <option disabled>──────────</option>
+          <option value="false_positive" {% if filter_sev == 'false_positive' %}selected{% endif %}>
+            False positives{% if fp_count %} ({{ fp_count }}){% endif %}
+          </option>
         </select>
         <select name="sort" onchange="this.form.submit()">
           <option value="severity" {% if sort == 'severity' %}selected{% endif %}>By severity</option>

@@ -1771,7 +1771,13 @@ def assessment_detail(request: Request, aid: int,
 
     if status not in ("open", "closed", "all"):
         status = "open"
-    if sev not in ("", "critical", "high", "medium", "low", "info"):
+    # `false_positive` is a status, not a severity, but we expose it in
+    # the same dropdown as the severities for one-click access. When it
+    # is selected we ignore the Open/Closed/All status tab below and
+    # show only suppressed findings — see the visible-list loop further
+    # down for the override.
+    if sev not in ("", "critical", "high", "medium", "low", "info",
+                   "false_positive"):
         sev = ""
     if sort not in ("severity", "newest", "tool"):
         sort = "severity"
@@ -1832,8 +1838,23 @@ def assessment_detail(request: Request, aid: int,
     sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     visible: list[dict] = []
     for f in rows:
-        # Status tabs
         st = f.get("status") or "open"
+
+        # "False positives" pseudo-severity — selected from the same
+        # dropdown as the severities, but it filters by status instead.
+        # Status tabs and the info-hide toggle are intentionally ignored
+        # so picking "False positives" reliably surfaces every
+        # suppressed row regardless of where the analyst was when they
+        # picked it.
+        if sev == "false_positive":
+            if st != "false_positive":
+                continue
+            if q and q.lower() not in (f.get("title") or "").lower():
+                continue
+            visible.append(f)
+            continue
+
+        # Status tabs
         if status == "open" and st not in ("open", "confirmed"):
             continue
         if status == "closed" and st in ("open", "confirmed"):
