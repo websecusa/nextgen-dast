@@ -60,7 +60,7 @@ services:
     environment:
       - UI_HOST=127.0.0.1
       - UI_PORT=8888
-      - UI_ROOT_PATH=/test
+      - UI_ROOT_PATH=
       - DB_HOST=127.0.0.1
       - DB_PORT=13306
       - DB_NAME=${MARIADB_DATABASE:-pentest}
@@ -68,9 +68,9 @@ services:
       - DB_PASSWORD=${MARIADB_PASSWORD}
       - ENV_SUFFIX=${ENV_SUFFIX}
       - SECRETS_FILE=${SECRETS_FILE:-/data/.sensitive_secrets_info}
-      - APP_URL=${APP_URL:-https://localhost/test/}
+      - APP_URL=${APP_URL:-https://localhost/}
       - APP_SECRET=${APP_SECRET}
     depends_on:
       mariadb:
         condition: service_healthy
-    command: ["python", "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8888", "--root-path", "/test"]
+    command: ["python", "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8888"]

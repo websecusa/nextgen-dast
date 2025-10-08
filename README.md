@@ -1,4 +1,4 @@
-# nextgen-dast (pentest-proxy)
+# nextgen-dast
 
 _Author: Tim Rice <tim.j.rice@hackrange.com>_
 
@@ -173,10 +173,10 @@ If you already know what URL you want, export it before running setup so
 the env file gets the right value out of the gate:
 
 ```bash
-export APP_URL="https://pentest.example.com/test/"   # mind the trailing slash
+export APP_URL="https://pentest.example.com/"   # mind the trailing slash
 ```
 
-If you don't set it, `setup.sh` defaults to `https://localhost/test/`,
+If you don't set it, `setup.sh` defaults to `https://localhost/`,
 which you can change later by editing the generated `.env_<hex>` file.
 
 ### 4. Run setup.sh
@@ -224,9 +224,9 @@ server {
     ssl_certificate     /etc/letsencrypt/live/pentest.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/pentest.example.com/privkey.pem;
 
-    # The application is mounted at /test — strip the prefix when proxying.
-    location /test/ {
-        proxy_pass http://127.0.0.1:8888/test/;
+    # The application is mounted at the root path; pass everything through.
+    location / {
+        proxy_pass http://127.0.0.1:8888/;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Real-IP $remote_addr;
@@ -241,7 +241,7 @@ Then `sudo nginx -t && sudo systemctl reload nginx`.
 
 ```caddy
 pentest.example.com {
-    reverse_proxy /test/* 127.0.0.1:8888
+    reverse_proxy 127.0.0.1:8888
 }
 ```
 
@@ -249,7 +249,7 @@ Caddy auto-issues TLS — no certbot needed.
 
 ### 6. Log in
 
-Visit `https://pentest.example.com/test/` and log in with `admin` and the
+Visit `https://pentest.example.com/` and log in with `admin` and the
 password from the secrets file. Change the password under your user menu
 right after first login.
 
@@ -298,7 +298,7 @@ which (thanks to one `/etc/hosts` line) resolves to the proxy.
 
 #### 1. Configure the proxy in this app
 
-In your browser, open the application UI: `https://<proxy-host>/test/proxy`.
+In your browser, open the application UI: `https://<proxy-host>/proxy`.
 You'll see the **Intercept proxy** page. Fill in the form:
 
 | Field | Value to enter | Why |
@@ -321,7 +321,7 @@ as a trusted root on every device that will browse through the proxy.
 **Get the certificate file** — on the proxy host:
 
 ```bash
-docker cp pentest-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ./mitm-ca.pem
+docker cp nextgen-dast:/root/.mitmproxy/mitmproxy-ca-cert.pem ./mitm-ca.pem
 ```
 
 Now copy `mitm-ca.pem` to whatever device you'll be browsing from (USB
@@ -422,11 +422,11 @@ Now that you're logged in via the proxy, every authenticated request
 your browser makes is being recorded. Click around the application a
 bit so a few authenticated flows land in the log.
 
-In the application UI, open **Flows** (`/test/flows`). You'll see a list
+In the application UI, open **Flows** (`/flows`). You'll see a list
 of every request that went through the proxy. Find one with a
 `Cookie:` header set (any post-login request).
 
-Open **Auth profiles** (`/test/auth`). Use the **Capture from flow**
+Open **Auth profiles** (`/auth`). Use the **Capture from flow**
 form:
 
 | Field | Value |
@@ -440,7 +440,7 @@ are saved as an auth profile under that name.
 
 #### 6. Run an authenticated scan
 
-Go to **Assessments** (`/test/assess`) or **Scans** (`/test/scan`). When
+Go to **Assessments** (`/assess`) or **Scans** (`/scan`). When
 you start a scan, pick the auth profile you just saved. The scanner will
 inherit the session cookies and run as the authenticated user.
 
@@ -464,7 +464,7 @@ in-app proxy is hardcoded to reverse mode. To use forward mode, run
 `mitmdump` directly on the proxy host alongside the application:
 
 ```bash
-docker exec pentest-proxy mitmdump --mode regular \
+docker exec nextgen-dast mitmdump --mode regular \
     --listen-host 0.0.0.0 --listen-port 8080 \
     --set ssl_insecure=true \
     --set flow_log_path=/data/logs/flows.jsonl \
@@ -511,7 +511,7 @@ proxy / Automatic** so non-assessment traffic doesn't get intercepted.
 | `https://target.example.com:9443/` shows a TLS warning | mitmproxy CA cert not installed (or not in the right cert store) | Re-do step 2 — note Firefox needs its own import |
 | SAML login starts, IdP loads, but the redirect back fails | `/etc/hosts` redirected the IdP too, so the browser couldn't reach the real IdP | Only redirect the SP (target), not the IdP |
 | SAML login completes but the SP shows "invalid SAML audience" | Upstream Host header doesn't match what the SP expects | Set "Upstream Host header" to exactly the hostname from the SP's metadata (e.g. `target.example.com`, not `localhost`) |
-| Browser hangs at "Connecting to target.example.com…" | `/etc/hosts` line is wrong, or proxy isn't running | Check `proxy_pid()` via `/test/proxy`; verify with `curl -k https://target.example.com:9443/` from the client |
+| Browser hangs at "Connecting to target.example.com…" | `/etc/hosts` line is wrong, or proxy isn't running | Check `proxy_pid()` via `/proxy`; verify with `curl -k https://target.example.com:9443/` from the client |
 | SAML works in Chrome but not Firefox | Firefox uses its own cert store and ignores the system one | Re-run the cert install steps inside Firefox specifically |
 | Authenticated requests work for ~30 minutes then 401 | SAML session expired; you need to re-capture | Repeat steps 4–5 to capture a fresh cookie |
 
@@ -524,12 +524,12 @@ flag — saves you from typing it every time:
 
 ```bash
 ./pentest.sh ps                    # what's running
-./pentest.sh logs -f pentest-proxy # follow application logs
+./pentest.sh logs -f nextgen-dast  # follow application logs
 ./pentest.sh logs -f mariadb       # follow database logs
 ./pentest.sh down                  # stop the stack (keeps data)
 ./pentest.sh up -d                 # start it again
-./pentest.sh exec pentest-proxy bash   # shell into the app container
-./pentest.sh restart pentest-proxy
+./pentest.sh exec nextgen-dast bash    # shell into the app container
+./pentest.sh restart nextgen-dast
 ./pentest.sh reset                 # regenerate admin password (writes new
                                    # secrets file, keeps all data)
 ./pentest.sh reset-full            # ALSO TRUNCATE every table — destroys all
@@ -541,7 +541,7 @@ flag — saves you from typing it every time:
 When a new tag (e.g. `2.1.2`) is published:
 
 ```bash
-# Edit docker-compose.yml — change the `image:` line on pentest-proxy:
+# Edit docker-compose.yml — change the `image:` line on nextgen-dast:
 #   image: dockerregistry.fairtprm.com/nextgen-dast:2.1.2
 
 ./pentest.sh pull
@@ -659,7 +659,7 @@ sudo ./setup.sh
 
 ```
                                 ┌──────────────────────────┐
-   browser ── HTTPS ── nginx ──>│ pentest-proxy:8888 (app) │── MariaDB:13306
+   browser ── HTTPS ── nginx ──>│ nextgen-dast:8888 (app)  │── MariaDB:13306
                                 │  fastapi + jinja2        │      │
                                 │  spawns scanner subps    │      │
                                 │  reads /data/* artifacts │      │

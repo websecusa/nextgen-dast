@@ -39,6 +39,7 @@ import enrichment as enrichment_mod    # noqa: E402
 from findings import parse_scan        # noqa: E402
 import useragent as ua_mod             # noqa: E402
 import consolidation                   # noqa: E402
+import cleanup as cleanup_mod          # noqa: E402  — keep_only_latest dedupe
 from scripts import challenge_runner   # noqa: E402  — auto-validate pass
 
 
@@ -796,6 +797,21 @@ def main() -> int:
         except Exception as e:
             update(aid, error_text=f"auto_validate crashed: {e!r}")
         update(aid, status="done", current_step="done", finished_at=now())
+
+        # Auto-dedupe pass. If this assessment was created with
+        # keep_only_latest=1 (one-off /assess form, REST API, or carried
+        # through from a scan_schedules row), every other completed
+        # assessment for the same FQDN gets marked status='deleting' and
+        # the lifespan sweeper tears it down asynchronously. Fenced in a
+        # try/except so a dedupe failure can never roll back the 'done'
+        # status we just wrote.
+        try:
+            n = cleanup_mod.dedupe_for_fqdn(aid)
+            if n:
+                print(f"[orchestrator] keep_only_latest: marked {n} prior "
+                      f"assessment(s) for deletion", flush=True)
+        except Exception as e:
+            print(f"[orchestrator] dedupe pass failed: {e!r}", flush=True)
     except Exception as e:
         update(aid, status="error", error_text=f"{type(e).__name__}: {e}",
                finished_at=now())

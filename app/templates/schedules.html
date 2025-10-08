@@ -1,0 +1,114 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Schedules index. Lists every scan_schedules row with its cron expression,
+  next firing time (UTC + a 3-fire preview), enabled flag, and the most
+  recent assessment it materialized. Inline forms call /schedule/<id>/run,
+  /schedule/<id>/toggle, and /schedule/<id>/delete.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Scheduled scans</h1>
+
+{% if request.query_params.get("msg") %}
+<div class="msg" style="margin:.5em 0; padding:.6em .9em;
+                       border:1px solid var(--accent, #5d8aa8);
+                       background:rgba(95,179,215,0.08);
+                       border-radius:6px">
+  {{ request.query_params.get("msg") }}
+</div>
+{% endif %}
+
+<p class="muted">
+  Schedules fire on a 5-field UTC cron expression. Each fire creates a normal
+  assessment (look in <a href="{{ base }}/assessments">Assessments</a>) with
+  <code>schedule_id</code> set so you can trace it back. Create a new
+  schedule from the <a href="{{ base }}/assess">New assessment</a> form —
+  pick "Run on a schedule".
+</p>
+
+<section class="card" style="margin-top:1em">
+  {% if not schedules %}
+    <p class="muted">No schedules yet.</p>
+  {% else %}
+  <table style="width:100%; border-collapse:collapse">
+    <thead>
+      <tr>
+        <th style="text-align:left">ID</th>
+        <th style="text-align:left">Name / FQDN</th>
+        <th style="text-align:left">Profile</th>
+        <th style="text-align:left">Cron (UTC)</th>
+        <th style="text-align:left">Next run (UTC)</th>
+        <th style="text-align:left">Enabled</th>
+        <th style="text-align:left">Last run</th>
+        <th style="text-align:right">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in schedules %}
+      <tr>
+        <td><a href="{{ base }}/schedule/{{ s.id }}">#{{ s.id }}</a></td>
+        <td>
+          <strong>{{ s.name }}</strong><br>
+          <code class="muted">{{ s.fqdn }}</code>
+          {% if s.keep_only_latest %}
+            <br><span class="badge">keep latest</span>
+          {% endif %}
+        </td>
+        <td><span class="badge">{{ s.profile }}</span></td>
+        <td><code>{{ s.cron_expr }}</code></td>
+        <td>
+          {% if s.next_run_at %}
+            {{ s.next_run_at }}
+            {% if s.preview and s.preview|length > 1 %}
+              <br><small class="muted">then {{ s.preview[1].strftime('%Y-%m-%d %H:%M') }}</small>
+            {% endif %}
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if s.enabled %}
+            <span class="badge done">enabled</span>
+          {% else %}
+            <span class="badge cancelled">disabled</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if s.last_run_at %}
+            {{ s.last_run_at }}
+            {% if s.last_assessment_id %}
+              <br><small><a href="{{ base }}/assessment/{{ s.last_assessment_id }}">#{{ s.last_assessment_id }}</a></small>
+            {% endif %}
+          {% else %}
+            <span class="muted">never</span>
+          {% endif %}
+        </td>
+        <td style="text-align:right; white-space:nowrap">
+          <form method="post" style="display:inline"
+                action="{{ base }}/schedule/{{ s.id }}/run">
+            <button class="ghost small" type="submit"
+                    title="Materialize this schedule into a one-off assessment now (does not affect the cron cadence)">
+              Run now
+            </button>
+          </form>
+          <form method="post" style="display:inline; margin-left:.3em"
+                action="{{ base }}/schedule/{{ s.id }}/toggle">
+            <button class="ghost small" type="submit">
+              {% if s.enabled %}Disable{% else %}Enable{% endif %}
+            </button>
+          </form>
+          <form method="post" style="display:inline; margin-left:.3em"
+                action="{{ base }}/schedule/{{ s.id }}/delete"
+                onsubmit="return confirm('Delete schedule #{{ s.id }} ({{ s.name }})? Historical assessments are preserved.');">
+            <button class="ghost small" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

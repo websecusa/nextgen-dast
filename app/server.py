@@ -39,6 +39,7 @@ import dbops as dbops_mod
 import enrichment as enrichment_mod
 import llm as llm_mod
 import reports as reports_mod
+import schedules as schedules_mod
 import sessions
 import toolkit as toolkit_mod
 import useragent as ua_mod
@@ -460,6 +461,22 @@ async def lifespan(app):
     except Exception as e:
         print(f"[startup] zombie reap failed: {e!r}", flush=True)
 
+    # Schema drift check. If the live DB is missing any column the
+    # application reads at runtime, log a loud warning so the operator
+    # sees it in startup logs. We do not abort — the existing schema.sql
+    # is idempotent and a re-run of scripts/reset.py usually heals drift —
+    # but we want this in front of the operator's eyes immediately.
+    try:
+        from scripts.verify_schema import check as _schema_check
+        issues = _schema_check(db)
+        if issues:
+            print("[startup] SCHEMA DRIFT DETECTED — re-run scripts/reset.py "
+                  "to apply migrations:", flush=True)
+            for line in issues:
+                print(f"[startup]   - {line}", flush=True)
+    except Exception as e:
+        print(f"[startup] schema verify failed: {e!r}", flush=True)
+
     # One-shot orphan sweep at startup. Catches storage left behind by
     # pre-fix builds whose cleanup did not know about reports / challenge
     # logs, plus any scan dirs / logs whose owning assessment was deleted
@@ -567,6 +584,14 @@ async def lifespan(app):
                         ).start()
             except Exception:
                 pass
+            # Scheduled-scan tick. Materializes any due `scan_schedules`
+            # row into a real assessment and spawns its orchestrator. Cron
+            # resolution is to the minute, which matches the 60-second
+            # cadence of this loop.
+            try:
+                schedules_mod.tick()
+            except Exception as e:
+                print(f"[schedule tick] failed: {e!r}", flush=True)
             await asyncio.sleep(60)
 
     task = asyncio.create_task(sweeper())
@@ -576,7 +601,7 @@ async def lifespan(app):
         task.cancel()
 
 
-app = FastAPI(title="Pentest Proxy", root_path=ROOT_PATH, lifespan=lifespan)
+app = FastAPI(title="nextgen-dast", root_path=ROOT_PATH, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 templates = Jinja2Templates(directory="/app/templates")
 
@@ -1670,6 +1695,17 @@ def assess_start(
     creds_password: str = Form(""),
     login_url: str = Form(""),
     application_id: str = Form(""),
+    keep_only_latest: Optional[str] = Form(None),
+    # Optional schedule-mode fields. When `schedule_mode` is "schedule"
+    # we route the request to the scheduling code path instead of starting
+    # an immediate scan. Kept on the same endpoint so the form can submit
+    # to one URL and the server picks the right action.
+    schedule_mode: str = Form("now"),
+    schedule_name: str = Form(""),
+    cron_expr: str = Form(""),
+    start_after: str = Form(""),
+    end_before: str = Form(""),
+    skip_if_running: Optional[str] = Form(None),
 ):
     llm_endpoint_id_i = _opt_int(llm_endpoint_id)
     user_agent_id_i = _opt_int(user_agent_id)
@@ -1686,13 +1722,43 @@ def assess_start(
     # different — they put in whatever string identifies the app on their
     # side. Empty string normalises to NULL so the column index stays clean.
     application_id = (application_id or "").strip()[:128] or None
+    keep_flag = 1 if keep_only_latest else 0
+
+    # Schedule branch: persist a scan_schedules row instead of running now.
+    # Validation lives in app/schedules.py; we surface ValueError as a 400
+    # so the form can re-render with the message inline.
+    if schedule_mode == "schedule":
+        try:
+            sid = schedules_mod.create({
+                "name": schedule_name or fqdn,
+                "fqdn": fqdn,
+                "scan_http": 1 if scan_http else 0,
+                "scan_https": 1 if scan_https else 0,
+                "profile": profile,
+                "llm_tier": llm_tier,
+                "llm_endpoint_id": llm_endpoint_id_i,
+                "user_agent_id": user_agent_id_i,
+                "creds_username": creds_username or None,
+                "creds_password": creds_password or None,
+                "login_url": login_url or None,
+                "application_id": application_id,
+                "cron_expr": cron_expr,
+                "start_after": start_after or None,
+                "end_before": end_before or None,
+                "enabled": 1,
+                "skip_if_running": 1 if skip_if_running else 0,
+                "keep_only_latest": keep_flag,
+            })
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return redirect(f"/schedule/{sid}")
 
     aid = db.execute(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
-            application_id, status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
+            application_id, keep_only_latest, status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
         (fqdn,
          1 if scan_http else 0,
          1 if scan_https else 0,
@@ -1701,7 +1767,8 @@ def assess_start(
          creds_username or None,
          creds_password or None,
          login_url or None,
-         application_id),
+         application_id,
+         keep_flag),
     )
     # spawn detached orchestrator
     log_path = LOGS_DIR / f"orchestrator_{aid}.log"
@@ -1744,6 +1811,135 @@ def assessments_list(request: Request):
                 r["risk_score"] = _live_risk_score(fs)
     return templates.TemplateResponse("assessments.html",
                                       ctx(request, assessments=rows))
+
+
+# ---------------------------------------------------------------------------
+# Scheduled scans
+#
+# A scan_schedules row is a recipe + cron expression. The lifespan sweeper
+# calls schedules_mod.tick() once a minute to materialize due rows into a
+# real assessments row. The pages below let an admin list, inspect, edit,
+# enable/disable, run-now, or delete schedules.
+# ---------------------------------------------------------------------------
+
+@app.get("/schedules", response_class=HTMLResponse)
+def schedules_list(request: Request):
+    """Admin/operator schedules index. Lists every scan_schedules row with
+    its current next_run_at and a summary of the most recent fire."""
+    rows = schedules_mod.list_all() if db.healthy() else []
+    # Decorate with a 3-fire preview so the user can see at a glance when
+    # the schedule will fire next without staring at a cron string.
+    for r in rows:
+        r["preview"] = schedules_mod.preview_runs(r.get("cron_expr") or "", 3)
+    return templates.TemplateResponse(
+        "schedules.html", ctx(request, schedules=rows),
+    )
+
+
+@app.get("/schedule/{sid}", response_class=HTMLResponse)
+def schedule_detail(request: Request, sid: int):
+    sched = schedules_mod.get(sid)
+    if not sched:
+        raise HTTPException(404, "schedule not found")
+    sched["preview"] = schedules_mod.preview_runs(
+        sched.get("cron_expr") or "", 5,
+    )
+    # All assessments materialized from this schedule, newest first.
+    runs = db.query(
+        "SELECT id, status, total_findings, started_at, finished_at "
+        "FROM assessments WHERE schedule_id=%s ORDER BY id DESC LIMIT 100",
+        (sid,),
+    )
+    endpoints = (db.query("SELECT id, name, model FROM llm_endpoints "
+                          "ORDER BY id")
+                 if db.healthy() else [])
+    uas = (db.query("SELECT id, label, is_default FROM user_agents "
+                    "ORDER BY label")
+           if db.healthy() else [])
+    return templates.TemplateResponse(
+        "schedule_detail.html",
+        ctx(request, schedule=sched, runs=runs,
+            endpoints=endpoints, user_agents=uas),
+    )
+
+
+@app.post("/schedule/{sid}/update")
+def schedule_update(
+    sid: int,
+    name: str = Form(""),
+    fqdn: str = Form(""),
+    profile: str = Form(""),
+    llm_tier: str = Form(""),
+    llm_endpoint_id: str = Form(""),
+    user_agent_id: str = Form(""),
+    scan_http: Optional[str] = Form(None),
+    scan_https: Optional[str] = Form(None),
+    creds_username: str = Form(""),
+    creds_password: str = Form(""),
+    login_url: str = Form(""),
+    application_id: str = Form(""),
+    cron_expr: str = Form(""),
+    start_after: str = Form(""),
+    end_before: str = Form(""),
+    skip_if_running: Optional[str] = Form(None),
+    keep_only_latest: Optional[str] = Form(None),
+):
+    """Apply edits from the schedule detail form. Empty strings are
+    forwarded to schedules_mod.update which normalizes them to NULL for
+    nullable columns; the cron expression is re-validated there."""
+    payload = {
+        "name": name, "fqdn": fqdn,
+        "profile": profile or None, "llm_tier": llm_tier or None,
+        "llm_endpoint_id": _opt_int(llm_endpoint_id),
+        "user_agent_id": _opt_int(user_agent_id),
+        "scan_http": 1 if scan_http else 0,
+        "scan_https": 1 if scan_https else 0,
+        "creds_username": creds_username,
+        "creds_password": creds_password,
+        "login_url": login_url,
+        "application_id": application_id,
+        "cron_expr": cron_expr,
+        "start_after": start_after,
+        "end_before": end_before,
+        "skip_if_running": 1 if skip_if_running else 0,
+        "keep_only_latest": 1 if keep_only_latest else 0,
+    }
+    try:
+        schedules_mod.update(sid, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return redirect(f"/schedule/{sid}?msg=saved")
+
+
+@app.post("/schedule/{sid}/toggle")
+def schedule_toggle(sid: int):
+    """Flip the `enabled` flag. Wrapped in its own endpoint (rather than
+    folding into /update) so the schedules list can offer a one-click
+    pause without re-validating the whole row."""
+    row = schedules_mod.get(sid)
+    if not row:
+        raise HTTPException(404, "schedule not found")
+    schedules_mod.set_enabled(sid, not int(row.get("enabled") or 0))
+    return redirect("/schedules?msg=toggled")
+
+
+@app.post("/schedule/{sid}/run")
+def schedule_run_now(sid: int):
+    """Manual one-off fire. Materializes the schedule into an assessment
+    without touching next_run_at, so the cron cadence is undisturbed."""
+    aid = schedules_mod.spawn_one_off(sid)
+    if aid is None:
+        raise HTTPException(404, "schedule not found")
+    return redirect(f"/assessment/{aid}")
+
+
+@app.post("/schedule/{sid}/delete")
+def schedule_delete(sid: int):
+    """Hard delete. Historical assessments produced by this schedule keep
+    their schedule_id pointer; the application code tolerates a stale
+    reference and renders "(deleted schedule)"."""
+    schedules_mod.delete(sid)
+    return redirect("/schedules?msg=deleted")
 
 
 @app.get("/assessment/{aid}", response_class=HTMLResponse)

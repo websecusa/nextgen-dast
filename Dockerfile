@@ -136,7 +136,8 @@ RUN pip install \
         "bcrypt==4.2.0" \
         "weasyprint==62.3" \
         "pydyf==0.10.0" \
-        "pypdf==5.1.0"
+        "pypdf==5.1.0" \
+        "croniter==3.0.3"
 
 # Swagger UI assets, vendored into the image so the API playground at
 # /api/v1/docs works on hosts that have no outbound internet access (or

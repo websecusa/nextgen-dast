@@ -2,7 +2,7 @@
 
 These configs live in the source tree but are NOT applied automatically
 by the Docker image — they belong on the **host running nginx and
-fail2ban** in front of `pentest-proxy`. They are drafts; review the
+fail2ban** in front of `nextgen-dast`. They are drafts; review the
 placeholders before installing.
 
 ## Why these exist

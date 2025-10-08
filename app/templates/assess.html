@@ -82,6 +82,58 @@ ports, check only the scheme that actually listens on that port.</p>
       </label>
     </fieldset>
 
+    {# Auto-dedupe toggle. When checked, the orchestrator's finalize step
+       deletes every other completed assessment for the same FQDN once
+       this scan finishes — so only the most recent run survives. In-flight
+       scans are never touched. #}
+    <label class="check" style="margin-top:.6em">
+      <input type="checkbox" name="keep_only_latest">
+      Keep only latest
+      <small class="muted">
+        — when this scan finishes, automatically delete prior completed
+        assessments for the same FQDN. In-flight scans are never touched.
+      </small>
+    </label>
+
+    {# Schedule fieldset. Hidden by default; revealed when the operator
+       picks "Run on a schedule" below. The same /assess endpoint handles
+       both branches based on schedule_mode; nothing else changes. #}
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:.8em 1em; margin-top:.8em">
+      <legend style="padding:0 .4em; color: var(--muted)">When to run</legend>
+      <div style="display:flex; gap:1.5em; align-items:center">
+        <label class="check"><input type="radio" name="schedule_mode" value="now" checked
+                                    onchange="document.getElementById('sched-fields').style.display='none'"> Run now</label>
+        <label class="check"><input type="radio" name="schedule_mode" value="schedule"
+                                    onchange="document.getElementById('sched-fields').style.display=''"> Run on a schedule</label>
+      </div>
+      <div id="sched-fields" style="display:none; margin-top:.6em">
+        <label>Schedule name <small class="muted">(shown on /schedules)</small>
+          <input name="schedule_name" placeholder="nightly app.example.com">
+        </label>
+        <label>Cron expression <small class="muted">(5-field, UTC)</small>
+          <input name="cron_expr" placeholder="0 2 * * *  (every day at 02:00 UTC)">
+        </label>
+        <div style="display:flex; gap:1em; flex-wrap:wrap">
+          <label>Start after <small class="muted">(optional, UTC)</small>
+            <input name="start_after" type="datetime-local">
+          </label>
+          <label>End before <small class="muted">(optional, UTC)</small>
+            <input name="end_before" type="datetime-local">
+          </label>
+        </div>
+        <label class="check">
+          <input type="checkbox" name="skip_if_running" checked>
+          Skip if a same-FQDN scan is still running
+          <small class="muted">— prevents stacking when a scan outruns its cadence.</small>
+        </label>
+        <p class="muted" style="margin:.4em 0 0">
+          See <a href="https://crontab.guru/" target="_blank" rel="noopener">crontab.guru</a>
+          for cron syntax. Manage existing schedules at
+          <a href="{{ base }}/schedules">/schedules</a>.
+        </p>
+      </div>
+    </fieldset>
+
     <button type="submit">Start assessment</button>
   </form>
 </section>

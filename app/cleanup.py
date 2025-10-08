@@ -355,3 +355,54 @@ def delete_scan(scan_id: str) -> dict:
     if result.get("ok"):
         _audit("scan_deleted", scan_id=scan_id, **result)
     return result
+
+
+def dedupe_for_fqdn(aid: int) -> int:
+    """If assessment <aid> has keep_only_latest=1, mark every OTHER same-fqdn
+    assessment in (done, error, cancelled) as 'deleting' so the lifespan
+    sweeper tears them down asynchronously.
+
+    Returns the number of rows marked. Safe to call on any assessment id
+    (no-ops cleanly if the row is missing or keep_only_latest=0).
+
+    Important properties:
+      - In-flight scans (queued, running, consolidating, deleting) are
+        NEVER touched. We won't race a running orchestrator.
+      - Only OTHER rows are marked — the just-finished assessment <aid>
+        itself is excluded so the user keeps the latest run.
+      - Idempotent: marking an already-'deleting' row is harmless because
+        of the status filter.
+
+    Called from scripts/orchestrator.py at the very end of the run, after
+    the row's terminal status has been written.
+    """
+    row = db.query_one(
+        "SELECT fqdn, keep_only_latest FROM assessments WHERE id=%s",
+        (aid,),
+    )
+    if not row:
+        return 0
+    if not int(row.get("keep_only_latest") or 0):
+        return 0
+
+    fqdn = row["fqdn"]
+    victims = db.query(
+        """SELECT id FROM assessments
+            WHERE fqdn = %s
+              AND id <> %s
+              AND status IN ('done','error','cancelled')""",
+        (fqdn, aid),
+    )
+    if not victims:
+        return 0
+
+    ids = [v["id"] for v in victims]
+    placeholders = ",".join(["%s"] * len(ids))
+    db.execute(
+        f"UPDATE assessments SET status='deleting' "
+        f"WHERE id IN ({placeholders})",
+        ids,
+    )
+    _audit("dedupe_marked", trigger_assessment_id=aid, fqdn=fqdn,
+           marked_assessment_ids=ids, count=len(ids))
+    return len(ids)

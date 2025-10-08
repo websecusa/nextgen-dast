@@ -67,6 +67,7 @@ from fastapi.responses import (HTMLResponse, JSONResponse, PlainTextResponse,
 from pydantic import BaseModel, Field
 
 import db
+import schedules as schedules_mod
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +343,78 @@ class CreateScanRequest(BaseModel):
         None, description="Application password for authenticated scan")
     login_url: Optional[str] = Field(
         None, description="Form-POST login URL (used with creds)")
+    keep_only_latest: bool = Field(
+        False,
+        description="When true, the orchestrator's finalize step deletes "
+                    "every other completed (done/error/cancelled) "
+                    "assessment for the same FQDN once this scan finishes. "
+                    "In-flight scans are never touched.")
+
+
+class CreateScheduleRequest(BaseModel):
+    """Body of POST /api/v1/schedules. Mirrors CreateScanRequest plus the
+    cron expression and schedule-only knobs."""
+    name: str = Field(..., examples=["nightly app.example.com"])
+    fqdn: str = Field(..., examples=["app.example.com",
+                                     "app.example.com:8443"])
+    cron_expr: str = Field(
+        ...,
+        description="Standard 5-field cron expression in UTC. "
+                    "Validated by croniter.",
+        examples=["0 2 * * *"])
+    application_id: Optional[str] = Field(None, max_length=128)
+    profile: str = Field("standard")
+    llm_tier: str = Field("none")
+    scan_http: bool = Field(True)
+    scan_https: bool = Field(True)
+    llm_endpoint_id: Optional[int] = None
+    user_agent_id: Optional[int] = None
+    creds_username: Optional[str] = None
+    creds_password: Optional[str] = None
+    login_url: Optional[str] = None
+    start_after: Optional[str] = Field(
+        None,
+        description="ISO-8601 datetime; the schedule never fires before "
+                    "this moment.")
+    end_before: Optional[str] = Field(
+        None,
+        description="ISO-8601 datetime; once the wall clock passes this, "
+                    "the schedule stops firing.")
+    enabled: bool = Field(True)
+    skip_if_running: bool = Field(
+        True,
+        description="If a same-FQDN assessment is still in flight when a "
+                    "tick is due, skip this round (next_run_at still "
+                    "advances).")
+    keep_only_latest: bool = Field(
+        False,
+        description="Carries through to every materialized assessment so "
+                    "the orchestrator's finalize step auto-deletes prior "
+                    "completed scans for the same FQDN.")
+
+
+class UpdateScheduleRequest(BaseModel):
+    """Body of PATCH /api/v1/schedules/{id}. Every field is optional;
+    omitted fields are left untouched. cron_expr / start_after changes
+    trigger a recompute of next_run_at."""
+    name: Optional[str] = None
+    fqdn: Optional[str] = None
+    cron_expr: Optional[str] = None
+    application_id: Optional[str] = Field(None, max_length=128)
+    profile: Optional[str] = None
+    llm_tier: Optional[str] = None
+    scan_http: Optional[bool] = None
+    scan_https: Optional[bool] = None
+    llm_endpoint_id: Optional[int] = None
+    user_agent_id: Optional[int] = None
+    creds_username: Optional[str] = None
+    creds_password: Optional[str] = None
+    login_url: Optional[str] = None
+    start_after: Optional[str] = None
+    end_before: Optional[str] = None
+    enabled: Optional[bool] = None
+    skip_if_running: Optional[bool] = None
+    keep_only_latest: Optional[bool] = None
 
 
 class CreateScanResponse(BaseModel):
@@ -537,8 +610,8 @@ def api_create_scan(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
-            application_id, status)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
+            application_id, keep_only_latest, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
         (fqdn,
          1 if body.scan_http else 0,
          1 if body.scan_https else 0,
@@ -548,7 +621,8 @@ def api_create_scan(
          (body.creds_username or None),
          (body.creds_password or None),
          (body.login_url or None),
-         application_id),
+         application_id,
+         1 if body.keep_only_latest else 0),
     )
     _spawn_orchestrator(aid)
     row = db.query_one(
@@ -743,6 +817,135 @@ def _api_base_url(request: Request) -> str:
     return f"{scheme}://{host}{root}"
 
 
+# ---------------------------------------------------------------------------
+# Scheduled scans (REST surface mirroring the /schedules web UI)
+#
+# The lifespan sweeper materializes each due schedule into a real assessment
+# and spawns its orchestrator. These endpoints CRUD the schedule rows; they
+# never touch the assessments table directly.
+# ---------------------------------------------------------------------------
+
+def _serialize_schedule(s: dict) -> dict:
+    """DB row → JSON-safe dict. datetime / date columns become ISO strings;
+    NULLs pass through. Mirrors `_serialize_assessment`."""
+    out: dict[str, Any] = {}
+    for k, v in s.items():
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    # Decorate with a 3-fire preview so callers can sanity-check their cron
+    # expression without re-running croniter on the client side.
+    out["next_runs"] = [
+        d.isoformat()
+        for d in schedules_mod.preview_runs(s.get("cron_expr") or "", 3)
+    ]
+    return out
+
+
+@router.post("/schedules", status_code=201,
+             summary="Create a scheduled scan")
+def api_create_schedule(
+    body: CreateScheduleRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Create a cron-driven scan recipe. The lifespan sweeper materializes
+    each due fire into a normal `/api/v1/scans` row; poll those for
+    progress as usual. Validation errors are returned as 400 with the
+    croniter / field-validation message in `detail`."""
+    _require_token(request, authorization, x_api_token)
+    try:
+        sid = schedules_mod.create(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    row = schedules_mod.get(sid)
+    return JSONResponse(status_code=201, content=_serialize_schedule(row))
+
+
+@router.get("/schedules", summary="List scheduled scans")
+def api_list_schedules(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    _require_token(request, authorization, x_api_token)
+    return {"schedules": [_serialize_schedule(s)
+                          for s in schedules_mod.list_all()]}
+
+
+@router.get("/schedules/{sid}", summary="Fetch one schedule")
+def api_get_schedule(
+    sid: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    _require_token(request, authorization, x_api_token)
+    row = schedules_mod.get(sid)
+    if not row:
+        raise HTTPException(404, "schedule not found")
+    return _serialize_schedule(row)
+
+
+@router.patch("/schedules/{sid}", summary="Update a scheduled scan")
+def api_update_schedule(
+    sid: int,
+    body: UpdateScheduleRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Partial update — every field is optional, omitted fields are left
+    alone. Updating cron_expr or start_after recomputes next_run_at."""
+    _require_token(request, authorization, x_api_token)
+    if not schedules_mod.get(sid):
+        raise HTTPException(404, "schedule not found")
+    # Drop None fields so they don't overwrite existing values.
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        schedules_mod.update(sid, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _serialize_schedule(schedules_mod.get(sid))
+
+
+@router.delete("/schedules/{sid}", status_code=204,
+               summary="Delete a scheduled scan")
+def api_delete_schedule(
+    sid: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    _require_token(request, authorization, x_api_token)
+    if not schedules_mod.get(sid):
+        raise HTTPException(404, "schedule not found")
+    schedules_mod.delete(sid)
+    return JSONResponse(status_code=204, content=None)
+
+
+@router.post("/schedules/{sid}/run", status_code=202,
+             summary="Run a scheduled scan now (one-off)")
+def api_run_schedule(
+    sid: int,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_token: Optional[str] = Header(None, alias="X-API-Token"),
+):
+    """Materializes the schedule into an assessment immediately, without
+    touching `next_run_at` — the regular cron cadence is undisturbed.
+    Returns 202 with the new scan id so the caller can poll
+    `/api/v1/scans/{scan_id}` as usual."""
+    _require_token(request, authorization, x_api_token)
+    aid = schedules_mod.spawn_one_off(sid)
+    if aid is None:
+        raise HTTPException(404, "schedule not found")
+    return JSONResponse(status_code=202, content={"scan_id": aid,
+                                                  "schedule_id": sid})
+
+
 @router.get("/openapi.json", summary="OpenAPI 3.0 service definition")
 def api_openapi(request: Request):
     """Self-contained OpenAPI 3.0 doc. We build it by hand (rather than
@@ -863,6 +1066,15 @@ def _openapi_schemas() -> dict:
                                      "format": "password"},
                 "login_url":        {"type": "string", "nullable": True,
                                      "format": "uri"},
+                "keep_only_latest": {"type": "boolean", "default": False,
+                                     "description":
+                                         "When true, the orchestrator "
+                                         "deletes every other completed "
+                                         "(done/error/cancelled) "
+                                         "assessment for the same FQDN "
+                                         "once this scan finishes. "
+                                         "In-flight scans are never "
+                                         "touched."},
             },
         },
         "CreateScanResponse": {
@@ -942,6 +1154,113 @@ def _openapi_schemas() -> dict:
             "properties": {
                 "scans": {"type": "array",
                           "items": {"$ref": "#/components/schemas/ScanStatus"}},
+            },
+        },
+        "CreateScheduleRequest": {
+            "type": "object",
+            "required": ["name", "fqdn", "cron_expr"],
+            "properties": {
+                "name": {"type": "string"},
+                "fqdn": {"type": "string",
+                         "example": "app.example.com"},
+                "cron_expr": {"type": "string",
+                              "example": "0 2 * * *",
+                              "description":
+                                  "5-field UTC cron expression."},
+                "application_id": {"type": "string", "nullable": True},
+                "profile": {"type": "string",
+                            "enum": ["quick", "standard",
+                                     "thorough", "premium"],
+                            "default": "standard"},
+                "llm_tier": {"type": "string",
+                             "enum": ["none", "basic", "advanced"],
+                             "default": "none"},
+                "scan_http": {"type": "boolean", "default": True},
+                "scan_https": {"type": "boolean", "default": True},
+                "llm_endpoint_id": {"type": "integer", "nullable": True},
+                "user_agent_id": {"type": "integer", "nullable": True},
+                "creds_username": {"type": "string", "nullable": True},
+                "creds_password": {"type": "string", "nullable": True},
+                "login_url": {"type": "string", "nullable": True},
+                "start_after": {"type": "string",
+                                "format": "date-time",
+                                "nullable": True},
+                "end_before": {"type": "string",
+                               "format": "date-time",
+                               "nullable": True},
+                "enabled": {"type": "boolean", "default": True},
+                "skip_if_running": {"type": "boolean", "default": True},
+                "keep_only_latest": {"type": "boolean", "default": False,
+                                     "description":
+                                         "Carries through to every "
+                                         "materialized assessment so the "
+                                         "orchestrator's finalize step "
+                                         "auto-deletes prior completed "
+                                         "scans for the same FQDN."},
+            },
+        },
+        "UpdateScheduleRequest": {
+            "type": "object",
+            "description":
+                "Partial update — every field is optional. Updating "
+                "cron_expr or start_after recomputes next_run_at.",
+            "properties": {
+                "name": {"type": "string"},
+                "fqdn": {"type": "string"},
+                "cron_expr": {"type": "string"},
+                "application_id": {"type": "string", "nullable": True},
+                "profile": {"type": "string"},
+                "llm_tier": {"type": "string"},
+                "scan_http": {"type": "boolean"},
+                "scan_https": {"type": "boolean"},
+                "llm_endpoint_id": {"type": "integer", "nullable": True},
+                "user_agent_id": {"type": "integer", "nullable": True},
+                "creds_username": {"type": "string", "nullable": True},
+                "creds_password": {"type": "string", "nullable": True},
+                "login_url": {"type": "string", "nullable": True},
+                "start_after": {"type": "string", "format": "date-time",
+                                "nullable": True},
+                "end_before": {"type": "string", "format": "date-time",
+                               "nullable": True},
+                "enabled": {"type": "boolean"},
+                "skip_if_running": {"type": "boolean"},
+                "keep_only_latest": {"type": "boolean"},
+            },
+        },
+        "Schedule": {
+            "type": "object",
+            "description":
+                "Scheduled-scan recipe. `next_runs` is a server-rendered "
+                "preview computed by croniter so callers don't need to "
+                "duplicate cron parsing.",
+            "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "fqdn": {"type": "string"},
+                "cron_expr": {"type": "string"},
+                "profile": {"type": "string"},
+                "llm_tier": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "skip_if_running": {"type": "boolean"},
+                "keep_only_latest": {"type": "boolean"},
+                "next_run_at": {"type": "string", "format": "date-time",
+                                "nullable": True},
+                "last_run_at": {"type": "string", "format": "date-time",
+                                "nullable": True},
+                "last_assessment_id": {"type": "integer", "nullable": True},
+                "next_runs": {"type": "array",
+                              "items": {"type": "string",
+                                        "format": "date-time"},
+                              "description":
+                                  "Server-computed preview of the next "
+                                  "few firings for sanity checks."},
+            },
+        },
+        "ScheduleList": {
+            "type": "object",
+            "properties": {
+                "schedules": {"type": "array",
+                              "items": {"$ref": "#/components/schemas/Schedule"}},
             },
         },
         "Error": {
@@ -1096,6 +1415,106 @@ def _openapi_paths() -> dict:
                                            "format": "binary"}},
                         },
                     },
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/schedules": {
+            "post": {
+                "summary": "Create a scheduled scan",
+                "description":
+                    "Create a cron-driven scan recipe. The lifespan "
+                    "sweeper materializes each due fire into a normal "
+                    "/api/v1/scans row; poll those for progress.",
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/CreateScheduleRequest"}}},
+                },
+                "responses": {
+                    "201": {"description": "schedule created",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/Schedule"}}}},
+                    **err_responses,
+                },
+            },
+            "get": {
+                "summary": "List scheduled scans",
+                "responses": {
+                    "200": {"description": "schedule list",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/ScheduleList"}}}},
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/schedules/{schedule_id}": {
+            "get": {
+                "summary": "Fetch one schedule",
+                "parameters": [
+                    {"name": "schedule_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                ],
+                "responses": {
+                    "200": {"description": "schedule",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/Schedule"}}}},
+                    **err_responses,
+                },
+            },
+            "patch": {
+                "summary": "Update a scheduled scan",
+                "description":
+                    "Partial update — every field is optional. Updating "
+                    "cron_expr or start_after recomputes next_run_at.",
+                "parameters": [
+                    {"name": "schedule_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/UpdateScheduleRequest"}}},
+                },
+                "responses": {
+                    "200": {"description": "updated",
+                            "content": {"application/json": {
+                                "schema": {"$ref": "#/components/schemas/Schedule"}}}},
+                    **err_responses,
+                },
+            },
+            "delete": {
+                "summary": "Delete a scheduled scan",
+                "parameters": [
+                    {"name": "schedule_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                ],
+                "responses": {
+                    "204": {"description": "deleted"},
+                    **err_responses,
+                },
+            },
+        },
+        "/api/v1/schedules/{schedule_id}/run": {
+            "post": {
+                "summary": "Run a scheduled scan now (one-off)",
+                "description":
+                    "Materializes the schedule into an assessment "
+                    "immediately. Does not affect next_run_at.",
+                "parameters": [
+                    {"name": "schedule_id", "in": "path", "required": True,
+                     "schema": {"type": "integer"}},
+                ],
+                "responses": {
+                    "202": {"description": "queued",
+                            "content": {"application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "scan_id": {"type": "integer"},
+                                        "schedule_id": {"type": "integer"},
+                                    },
+                                }}}},
                     **err_responses,
                 },
             },
