@@ -520,21 +520,83 @@ proxy / Automatic** so non-assessment traffic doesn't get intercepted.
 ## Day-2 operations
 
 The `pentest.sh` script wraps `docker compose` with the right `--env-file`
-flag — saves you from typing it every time:
+flag — saves you from typing it every time. Use it for everything you'd
+normally hand to `docker compose`, plus a few extras like `reset` for
+admin-password rotation.
 
-```bash
-./pentest.sh ps                    # what's running
-./pentest.sh logs -f nextgen-dast  # follow application logs
-./pentest.sh logs -f mariadb       # follow database logs
-./pentest.sh down                  # stop the stack (keeps data)
-./pentest.sh up -d                 # start it again
-./pentest.sh exec nextgen-dast bash    # shell into the app container
-./pentest.sh restart nextgen-dast
-./pentest.sh reset                 # regenerate admin password (writes new
-                                   # secrets file, keeps all data)
-./pentest.sh reset-full            # ALSO TRUNCATE every table — destroys all
-                                   # assessments, findings, etc.
-```
+### Quick reference
+
+The table below is the canonical cheat sheet — `HELP.txt` in this directory
+mirrors the same content for at-a-glance use on the host. Anything not
+listed here (e.g. `./pentest.sh top`, `./pentest.sh config`,
+`./pentest.sh kill`) is forwarded straight to `docker compose` with the
+right `--env-file`, so the full Compose CLI is available without typing
+the env-file path each time.
+
+#### First-time bring-up
+
+| What you want | Run this |
+|---|---|
+| First-time host setup (Docker, sysctls, certs) — only once per host | `sudo ./setup.sh` |
+| First-time stack bring-up (generate env file, build, start, seed admin) | `./pentest.sh bootstrap` |
+
+`setup.sh` runs once per host and is the bootstrap helper from the deploy
+tarball; `pentest.sh bootstrap` runs once per deployment and is what
+actually creates the random `.env_<hex>` file, builds (or pulls) the
+image, brings the stack up, waits for MariaDB to be healthy, then runs
+the initial `reset` so you have a working admin password.
+
+#### Lifecycle
+
+| What you want | Run this |
+|---|---|
+| Start the stack | `./pentest.sh up -d` |
+| Stop the stack (remove containers, keep data volume) | `./pentest.sh down` |
+| Stop services without removing the containers | `./pentest.sh stop` |
+| Start previously-stopped containers | `./pentest.sh start` |
+| Restart everything | `./pentest.sh restart` (or `./pentest.sh down && ./pentest.sh up -d`) |
+| Restart just the app, leave MariaDB alone | `./pentest.sh restart nextgen-dast` |
+
+#### Image management
+
+| What you want | Run this |
+|---|---|
+| Pull a new image from the registry | `./pentest.sh pull` |
+| Pull **and** restart with the new image | `./pentest.sh pull && ./pentest.sh up -d` |
+| Build the image locally from `./Dockerfile` | `./pentest.sh build` |
+| Rebuild from local source **and** restart | `./pentest.sh build && ./pentest.sh up -d` |
+| Force a clean rebuild (no cache) | `./pentest.sh build --no-cache` |
+
+#### Inspection
+
+| What you want | Run this |
+|---|---|
+| See what's running and the image tag in use | `./pentest.sh ps` |
+| Tail app logs (follow) | `./pentest.sh logs -f nextgen-dast` |
+| Tail DB logs (follow) | `./pentest.sh logs -f mariadb` |
+| Dump the last 200 lines of app logs and exit | `./pentest.sh logs --tail 200 nextgen-dast` |
+| Show running container resource usage | `./pentest.sh top` |
+| Validate the rendered compose config | `./pentest.sh config` |
+
+#### Shells
+
+| What you want | Run this |
+|---|---|
+| Bash shell inside the app container | `./pentest.sh exec nextgen-dast bash` |
+| MariaDB SQL shell as root (password is in the `.env_<hex>` file) | `./pentest.sh exec mariadb mariadb -uroot -p` |
+
+#### Admin / data
+
+| What you want | Run this |
+|---|---|
+| Rotate admin password and re-seed (keeps assessments, findings, scans) | `./pentest.sh reset` |
+| Change admin password to a known value | `./pentest.sh reset --admin-password 'pass'` |
+| Wipe every application table **and** rotate admin (destructive!) | `./pentest.sh reset-full` |
+
+`./pentest.sh reset` writes a new secrets file and rotates the admin
+password but **keeps all assessments, findings, scans, and reports**.
+`./pentest.sh reset-full` truncates every application table on top of that
+— use it only when you genuinely want to start from an empty database.
 
 ### Upgrading to a newer image
 
