@@ -461,19 +461,43 @@ async def lifespan(app):
     except Exception as e:
         print(f"[startup] zombie reap failed: {e!r}", flush=True)
 
-    # Schema drift check. If the live DB is missing any column the
-    # application reads at runtime, log a loud warning so the operator
-    # sees it in startup logs. We do not abort — the existing schema.sql
-    # is idempotent and a re-run of scripts/reset.py usually heals drift —
-    # but we want this in front of the operator's eyes immediately.
+    # Schema drift check + auto-heal. If the live DB is missing any table
+    # or column the application reads at runtime, apply db/schema.sql in
+    # place so an admin who just `docker compose pull && up -d`'d into a
+    # newer image gets the new tables/columns without a separate
+    # `pentest.sh reset` step. schema.sql is idempotent (every CREATE has
+    # IF NOT EXISTS, every ALTER uses IF NOT EXISTS / MODIFY, every INSERT
+    # uses INSERT IGNORE), so re-applying it on a clean DB is a no-op
+    # beyond the round-trips. We only run the heal when drift is detected
+    # so steady-state restarts stay fast.
     try:
         from scripts.verify_schema import check as _schema_check
         issues = _schema_check(db)
         if issues:
-            print("[startup] SCHEMA DRIFT DETECTED — re-run scripts/reset.py "
-                  "to apply migrations:", flush=True)
+            print("[startup] schema drift detected — auto-applying "
+                  "db/schema.sql:", flush=True)
             for line in issues:
                 print(f"[startup]   - {line}", flush=True)
+            try:
+                from scripts.reset import apply_schema as _apply_schema
+                with db.get_db() as _conn:
+                    _apply_schema(_conn, "/app/db/schema.sql")
+                # Re-verify so the operator can see whether the heal
+                # actually closed every gap. A residual drift after this
+                # block indicates a hand-edited schema.sql or insufficient
+                # DB privileges — both require human attention.
+                residual = _schema_check(db)
+                if residual:
+                    print("[startup] SCHEMA DRIFT REMAINS after auto-heal "
+                          "— investigate / re-run scripts/reset.py:",
+                          flush=True)
+                    for line in residual:
+                        print(f"[startup]   - {line}", flush=True)
+                else:
+                    print("[startup] schema drift healed.", flush=True)
+            except Exception as e:
+                print(f"[startup] auto-heal failed: {e!r} — re-run "
+                      f"scripts/reset.py manually", flush=True)
     except Exception as e:
         print(f"[startup] schema verify failed: {e!r}", flush=True)
 
@@ -4095,15 +4119,28 @@ def admin_branding_save_pdf(
     return redirect("/admin/branding/pdf?msg=pdf+branding+saved")
 
 
+def _branding_section_for(kind: str) -> str:
+    """Map a logo kind to the admin sub-page that owns it. Used so upload
+    and delete redirects land back on the page the user was actually
+    looking at (web vs PDF) — landing on the branding index makes the new
+    logo appear absent because the index doesn't render the logo at all."""
+    if kind == "web_header":
+        return "/admin/branding/web"
+    # pdf_header, pdf_footer and the legacy header/footer aliases all live
+    # on the PDF page.
+    return "/admin/branding/pdf"
+
+
 @app.post("/admin/branding/logo/{kind}")
 async def admin_branding_logo_upload(kind: str, file: UploadFile = File(...)):
     if kind not in branding_mod.ALLOWED_KINDS:
         raise HTTPException(400, "kind must be 'header' or 'footer'")
     data = await file.read()
     result = branding_mod.save_logo(kind, data)
+    section = _branding_section_for(kind)
     if not result.get("ok"):
-        return redirect(f"/admin/branding?msg=upload+failed:+{result.get('error','?')}")
-    return redirect(f"/admin/branding?msg={kind}+logo+saved")
+        return redirect(f"{section}?msg=upload+failed:+{result.get('error','?')}")
+    return redirect(f"{section}?msg={kind}+logo+saved")
 
 
 @app.post("/admin/branding/logo/{kind}/delete")
@@ -4111,7 +4148,7 @@ def admin_branding_logo_delete(kind: str):
     if kind not in branding_mod.ALLOWED_KINDS:
         raise HTTPException(400, "kind must be 'header' or 'footer'")
     branding_mod.delete_logo(kind)
-    return redirect(f"/admin/branding?msg={kind}+logo+removed")
+    return redirect(f"{_branding_section_for(kind)}?msg={kind}+logo+removed")
 
 
 # Toolkit (validation probes) -------------------------------------------------

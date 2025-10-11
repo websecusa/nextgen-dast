@@ -36,8 +36,13 @@ CREATE TABLE IF NOT EXISTS branding (
   tagline VARCHAR(255),
   primary_color VARCHAR(16) NOT NULL DEFAULT '#5fb3d7',
   accent_color VARCHAR(16) NOT NULL DEFAULT '#7bc47f',
-  classification VARCHAR(64) NOT NULL DEFAULT 'CONFIDENTIAL',
-  classification_color VARCHAR(16) NOT NULL DEFAULT '#e67373',
+  -- Classification banner is optional. The column-level DEFAULT seeds a
+  -- sensible value on a fresh install, but the column is NULL-able so an
+  -- admin can clear the banner from /admin/branding without tripping a
+  -- NOT NULL violation. base.html only renders the banner when this value
+  -- is truthy, so NULL/empty correctly hides it.
+  classification VARCHAR(64) DEFAULT 'CONFIDENTIAL',
+  classification_color VARCHAR(16) DEFAULT '#e67373',
   header_text VARCHAR(255),
   footer_text VARCHAR(255),
   disclaimer TEXT,
@@ -547,6 +552,14 @@ ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_cover_text_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_header_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_body_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_link_color VARCHAR(16);
+
+-- Make the classification banner optional on existing DBs. Earlier installs
+-- created these columns NOT NULL, which made it impossible to clear the
+-- banner via /admin/branding (the form handler converts an empty string to
+-- NULL and the UPDATE then 500s). The MODIFY below relaxes the constraint;
+-- existing CONFIDENTIAL values are preserved.
+ALTER TABLE branding MODIFY COLUMN classification VARCHAR(64) DEFAULT 'CONFIDENTIAL';
+ALTER TABLE branding MODIFY COLUMN classification_color VARCHAR(16) DEFAULT '#e67373';
 
 -- Older users rows pre-date the role / disabled / last_login columns. The
 -- UPDATE below migrates legacy is_admin=1 accounts to the new role column.

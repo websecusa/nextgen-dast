@@ -45,22 +45,30 @@ own colors, fonts, severity palette, and logo.</p>
 
 <section class="card">
   <h2>Shared (used by both)</h2>
+  <p class="muted small">Fields marked <span style="color:#c0392b">*</span>
+     are required. All other fields are optional &mdash; leave them blank
+     to suppress the corresponding piece of chrome (e.g. clear the
+     classification field to remove the banner from the app and PDF).</p>
   <form method="post" action="{{ base }}/admin/branding/shared">
-    <label>Company name <input name="company_name" value="{{ brand.company_name or '' }}" required></label>
-    <label>Tagline <input name="tagline" value="{{ brand.tagline or '' }}"></label>
-    <label>Classification banner text
-      <input name="classification" value="{{ brand.classification or 'CONFIDENTIAL' }}">
+    <label>Company name <span style="color:#c0392b">*</span>
+      <input name="company_name" value="{{ brand.company_name or '' }}" required>
     </label>
-    <label>Contact email
+    <label>Tagline <span class="muted small">(optional)</span>
+      <input name="tagline" value="{{ brand.tagline or '' }}">
+    </label>
+    <label>Classification banner text <span class="muted small">(optional &mdash; leave blank to hide the banner)</span>
+      <input name="classification" value="{{ brand.classification or '' }}" placeholder="e.g. CONFIDENTIAL">
+    </label>
+    <label>Contact email <span class="muted small">(optional)</span>
       <input type="email" name="contact_email" value="{{ brand.contact_email or '' }}">
     </label>
-    <label>Header text (optional, shown in app + PDF running header)
+    <label>Header text <span class="muted small">(optional &mdash; shown in app + PDF running header)</span>
       <input name="header_text" value="{{ brand.header_text or '' }}">
     </label>
-    <label>Footer text
+    <label>Footer text <span class="muted small">(optional)</span>
       <input name="footer_text" value="{{ brand.footer_text or '' }}">
     </label>
-    <label>Disclaimer (printed in PDF + app footer)
+    <label>Disclaimer <span class="muted small">(optional &mdash; printed in PDF + app footer)</span>
       <textarea name="disclaimer" rows="3">{{ brand.disclaimer or '' }}</textarea>
     </label>
     <button type="submit">Save shared</button>
