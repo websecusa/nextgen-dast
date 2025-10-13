@@ -76,8 +76,13 @@
 
 <div class="app">
   <aside class="sidebar">
+    {# Sidebar logo. The dedicated web logo (web_header_logo_filename) wins
+       when set; we fall back to the legacy PDF header logo so a single
+       uploaded image still works for users who haven't migrated. #}
     <a href="{{ base }}/" class="brand">
-      {% if brand and brand.header_logo_filename %}
+      {% if brand and brand.web_header_logo_filename %}
+        <img src="{{ base }}/branding/logo/web_header" alt="">
+      {% elif brand and brand.header_logo_filename %}
         <img src="{{ base }}/branding/logo/header" alt="">
       {% endif %}
       <span>{{ brand.company_name or "nextgen-dast" }}</span>

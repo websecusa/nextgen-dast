@@ -3791,9 +3791,18 @@ def login_page(request: Request, next: str = "", error: str = ""):
     payload = sessions.verify(cookie)
     if payload and payload.get("csrf"):
         return RedirectResponse(next or f"{ROOT_PATH}/", status_code=303)
+    # Pull just enough branding for the login chrome to match the rest of
+    # the app (logo + product name). Wrapped in try/except so a DB outage
+    # doesn't make the login page itself unreachable — the template hides
+    # the <img> with onerror and falls back to "nextgen-dast" for the name.
+    try:
+        brand = branding_mod.get() if db.healthy() else {}
+    except Exception:
+        brand = {}
     return templates.TemplateResponse(
         "login.html",
-        {"request": request, "base": ROOT_PATH, "next": next, "error": error},
+        {"request": request, "base": ROOT_PATH, "next": next,
+         "error": error, "brand": brand},
     )
 
 
