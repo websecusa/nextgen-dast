@@ -29,7 +29,10 @@
 <section class="card">
   <h2>Logo</h2>
   {% if web.header_logo_filename %}
-    <p><img src="{{ base }}/branding/logo/web_header" alt="" style="max-height:60px;background:#fff;padding:.4em;border-radius:4px"></p>
+    <p><img src="{{ base }}/branding/logo/web_header" alt=""
+            style="max-height:60px; max-width:100%; width:auto; height:auto;
+                   object-fit:contain; background:#fff; padding:.4em;
+                   border-radius:4px"></p>
     <form method="post" action="{{ base }}/admin/branding/logo/web_header/delete"
           onsubmit="return confirm('Remove web logo?')">
       <button type="submit" class="warn">Remove</button>
