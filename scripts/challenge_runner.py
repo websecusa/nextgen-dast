@@ -57,9 +57,21 @@ def _now():
 
 def _verdict_to_status(verdict: dict) -> str:
     """Same mapping as server._verdict_to_status — duplicated here so
-    this script can run standalone without importing the FastAPI app."""
-    if not verdict.get("ok", True) or verdict.get("error"):
+    this script can run standalone without importing the FastAPI app.
+
+    Distinguish a real crash (`error` field set — subprocess exception,
+    safety violation) from a soft refusal (probe ran cleanly but
+    declined to produce a verdict — `ok=False`, no error). The earlier
+    revision lumped both into 'errored', which had two bad effects:
+    the analyst saw a red badge for a perfectly clean run that just
+    needed different inputs, and the next bulk pass would skip those
+    findings as terminal even though they were re-runnable. Soft
+    refusals now collapse to 'inconclusive'.
+    """
+    if verdict.get("error"):
         return "errored"
+    if not verdict.get("ok", True):
+        return "inconclusive"
     v = verdict.get("validated")
     if v is True:
         return "validated"
@@ -132,16 +144,23 @@ def run(aid: int, safe_only: bool = False) -> None:
                 "login_diagnostics": result.get("diagnostics") or {},
             }
 
-    # 2. Enumerate candidate findings — open + unvalidated + has an
-    # evidence URL + severity is actionable. We deliberately skip 'info'
-    # severity rows because info-level findings are reconnaissance signal,
-    # not vulnerabilities, and burning probe budget on them dilutes the
-    # batch run. Excluding already-validated rows means re-running this
-    # is a no-op for findings that have been challenged manually.
+    # 2. Enumerate candidate findings — open + has an evidence URL +
+    # severity is actionable + validation_status is non-terminal. Info-
+    # severity rows are skipped because they're reconnaissance signal
+    # rather than vulnerabilities and burning probe budget on them
+    # dilutes the run. Validation states are split into terminal vs
+    # re-runnable: 'validated' and 'false_positive' are terminal (the
+    # probe already gave a confident verdict and the analyst should
+    # review manually before re-firing), while 'errored' and
+    # 'inconclusive' are re-runnable — a transient probe failure or a
+    # bad first attempt should NOT freeze the finding out of every
+    # subsequent bulk run, which is the trap the per-finding Challenge
+    # button avoided but this filter previously walked into.
     findings = db.query(
         "SELECT * FROM findings WHERE assessment_id = %s "
         "  AND COALESCE(status,'open') = 'open' "
-        "  AND COALESCE(validation_status,'unvalidated') = 'unvalidated' "
+        "  AND COALESCE(validation_status,'unvalidated') "
+        "      NOT IN ('validated','false_positive') "
         "  AND severity IN ('critical','high','medium','low') "
         "  AND evidence_url IS NOT NULL AND evidence_url <> '' "
         "ORDER BY FIELD(severity,'critical','high','medium','low'), id",

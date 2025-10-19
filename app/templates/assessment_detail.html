@@ -65,11 +65,60 @@
             onsubmit="return confirm('Run every matched toolkit probe against the {{ counts.open }} open finding(s) on this assessment? Some probes (xss_reflect, sqli_boolean, …) inject payloads — only run against systems you are authorized to test. Progress will appear in the status field.')">
         <button type="submit" class="ghost">Challenge all findings</button>
       </form>
-      <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
-            style="display:inline"
-            onsubmit="return confirm('Permanently delete assessment #{{ a.id }} ({{ a.fqdn }}) and all of its scan files? This cannot be undone.')">
-        <button type="submit" class="warn">Delete assessment</button>
+      {# Delete uses a styled <dialog> rather than window.confirm() so the
+         confirmation reads as part of the app, matches the rest of the
+         chrome (border, accent color, Cancel/Confirm buttons), and is
+         less prone to being dismissed accidentally by a stray Enter. #}
+      <form id="delete-assessment-form" method="post"
+            action="{{ base }}/assessment/{{ a.id }}/delete"
+            style="display:inline">
+        <button type="button" class="warn"
+                onclick="document.getElementById('delete-assessment-modal').showModal()">
+          Delete assessment
+        </button>
       </form>
+
+      <dialog id="delete-assessment-modal"
+              style="max-width:min(90vw, 540px); padding:0;
+                     background:var(--panel); color:var(--text);
+                     border:2px solid var(--sev-high, #c0392b);
+                     border-radius:10px;
+                     box-shadow:0 0 0 1px rgba(0,0,0,0.55),
+                                0 18px 48px rgba(0,0,0,0.55)">
+        <style>#delete-assessment-modal::backdrop { background: rgba(0,0,0,0.55); }</style>
+        <div style="padding:1em 1.2em; border-bottom:2px solid var(--sev-high, #c0392b);
+                    background:rgba(192,57,43,0.08)">
+          <strong style="font-size:1.05em">Delete assessment #{{ a.id }}?</strong>
+        </div>
+        <div style="padding:1em 1.2em; line-height:1.5">
+          <p style="margin:0 0 .8em">
+            This will permanently delete assessment
+            <strong>#{{ a.id }}</strong> for
+            <code>{{ a.fqdn }}</code>, along with:
+          </p>
+          <ul style="margin:0 0 .8em 1.2em; padding:0; color:var(--text-soft)">
+            <li>all scan output files on disk</li>
+            <li>all {{ counts.all }} finding(s) attached to it</li>
+            <li>any generated PDF reports</li>
+            <li>orchestrator logs</li>
+          </ul>
+          <p style="margin:0; color:var(--sev-high, #c0392b); font-weight:600">
+            This action cannot be undone.
+          </p>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:.5em;
+                    padding:.8em 1.2em; border-top:1px solid var(--border);
+                    background:rgba(255,255,255,0.02)">
+          <button type="button" class="ghost"
+                  onclick="document.getElementById('delete-assessment-modal').close()">
+            Cancel
+          </button>
+          <button type="button" class="warn"
+                  onclick="document.getElementById('delete-assessment-form').submit()">
+            Yes, delete this assessment
+          </button>
+        </div>
+      </dialog>
     {% endif %}
     <a href="{{ base }}/assess" class="button">Re-scan / new target</a>
   </div>
