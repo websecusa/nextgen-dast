@@ -22,7 +22,7 @@
      counter (not the docker tag); bump it when style.css meaningfully
      changes. Has no effect on the served file -- StaticFiles ignores
      the query string. #}
-  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260430a">
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260430b">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -45,10 +45,13 @@
        to its 300x150 default and shove the layout off-screen. */
     .icon { width:16px !important; height:16px !important;
             flex:0 0 16px; display:inline-block; vertical-align:middle; }
+    aside.sidebar .brand {
+        display:flex; flex-direction:column; align-items:flex-start;
+        gap:.35em; }
     aside.sidebar .brand img {
-        height:22px !important; max-height:22px !important;
-        width:auto !important; max-width:32px !important;
-        object-fit:contain; flex-shrink:0; display:inline-block; }
+        height:auto !important; max-height:56px !important;
+        width:auto !important; max-width:100% !important;
+        object-fit:contain; flex-shrink:0; display:block; }
   </style>
 </head>
 <body>
@@ -99,12 +102,12 @@
          still wins when it loads — these inline values are a hard floor. #}
       {% if brand and brand.web_header_logo_filename %}
         <img src="{{ base }}/branding/logo/web_header" alt="" width="22" height="22"
-             style="max-height:22px; max-width:32px; width:auto; height:auto;
-                    object-fit:contain; flex-shrink:0">
+             style="max-height:56px; max-width:100%; width:auto; height:auto;
+                    object-fit:contain; flex-shrink:0; display:block">
       {% elif brand and brand.header_logo_filename %}
         <img src="{{ base }}/branding/logo/header" alt="" width="22" height="22"
-             style="max-height:22px; max-width:32px; width:auto; height:auto;
-                    object-fit:contain; flex-shrink:0">
+             style="max-height:56px; max-width:100%; width:auto; height:auto;
+                    object-fit:contain; flex-shrink:0; display:block">
       {% endif %}
       <span>{{ brand.company_name or "nextgen-dast" }}</span>
     </a>

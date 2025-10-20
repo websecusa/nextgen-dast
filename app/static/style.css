@@ -79,27 +79,32 @@ aside.sidebar {
   height: 100vh;
   overflow-y: auto;
 }
+/* Logo stacked above the company name in the upper-left of the sidebar.
+   flex-direction:column gives the image its own row; align-items:flex-start
+   keeps the company name left-aligned under it instead of centered. */
 aside.sidebar .brand {
-  display: flex; align-items: center; gap: .55em;
-  padding: .2em .4em .6em;
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: .35em;
+  padding: .2em .4em .8em;
   font-weight: 700;
   color: var(--text);
   font-size: 14px;
   letter-spacing: -.01em;
 }
-/* Tightly clamp the brand logo regardless of the uploaded image's
-   intrinsic dimensions. Both !important rules defeat any user-uploaded
-   <img width=...> attribute or cached older stylesheet. With max-height
-   + max-width AND object-fit:contain, a logo with a transparent canvas
-   or wide aspect ratio cannot overflow the slim sidebar. */
+/* With the logo on its own row we can give it more vertical room than
+   the previous inline 22px cap. Width is capped at the sidebar's
+   content area so a wide banner image scales down proportionally
+   instead of overflowing; object-fit:contain preserves aspect ratio.
+   The !important rules defeat any user-uploaded <img width=...>
+   attribute or cached older stylesheet. */
 aside.sidebar .brand img {
-  height: 22px !important;
-  max-height: 22px !important;
+  height: auto !important;
+  max-height: 56px !important;
   width: auto !important;
-  max-width: 32px !important;
+  max-width: 100% !important;
   object-fit: contain;
   flex-shrink: 0;
-  display: inline-block;
+  display: block;
 }
 
 aside.sidebar .cta {
