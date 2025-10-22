@@ -79,17 +79,20 @@ aside.sidebar {
   height: 100vh;
   overflow-y: auto;
 }
-/* Logo stacked above the company name in the upper-left of the sidebar.
-   flex-direction:column gives the image its own row; align-items:flex-start
-   keeps the company name left-aligned under it instead of centered. */
+/* Logo stacked above the company name and centered horizontally inside
+   the sidebar column. flex-direction:column gives the image its own
+   row; align-items:center centers the logo and the name underneath it.
+   text-align:center handles the inline-text alignment on the company
+   name so a long name still reads centered when it wraps. */
 aside.sidebar .brand {
-  display: flex; flex-direction: column; align-items: flex-start;
+  display: flex; flex-direction: column; align-items: center;
   gap: .35em;
   padding: .2em .4em .8em;
   font-weight: 700;
   color: var(--text);
   font-size: 14px;
   letter-spacing: -.01em;
+  text-align: center;
 }
 /* With the logo on its own row we can give it more vertical room than
    the previous inline 22px cap. Width is capped at the sidebar's

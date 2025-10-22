@@ -22,7 +22,7 @@
      counter (not the docker tag); bump it when style.css meaningfully
      changes. Has no effect on the served file -- StaticFiles ignores
      the query string. #}
-  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260430b">
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260430c">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -46,8 +46,8 @@
     .icon { width:16px !important; height:16px !important;
             flex:0 0 16px; display:inline-block; vertical-align:middle; }
     aside.sidebar .brand {
-        display:flex; flex-direction:column; align-items:flex-start;
-        gap:.35em; }
+        display:flex; flex-direction:column; align-items:center;
+        gap:.35em; text-align:center; }
     aside.sidebar .brand img {
         height:auto !important; max-height:56px !important;
         width:auto !important; max-width:100% !important;
