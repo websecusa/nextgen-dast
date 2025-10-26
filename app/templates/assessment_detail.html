@@ -321,6 +321,70 @@
   // so a refresh / share-link keeps the same row open.
   const BASE = "{{ base }}";
 
+  // Right-rail Challenge button handler. Intercepts the form submit
+  // so the page does not navigate, fires /challenge_inline against the
+  // matched probe, then re-fetches the aside fragment so the
+  // validation badges (the "FP – Excluded" / "✓ Confirmed" pill next
+  // to the button, plus the at-a-glance Status / Validation rows)
+  // reflect the new state. No confirm dialog — analysts wanted a
+  // single-click flow.
+  //
+  // Returning false from onsubmit prevents the default POST.
+  async function runChallengeAside(event, fid) {
+    event.preventDefault();
+    const form = event.target.closest("form");
+    if (!form) return false;
+    const btn = form.querySelector("button[type=submit]");
+    // Snapshot the original button HTML so we can restore it if the
+    // request errors before we re-fetch the aside.
+    const originalHTML = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      // Replace any existing badge with a transient "Running…" label
+      // so the analyst sees that the click registered.
+      const existingBadge = btn.querySelector(".badge");
+      if (existingBadge) existingBadge.remove();
+      const running = document.createElement("span");
+      running.className = "badge running";
+      running.style.marginLeft = "auto";
+      running.textContent = "Running…";
+      btn.appendChild(running);
+    }
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_inline", {
+        method: "POST", credentials: "same-origin",
+      });
+      let data = {};
+      try { data = await r.json(); } catch (_) { /* non-JSON error */ }
+      if (!r.ok) {
+        // 403 (forbidden), 409 (no_probe / not_safe / no_url). Restore
+        // the button and surface the server's message inline.
+        if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+        let errSpan = form.querySelector(".challenge-inline-msg");
+        if (!errSpan) {
+          errSpan = document.createElement("div");
+          errSpan.className = "challenge-inline-msg warn";
+          errSpan.style.cssText =
+            "font-size:.85em; margin-top:.3em; color:var(--yellow, #e0a000)";
+          form.appendChild(errSpan);
+        }
+        errSpan.textContent = data.message || data.error || "Challenge failed.";
+        return false;
+      }
+      // Refresh the aside so the at-a-glance rows AND the result
+      // badge next to the Challenge button render from the freshly
+      // updated finding row.
+      const aside = await fetch(BASE + "/finding/" + fid + "/aside",
+                                { credentials: "same-origin" })
+                          .then(r => r.text());
+      document.getElementById("fw-aside").innerHTML = aside;
+    } catch (err) {
+      console.error("runChallengeAside failed", err);
+      if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+    }
+    return false;
+  }
+
   function loadFinding(id, item, ev) {
     if (ev) {
       // Suppress accidental click-into-select on the row's checkbox

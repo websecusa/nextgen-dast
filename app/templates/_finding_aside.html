@@ -105,15 +105,37 @@
    so the text color, weight, and border match — earlier versions
    added a `.primary` modifier which gave it a light-accent background
    with near-black text and stood out inconsistently from the rest of
-   the action stack. #}
+   the action stack.
+
+   Submit is intercepted by runChallengeAside() (defined in
+   assessment_detail.html). It POSTs to /challenge_inline (JSON sibling
+   of /challenge), then re-fetches /finding/<id>/aside so this fragment
+   re-renders with the updated validation_status. There is no confirm
+   dialog and the page does not navigate — analysts asked for a single-
+   click flow with the verdict shown next to the button.
+
+   The result badge below reads off f.validation_status. It only
+   appears once a probe has actually run (validation_run_at is set);
+   on first load before any challenge it stays hidden so the button is
+   visually clean. #}
 {% if probe %}
 <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
-      onsubmit="return confirm('Challenge this finding with the {{ probe.name }} probe? Read-only HTTP.');">
+      onsubmit="return runChallengeAside(event, {{ f.id }})">
   <button type="submit" class="action-btn"
           {% if not is_admin %}disabled title="Read-only account"{% endif %}>
     {{ scale_balanced_svg }}
     Challenge
-    <small style="opacity:.7; margin-left:auto">{{ probe.name }}</small>
+    {% if f.validation_run_at %}
+      {% if f.validation_status == 'validated' %}
+        <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
+      {% elif f.validation_status == 'false_positive' %}
+        <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
+      {% elif f.validation_status == 'errored' %}
+        <span class="badge error" style="margin-left:auto">⚠ Errored</span>
+      {% elif f.validation_status == 'inconclusive' %}
+        <span class="badge" style="margin-left:auto">— Inconclusive</span>
+      {% endif %}
+    {% endif %}
   </button>
 </form>
 {% else %}
@@ -121,7 +143,6 @@
         title="No toolkit probe is mapped to this finding's signature.">
   {{ scale_balanced_svg }}
   Challenge
-  <small style="opacity:.7; margin-left:auto">no probe</small>
 </button>
 {% endif %}
 
