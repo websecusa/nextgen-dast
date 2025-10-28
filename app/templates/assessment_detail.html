@@ -211,12 +211,14 @@
            class="{% if filter_status == 'all' %}active{% endif %}">All ({{ counts.all }})</a>
       </div>
       <div style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
-        {# Severity dropdown also exposes "False positives" as a
-           pseudo-severity. Picking it overrides the Open/Closed/All
-           tab filter on the server (see assessment_detail handler) so
-           the analyst sees every suppressed finding regardless of the
-           tab they were on. The count comes from the unfiltered
-           rollup so it stays accurate across selections. #}
+        {# Severity dropdown also exposes "False positives" and
+           "Resolved" as pseudo-severities. Picking either overrides the
+           Open/Closed/All tab filter on the server (see assessment_detail
+           handler) so the analyst sees every suppressed/resolved finding
+           regardless of the tab they were on. Counts come from the
+           unfiltered rollup so they stay accurate across selections.
+           "Resolved" gives analysts a path back to findings they marked
+           fixed, which the Open tab and rollup otherwise hide. #}
         <select name="sev" onchange="this.form.submit()">
           <option value="">All severities</option>
           {% for sev in ['critical','high','medium','low','info'] %}
@@ -225,6 +227,9 @@
           <option disabled>──────────</option>
           <option value="false_positive" {% if filter_sev == 'false_positive' %}selected{% endif %}>
             False positives{% if fp_count %} ({{ fp_count }}){% endif %}
+          </option>
+          <option value="resolved" {% if filter_sev == 'resolved' %}selected{% endif %}>
+            Resolved{% if resolved_count %} ({{ resolved_count }}){% endif %}
           </option>
         </select>
         <select name="sort" onchange="this.form.submit()">

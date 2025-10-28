@@ -1991,13 +1991,15 @@ def assessment_detail(request: Request, aid: int,
 
     if status not in ("open", "closed", "all"):
         status = "open"
-    # `false_positive` is a status, not a severity, but we expose it in
-    # the same dropdown as the severities for one-click access. When it
-    # is selected we ignore the Open/Closed/All status tab below and
-    # show only suppressed findings — see the visible-list loop further
-    # down for the override.
+    # `false_positive` and `resolved` are statuses, not severities, but
+    # we expose them in the same dropdown as the severities for one-
+    # click access. When either is selected we ignore the Open/Closed/
+    # All status tab below and show only matching findings — see the
+    # visible-list loop further down for the override. `resolved` here
+    # maps to the DB status 'fixed' (see _verdict_to_status / the
+    # /finding/<id>/status route which writes status='fixed').
     if sev not in ("", "critical", "high", "medium", "low", "info",
-                   "false_positive"):
+                   "false_positive", "resolved"):
         sev = ""
     if sort not in ("severity", "newest", "tool"):
         sort = "severity"
@@ -2068,6 +2070,18 @@ def assessment_detail(request: Request, aid: int,
         # picked it.
         if sev == "false_positive":
             if st != "false_positive":
+                continue
+            if q and q.lower() not in (f.get("title") or "").lower():
+                continue
+            visible.append(f)
+            continue
+
+        # "Resolved" pseudo-severity — same shape as False positives,
+        # but filters by status='fixed'. Useful for re-surfacing items
+        # an analyst marked resolved (the Open tab and rollup hide
+        # them, so the dropdown is the only way back to them).
+        if sev == "resolved":
+            if st != "fixed":
                 continue
             if q and q.lower() not in (f.get("title") or "").lower():
                 continue
