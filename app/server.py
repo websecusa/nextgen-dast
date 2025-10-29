@@ -1991,15 +1991,17 @@ def assessment_detail(request: Request, aid: int,
 
     if status not in ("open", "closed", "all"):
         status = "open"
-    # `false_positive` and `resolved` are statuses, not severities, but
-    # we expose them in the same dropdown as the severities for one-
-    # click access. When either is selected we ignore the Open/Closed/
-    # All status tab below and show only matching findings — see the
-    # visible-list loop further down for the override. `resolved` here
-    # maps to the DB status 'fixed' (see _verdict_to_status / the
-    # /finding/<id>/status route which writes status='fixed').
+    # `false_positive`, `resolved`, `fixed`, and `accepted_risk` are
+    # statuses, not severities, but we expose them in the same dropdown
+    # as the severities for one-click access. When any of them is
+    # selected we ignore the Open/Closed/All status tab below and show
+    # only matching findings — see the visible-list loop further down
+    # for the override. `resolved` and `fixed` both map to the DB status
+    # 'fixed' and behave identically — `resolved` is kept as a
+    # human-friendly alias for the same outcome.
     if sev not in ("", "critical", "high", "medium", "low", "info",
-                   "false_positive", "resolved"):
+                   "false_positive", "resolved", "fixed",
+                   "accepted_risk"):
         sev = ""
     if sort not in ("severity", "newest", "tool"):
         sort = "severity"
@@ -2076,12 +2078,27 @@ def assessment_detail(request: Request, aid: int,
             visible.append(f)
             continue
 
-        # "Resolved" pseudo-severity — same shape as False positives,
-        # but filters by status='fixed'. Useful for re-surfacing items
-        # an analyst marked resolved (the Open tab and rollup hide
-        # them, so the dropdown is the only way back to them).
-        if sev == "resolved":
+        # "Resolved" / "Fixed" pseudo-severity — same shape as False
+        # positives, but filters by status='fixed'. Both labels match
+        # the same DB state; the dropdown carries both names because
+        # the side-panel button reads "Resolve (mark fixed)" and we
+        # want either word the analyst remembers to lead them back to
+        # those findings. The Open tab and rollup hide them, so the
+        # dropdown is the only way to surface them again.
+        if sev in ("resolved", "fixed"):
             if st != "fixed":
+                continue
+            if q and q.lower() not in (f.get("title") or "").lower():
+                continue
+            visible.append(f)
+            continue
+
+        # "Archive (accepted risk)" pseudo-severity — filters by
+        # status='accepted_risk'. Same rationale as the false-positive
+        # and resolved filters: the Open tab hides accepted-risk rows,
+        # so the dropdown is the way back to them.
+        if sev == "accepted_risk":
+            if st != "accepted_risk":
                 continue
             if q and q.lower() not in (f.get("title") or "").lower():
                 continue

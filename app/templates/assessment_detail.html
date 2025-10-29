@@ -231,6 +231,12 @@
           <option value="resolved" {% if filter_sev == 'resolved' %}selected{% endif %}>
             Resolved{% if resolved_count %} ({{ resolved_count }}){% endif %}
           </option>
+          <option value="fixed" {% if filter_sev == 'fixed' %}selected{% endif %}>
+            Fixed{% if resolved_count %} ({{ resolved_count }}){% endif %}
+          </option>
+          <option value="accepted_risk" {% if filter_sev == 'accepted_risk' %}selected{% endif %}>
+            Archive (accepted risk){% if archived_count %} ({{ archived_count }}){% endif %}
+          </option>
         </select>
         <select name="sort" onchange="this.form.submit()">
           <option value="severity" {% if sort == 'severity' %}selected{% endif %}>By severity</option>
