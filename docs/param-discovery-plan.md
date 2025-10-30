@@ -1,9 +1,10 @@
 # Parameter discovery — design plan
 
-**Status:** Not implemented. Phase-1 ffuf integration (content discovery)
-shipped 2026-04-27 in commit `ba2c961`. This document describes the
-follow-up that adds *parameter-name discovery* and feeds discovered
-params into the existing high-fidelity probes.
+**Status:** Not implemented. Phase-1 ffuf integration (content
+discovery) already ships in the `thorough` and `premium` profiles.
+This document describes the follow-up that adds *parameter-name
+discovery* and feeds discovered params into the existing
+high-fidelity probes.
 
 **Author:** Tim Rice <tim.j.rice@hackrange.com>
 **Target version:** Defer the version bump until implementation lands —
@@ -110,7 +111,7 @@ After ffuf completes, write a consolidated file:
 ```json
 // /data/scans/<id>/ffuf-params/discovered.json
 {
-  "scanned_at": "2026-04-27T14:00:00Z",
+  "scanned_at": "<ISO-8601 timestamp>",
   "results": [
     {"url": "https://target/products", "param": "id"},
     {"url": "https://target/products", "param": "debug"},

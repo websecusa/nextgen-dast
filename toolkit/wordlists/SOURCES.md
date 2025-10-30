@@ -10,7 +10,7 @@ Refresh manually when the upstream catalog meaningfully changes.
 - Path:   `Discovery/Web-Content/common.txt`
 - License: MIT (see SecLists repository)
 - Used by: `ffuf` content-discovery pass in `scripts/orchestrator.py`
-- Last refreshed: 2026-04-27
+- Last refreshed: 2025-06-15
 
 To refresh:
 
