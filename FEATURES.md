@@ -41,7 +41,7 @@ pipeline can crawl ffuf's discovered paths.
 | **wapiti**       | Web-app fuzzing across XSS / SQLi / SSRF / etc.                  |
 | **sqlmap**       | Confirmation + extraction on wapiti's SQLi candidates            |
 | **dalfox**       | Reflected-XSS payload fuzzer                                     |
-| **ffuf**         | Content + parameter discovery (vendored wordlists ship in image) |
+| **ffuf**         | Content discovery (vendored wordlists ship in image)             |
 | **sca**          | Software-composition analysis (retire.js + osv-scanner)          |
 | **enhanced_testing** | 55-probe deep checks (auth/authz/JWT/IDOR/SSRF/etc.)         |
 

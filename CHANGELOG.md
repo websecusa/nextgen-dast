@@ -80,8 +80,6 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 - **2025-06-13 / 06-15** — **ffuf for content discovery** in the
   thorough + premium profiles, plus a vendored ffuf wordlist so an
   offline rebuild reproduces the same coverage.
-- **2025-06-17** — Design plan committed for the ffuf parameter
-  discovery follow-up (kept in `docs/`).
 - **2025-06-19** — `/assess` form: document `host:port` form in the
   FQDN field hint.
 - **2025-06-20** — **REST API + `application_id` field + report
@@ -250,8 +248,5 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
-Tracked in `docs/` (design notes) but not yet merged to `master`:
-
-- ffuf parameter-discovery follow-up (design plan from 2025-06-17).
 - Tier-3 advanced LLM consolidation pass (per-flow deep analysis hook
   is wired in `consolidation.run` but not yet enabled).
