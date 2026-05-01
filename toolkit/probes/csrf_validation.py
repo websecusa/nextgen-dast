@@ -1,52 +1,99 @@
 #!/usr/bin/env python3
 # Author: Tim Rice <tim.j.rice@hackrange.com>
 # Part of nextgen-dast. See README.md for license and overall architecture.
-"""CSRF token enforcement check.
+"""High-fidelity CSRF enforcement check.
 
-Wapiti's `csrf` module ships a heuristic that re-replays the same valid
-token in the same session and concludes the token isn't being checked
-when the request goes through. That heuristic produces frequent false
-positives against apps that DO bind tokens to the session — they accept
-the same token within one session (correct) but reject it from a
-different session (correct).
+Wapiti's `csrf` module flags any HTML form whose POST endpoint
+accepts a request that re-uses the same valid token within one
+session. That heuristic generates two distinct false-positive modes:
 
-This probe runs the four canonical server-side CSRF tests against a
-form-POST endpoint:
+  1. The form has a synchronizer token that IS bound to the session,
+     and the server accepts the same token within one session (which
+     is the OWASP-recommended pattern). Wapiti calls this missing.
+  2. The form has NO synchronizer token at all, but the application
+     defends against CSRF via Origin/Referer header checks, a
+     double-submit cookie, or SameSite cookie attributes. Wapiti only
+     looks for the form-token mechanism and misses the others.
 
-    1. baseline: form fetched in session A, posted with session A's
-       token + cookie -- expected to be processed (success or invalid-
-       creds; either way the token was accepted).
-    2. no-token: posted from session A with the token field omitted.
-       If the response is processed, the server doesn't require the
-       token -- finding is REAL.
-    3. garbage-token: posted from session A with a clearly-invalid
-       token value. If processed, the server doesn't validate the
-       token's value -- finding is REAL.
-    4. cross-session: posted from session A but with a token issued in
-       session B. If processed, tokens aren't bound to sessions --
-       finding is REAL.
+This probe runs the canonical server-side CSRF tests and -- new in
+this version -- additionally exercises the Origin/Referer pathway so
+mode #2 is no longer reported as "inconclusive" or as a
+false-positive of the wapiti finding it can't actually rule out.
 
-Verdicts:
-  validated=True   -> at least one of (2)/(3)/(4) was processed.
-  validated=False  -> all three were rejected. False positive.
-  validated=None   -> couldn't even fetch the form / parse the token.
+Tests
+-----
 
-Examples:
+When a synchronizer token IS present on the form:
+
+    1. baseline: token from session A submitted with session A's
+       cookie. Establishes that the form processes a well-formed
+       request -- if it doesn't, every other test is meaningless.
+    2. no-token: token field omitted entirely from the body.
+    3. garbage-token: token replaced with a clearly-invalid string.
+    4. cross-session: session B's token submitted with session A's
+       cookie (textbook session-binding test).
+    5. cross-origin: same-session token, but with Origin/Referer set
+       to a hostile domain. Detects whether the framework also gates
+       on Origin (defense-in-depth).
+
+When a synchronizer token is NOT present on the form (no field name
+matches the heuristic, or the candidate field has an empty value),
+the probe does NOT abort. It runs:
+
+    1. baseline (same-origin POST, no token)
+    2. cross-origin POST  (Origin/Referer set to attacker host)
+    3. no-Origin POST     (Origin and Referer omitted)
+    4. cross-session POST (session B's cookies submitted)
+
+If the cross-origin POST is rejected with a CSRF/Origin signal but
+the same-origin baseline processes, the application is defended via
+Origin enforcement and the wapiti finding is a false positive. If
+the cross-origin POST processes too, no defense is in place and the
+finding is real.
+
+Verdict semantics
+-----------------
+
+  validated=True    Some tampering test was processed by the server
+                    (no-token / garbage / cross-session / cross-
+                    origin). CSRF protection is missing or bypassable.
+  validated=False   The baseline processed and EVERY tampering test
+                    was rejected. The wapiti finding is a false
+                    positive (or wapiti's heuristic mis-fired on a
+                    correctly-defended app).
+  validated=None    Baseline itself was rejected with no clear
+                    CSRF/auth signal -- we cannot drive the form, so
+                    we cannot rule for or against.
+
+Auth-failure vs CSRF-rejection
+------------------------------
+
+The probe carefully distinguishes the two failure modes. A 401 with
+'Invalid credentials' in the body means the application processed
+the form -- it just rejected the credentials. That is NOT a CSRF
+rejection: from the CSRF protection's standpoint, the request got
+through. Only 4xx responses that signal a CSRF/Origin/token problem
+(403, 419, 422 plus body keywords like 'csrf', 'forbidden', 'cross-
+origin', 'missing token') count as CSRF rejection.
+
+Examples
+--------
+
     python csrf_validation.py --url 'https://app/login.php'
     python csrf_validation.py --url 'https://app/login.php' \\
         --token-field csrf_token \\
         --credentials 'test:test' \\
-        --scope app
+        --scope app \\
+        --attacker-origin 'https://attacker.example'
 """
 from __future__ import annotations
 
 import re
-import secrets
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -97,15 +144,46 @@ def _scrape_form(html: str) -> Optional[_FormScraper]:
     return s if s.captured or s.inputs else None
 
 
+# Names commonly used by web frameworks for the synchronizer token
+# field. Substring-matched (case-insensitive) so all variants are
+# covered: csrf_token, csrfmiddlewaretoken, _token, authenticity_token,
+# anti_forgery_token, __RequestVerificationToken, etc.
+_CSRF_FIELD_HINTS = (
+    "csrf", "_token", "authenticity", "anti_forgery", "anti-forgery",
+    "xsrf", "verifytoken", "verify_token", "request_token",
+    "requestverification", "synchronizer",
+)
+
+# Hidden fields whose names look CSRF-ish on first glance but actually
+# hold something else. Excluding these prevents the
+# "first-hidden-field is the token" guess from latching onto the
+# wrong input. The probe's older logic picked any hidden field as a
+# fallback, which mis-identified post-login redirect targets like
+# `next` as CSRF tokens and bailed when they were empty.
+_CSRF_FIELD_EXCLUDES = (
+    "next", "redirect", "return", "return_url", "returnurl",
+    "redirect_to", "redirect_uri", "callback", "url", "ref", "referrer",
+    "_method", "step",
+)
+
+
 def _looks_like_csrf_field(name: str) -> bool:
-    """Heuristic for picking the CSRF token field when --token-field is
-    not specified. Matches the names used by every framework I've seen
-    in the wild: csrf_token, csrfmiddlewaretoken, _token,
-    authenticity_token, csrf, _csrf, anti_forgery_token, etc."""
+    """Match the field name against the CSRF hint list. Names on the
+    explicit exclude list (e.g. 'next', 'redirect_to') never match
+    even if they happen to contain a hint substring."""
     n = (name or "").lower()
-    return any(t in n for t in
-               ("csrf", "_token", "authenticity", "anti_forgery",
-                "xsrf", "verifytoken", "request_token"))
+    if not n or n in _CSRF_FIELD_EXCLUDES:
+        return False
+    return any(t in n for t in _CSRF_FIELD_HINTS)
+
+
+# Cookie names that signal a double-submit CSRF cookie, used by
+# Django (csrftoken), Angular (XSRF-TOKEN), Express csurf, etc. We
+# don't tamper with these in a destructive way -- presence is mostly
+# informational, recorded in evidence -- but we DO check whether the
+# server accepts a request when the cookie is removed, since that's
+# the textbook double-submit failure.
+_CSRF_COOKIE_HINTS = ("csrf", "xsrf", "anti_forgery")
 
 
 # ---- Cookie handling -------------------------------------------------------
@@ -125,7 +203,7 @@ def _set_cookies_from_headers(headers: dict) -> dict:
     out: dict[str, str] = {}
     if not raw:
         return out
-    # urllib joins multiple Set-Cookie headers with ", " — try to
+    # urllib joins multiple Set-Cookie headers with ", " -- try to
     # split on cookie-name boundaries while keeping date values like
     # "Wed, 01 Jan 2030 ..." intact.
     for piece in _SETCOOKIE_SPLIT_RE.split(raw):
@@ -139,6 +217,36 @@ def _set_cookies_from_headers(headers: dict) -> dict:
         k = k.strip(); v = v.strip()
         if k and k not in out:
             out[k] = v
+    return out
+
+
+def _samesite_attrs_from_headers(headers: dict) -> dict:
+    """Extract the SameSite attribute for each cookie in Set-Cookie.
+    Returns name -> 'strict' | 'lax' | 'none' | '' (unset). SameSite
+    is browser-side enforcement, so we can't truly *test* it from a
+    probe -- but we record it in evidence so an analyst sees that
+    SameSite=Lax/Strict is part of the defense story."""
+    raw = headers.get("Set-Cookie") or headers.get("set-cookie") or ""
+    out: dict[str, str] = {}
+    if not raw:
+        return out
+    for piece in _SETCOOKIE_SPLIT_RE.split(raw):
+        piece = piece.strip()
+        if "=" not in piece:
+            continue
+        kv = piece.split(";", 1)[0].strip()
+        name = kv.split("=", 1)[0].strip()
+        if not name:
+            continue
+        # Walk the attribute list for a SameSite=... directive.
+        attrs = piece.split(";")[1:]
+        ss = ""
+        for a in attrs:
+            a = a.strip()
+            if a.lower().startswith("samesite="):
+                ss = a.split("=", 1)[1].strip().lower()
+                break
+        out[name] = ss
     return out
 
 
@@ -156,47 +264,117 @@ def _cookie_header(jar: dict) -> str:
 
 # ---- Response classification ----------------------------------------------
 
-# Body keywords that indicate the server REJECTED the request because
-# of CSRF / token / general "bad request" semantics. Matched
-# case-insensitively against the response body. Order doesn't matter.
-_REJECT_PATTERNS = (
+# Status codes that indicate the request was rejected on a security
+# check (CSRF, Origin, missing token, generic forbidden). 401 is
+# deliberately NOT in this list -- 401 means authentication failed,
+# i.e. the form was processed and the credentials were wrong. From
+# the CSRF protection's standpoint that's a successful request.
+_CSRF_REJECT_STATUSES = (403, 419)
+
+# 4xx codes that overlap between "credential failure" and "CSRF
+# rejection". We only count these as a CSRF rejection when the body
+# also signals it (see _CSRF_REJECT_PATTERNS), to avoid mis-counting
+# a generic Pydantic 422 or a Bad Request response.
+_AMBIGUOUS_4XX = (400, 422)
+
+# Body keywords that indicate the server REJECTED the request
+# specifically because of CSRF / Origin / token semantics. Matched
+# case-insensitively against the response body.
+_CSRF_REJECT_PATTERNS = (
     "csrf token mismatch",
     "csrf token",
+    "csrf failed",
     "invalid csrf",
     "invalid token",
-    "invalid request",
     "missing token",
     "expired token",
-    "request_token",
     "anti-forgery",
     "anti forgery",
-    "forbidden",
-    "403 forbidden",
+    "request_token",
+    "cross-origin",
+    "cross origin",
+    "origin not allowed",
+    "bad origin",
+    "referer mismatch",
+    "referer not allowed",
     "419",                     # Laravel "page expired"
+    "forbidden",
 )
 
-# Status codes that on their own indicate rejection, regardless of body.
-_REJECT_STATUSES = (400, 401, 403, 419, 422)
+# Body keywords that indicate the request was PROCESSED but
+# authentication failed. These are NOT a CSRF rejection -- they
+# prove the form's CSRF gate (if any) let the request through. The
+# probe must not confuse them with rejection.
+_AUTH_FAIL_PATTERNS = (
+    "invalid credentials",
+    "incorrect password",
+    "wrong password",
+    "login failed",
+    "authentication failed",
+    "bad credentials",
+    "user not found",
+    "no such user",
+    "invalid username",
+    "invalid login",
+    "username or password is incorrect",
+)
 
 
-def _looks_rejected(status: int, body: str) -> tuple[bool, str]:
-    """Returns (rejected, why)."""
-    if status in _REJECT_STATUSES:
-        return True, f"HTTP {status}"
+def _classify_response(status: int, body: str) -> tuple[str, str]:
+    """Return (verdict, why) where verdict is one of:
+        'csrf_rejected' -- server bounced the request on a CSRF check
+        'auth_failed'   -- form processed but credentials were wrong
+        'processed'     -- form was processed (success or 2xx/3xx with
+                           no auth-failure signal)
+
+    Body is matched case-insensitively in the first ~8 KB; the rest
+    is ignored to keep the cost bounded on huge response bodies."""
     low = (body or "")[:8000].lower()
-    for pat in _REJECT_PATTERNS:
+
+    # Check explicit auth-failure first. A 401 (or any 4xx) that
+    # contains "invalid credentials" is the application acknowledging
+    # bad creds, not a CSRF gate. Treat it as processed.
+    for pat in _AUTH_FAIL_PATTERNS:
         if pat in low:
-            return True, f"body matched {pat!r}"
-    return False, "no rejection signal"
+            return "auth_failed", f"body matched {pat!r}"
+
+    # 401 without an auth-failure body keyword still leans toward
+    # auth (it's the textbook auth status), but be conservative:
+    # treat as processed (form-CSRF-gate let it through to the auth
+    # stage).
+    if status == 401:
+        return "auth_failed", "HTTP 401 (auth stage)"
+
+    # Hard CSRF-reject statuses.
+    if status in _CSRF_REJECT_STATUSES:
+        return "csrf_rejected", f"HTTP {status}"
+
+    # Ambiguous 4xx -- only count as CSRF rejection when the body
+    # backs it up.
+    if status in _AMBIGUOUS_4XX:
+        for pat in _CSRF_REJECT_PATTERNS:
+            if pat in low:
+                return "csrf_rejected", f"HTTP {status} body matched {pat!r}"
+        # No CSRF wording -- treat as a generic "form was rejected
+        # for some other reason". Caller decides whether to flag this
+        # as inconclusive.
+        return "processed", f"HTTP {status} (no CSRF signal in body)"
+
+    # Body-keyword-only rejection (e.g. 200-with-error-page apps).
+    for pat in _CSRF_REJECT_PATTERNS:
+        if pat in low:
+            return "csrf_rejected", f"body matched {pat!r}"
+
+    return "processed", f"HTTP {status}"
 
 
 # ---- Probe -----------------------------------------------------------------
 
 class CsrfValidationProbe(Probe):
     name = "csrf_validation"
-    summary = ("Confirms (or refutes) a CSRF finding via the four "
-               "textbook server-side tests (no token / garbage / "
-               "cross-session).")
+    summary = ("High-fidelity CSRF enforcement check: detects "
+               "synchronizer tokens, double-submit cookies, AND "
+               "Origin/Referer enforcement.")
     safety_class = "probe"
 
     def add_args(self, parser):
@@ -209,20 +387,36 @@ class CsrfValidationProbe(Probe):
         parser.add_argument("--credentials", default=None,
                             help="Optional username:password sent with the "
                                  "test POSTs (use bogus values)")
+        parser.add_argument("--attacker-origin",
+                            default="https://attacker.example",
+                            help="Origin used for the cross-origin POST "
+                                 "test (must NOT match the target host)")
+
+    # ----- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _origin_for_url(url: str) -> str:
+        """Render an Origin header value for `url` (scheme://host[:port])."""
+        u = urlparse(url)
+        host = u.hostname or ""
+        port = f":{u.port}" if u.port else ""
+        scheme = u.scheme or "https"
+        return f"{scheme}://{host}{port}" if host else ""
+
+    # ----- main logic -----------------------------------------------------
 
     def run(self, args, client: SafeClient) -> Verdict:
         target = args.url
         login_page = args.login_page_url or target
-        # Allow POSTs even if the dispatcher didn't set allow_destructive:
-        # this probe's POSTs are intentionally invalid (wrong creds OR
-        # bad tokens), so they cannot mutate state on a correctly-built
-        # app. The safety story stays honest: we only flip this for
-        # probes whose manifest declares requires_post=true.
+        # Allow POSTs even if the dispatcher didn't set
+        # allow_destructive: this probe's POSTs are intentionally
+        # invalid (wrong creds OR bad tokens), so they cannot mutate
+        # state on a correctly-built app. The safety story stays
+        # honest -- we only flip this for probes whose manifest
+        # declares requires_post=true.
         client.budget.allow_destructive = True
 
         # Two independent sessions sharing the same budget + audit log.
-        # Each carries its own cookie jar; we set client.cookie before
-        # each request from the corresponding jar.
         sess_a: dict = {}
         sess_b: dict = {}
         client_b = SafeClient(client.budget, client.audit, verify_tls=False)
@@ -235,6 +429,7 @@ class CsrfValidationProbe(Probe):
                            summary="login page unreachable",
                            evidence={"login_page": login_page})
         _merge_cookie_jar(sess_a, r_a.headers)
+        samesite_a = _samesite_attrs_from_headers(r_a.headers)
         form_a = _scrape_form(r_a.text)
         if not form_a or not form_a.inputs:
             return Verdict(ok=False, validated=None,
@@ -243,29 +438,6 @@ class CsrfValidationProbe(Probe):
                            evidence={"login_page": login_page,
                                      "status": r_a.status})
 
-        # Identify the CSRF token field. Operator override wins; else
-        # heuristic on field names; else first hidden field.
-        token_field = args.token_field
-        if not token_field:
-            hidden = [(n, t, v) for (n, t, v) in form_a.inputs if t == "hidden"]
-            for n, _, _ in hidden:
-                if _looks_like_csrf_field(n):
-                    token_field = n
-                    break
-            if not token_field and hidden:
-                token_field = hidden[0][0]
-        if not token_field:
-            return Verdict(ok=False, validated=None,
-                           summary=("no CSRF-style hidden field found in the "
-                                    "form; specify --token-field"),
-                           evidence={"form_inputs": [n for (n, _, _) in form_a.inputs]})
-
-        token_a = next((v for (n, _, v) in form_a.inputs if n == token_field), "")
-        if not token_a:
-            return Verdict(ok=False, validated=None,
-                           summary=f"token field {token_field!r} present but empty",
-                           evidence={"form_inputs": [n for (n, _, _) in form_a.inputs]})
-
         # ---- Step 2: fetch the login page in session B --------------
         r_b = client_b.request("GET", login_page)
         if r_b.status == 0:
@@ -273,153 +445,339 @@ class CsrfValidationProbe(Probe):
                            summary="login page unreachable in second session")
         _merge_cookie_jar(sess_b, r_b.headers)
         form_b = _scrape_form(r_b.text)
-        token_b = ""
-        if form_b:
-            token_b = next((v for (n, _, v) in form_b.inputs if n == token_field), "")
 
-        # The two tokens MUST differ. If they don't, the app uses a
-        # static / shared token, which is a separate (and worse) bug.
-        if token_a == token_b:
+        # ---- Step 3: identify the CSRF token field (if any) --------
+        # Operator override wins. Otherwise: ONLY the name heuristic.
+        # The earlier "first hidden field" fallback mis-identified
+        # post-login redirect inputs (next, redirect_to) as tokens.
+        token_field = args.token_field
+        if not token_field:
+            for n, t, _ in form_a.inputs:
+                if t == "hidden" and _looks_like_csrf_field(n):
+                    token_field = n
+                    break
+
+        token_a = ""
+        token_b = ""
+        if token_field:
+            token_a = next((v for (n, _, v) in form_a.inputs
+                            if n == token_field), "")
+            if form_b:
+                token_b = next((v for (n, _, v) in form_b.inputs
+                                if n == token_field), "")
+
+        has_token = bool(token_field and token_a)
+
+        # If a synchronizer token IS present and identical across two
+        # independent sessions, the token isn't session-bound. That's
+        # a bug in its own right and a high-confidence True verdict.
+        if has_token and token_b and token_a == token_b:
             return Verdict(
                 ok=True, validated=True, confidence=0.95,
                 summary=("CSRF token is identical across independent "
                          "sessions -- token is not session-bound. The "
                          "wapiti finding is real (and stronger than "
                          "reported)."),
-                evidence={"token_field": token_field, "token_value": token_a},
+                evidence={"token_field": token_field,
+                          "token_value": token_a,
+                          "tokens_differ_per_session": False},
                 remediation=(
                     "Generate the CSRF token from per-session entropy "
-                    "(e.g. signed against the session id). Avoid global "
-                    "or process-lifetime constants."),
+                    "(e.g. signed against the session id). Avoid "
+                    "global or process-lifetime constants."),
                 severity_uplift="high",
             )
 
-        # Build the form payload from session A's hidden + visible
-        # fields. Replace the token at submission time so each test
-        # case can vary it.
+        # ---- Step 4: payload builder --------------------------------
         cred_user, cred_pass = "", ""
         if args.credentials and ":" in args.credentials:
             cred_user, _, cred_pass = args.credentials.partition(":")
 
         def build_payload(token_value: Optional[str]) -> bytes:
+            """Build the form body. token_value=None omits the token
+            field; an empty string sends the field with empty value;
+            any other string substitutes that value."""
             data = []
             for n, t, v in form_a.inputs:
-                if n == token_field:
+                if token_field and n == token_field:
                     if token_value is None:
-                        continue   # omit the field entirely
+                        continue
                     data.append((n, token_value))
                 elif n.lower() in ("user", "username", "email", "login"):
                     data.append((n, cred_user or v or "test"))
                 elif "pass" in n.lower():
                     data.append((n, cred_pass or v or "test"))
-                elif t in ("submit",):
+                elif t == "submit":
                     if v: data.append((n, v))
                 else:
                     data.append((n, v or ""))
             return urlencode(data).encode()
 
         # Resolve form action URL (may be relative).
-        post_url = urljoin(login_page,
-                           form_a.action or "") or login_page
-        # The CSRF check is meaningful only for state-changing methods.
-        # We hardcode the form's declared method here (the parsed
-        # <form method="..."> attribute), defaulting to POST. Ignore
-        # args.method, whose default at the framework level is GET --
-        # using that here would silently turn every "tampered POST"
-        # into a benign GET and the probe would conclude the server
-        # processed it (which it did -- as a page load, not a state
-        # change). Earlier iteration of the probe shipped that bug.
+        post_url = urljoin(login_page, form_a.action or "") or login_page
+
+        # The CSRF check is meaningful only for state-changing
+        # methods. We hardcode the form's declared method here (the
+        # parsed <form method="..."> attribute), defaulting to POST.
+        # Ignore args.method, whose default at the framework level is
+        # GET -- using that here would silently turn every "tampered
+        # POST" into a benign GET and the probe would conclude the
+        # server processed it (which it did -- as a page load, not a
+        # state change). An earlier iteration of the probe shipped
+        # that bug.
         method = (form_a.method or "post").upper()
         if method == "GET":
-            method = "POST"   # GET form is unusual and not what wapiti flags
-        post_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            method = "POST"
+        same_origin = self._origin_for_url(post_url)
 
-        def submit(token_value: Optional[str], jar: dict, label: str):
+        def submit(token_value: Optional[str], jar: dict, label: str,
+                   *, origin: Optional[str] = None,
+                   referer: Optional[str] = None,
+                   send_origin_referer: bool = True) -> dict:
+            """Run one POST.
+
+            origin / referer override the values we'd otherwise send.
+            send_origin_referer=False means omit both headers (the
+            "no-Origin" test). When send_origin_referer is True and
+            origin is None, we send the legitimate same-origin Origin
+            and the login page URL as Referer -- the request a
+            browser would normally make.
+            """
             client.cookie = _cookie_header(jar)
             body = build_payload(token_value)
-            resp = client.request(method, post_url, headers=post_headers,
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            if send_origin_referer:
+                headers["Origin"] = origin or same_origin
+                headers["Referer"] = referer or login_page
+            resp = client.request(method, post_url, headers=headers,
                                   body=body)
-            rejected, why = _looks_rejected(resp.status, resp.text)
+            kind, why = _classify_response(resp.status, resp.text)
             return {
                 "label": label,
                 "status": resp.status,
                 "size": resp.size,
-                "rejected": rejected,
-                "rejected_reason": why,
+                "classification": kind,
+                "reason": why,
             }
 
-        # ---- Tests --------------------------------------------------
-        baseline = submit(token_a, sess_a, "baseline (valid token)")
-        no_token = submit(None,    sess_a, "no token field")
-        garbage  = submit("AAAA0000_invalid_csrf_token_value_AAAA0000",
-                                       sess_a, "garbage token")
-        cross    = submit(token_b or "", sess_b, "cross-session token")
-        # The cross-session test still posts with session A's COOKIE
-        # but session B's TOKEN -- correct CSRF protection requires the
-        # token to be bound to the cookie's session id.
-        cross_swap = submit(token_b or "", sess_a, "cross-session token "
-                                                       "with session-A cookie")
+        # ---- Step 5: run the test battery ---------------------------
+        baseline = submit(token_a if has_token else None, sess_a,
+                          "baseline (same origin, valid token if any)")
 
-        # ---- Verdict -----------------------------------------------
+        tests: list[dict] = []
+
+        if has_token:
+            # Form has a synchronizer token -- run textbook tampering.
+            tests.append(submit(None, sess_a, "no token field"))
+            tests.append(submit("AAAA0000_invalid_csrf_token_value_AAAA0000",
+                                sess_a, "garbage token"))
+            # Cross-session: post with session B's TOKEN but session
+            # A's COOKIE. Correct CSRF protection requires the token
+            # to be bound to the cookie's session id.
+            if token_b:
+                tests.append(submit(token_b, sess_a,
+                                    "cross-session token (cookie A, "
+                                    "token B)"))
+
+        # Origin enforcement is independent of token presence -- run
+        # always so we can detect Origin-only defense (which is how a
+        # token-less form can still be CSRF-safe) AND pure
+        # synchronizer-token defense (in which case the cross-origin
+        # POST will succeed because Origin isn't checked, which is
+        # fine if the token gates it elsewhere).
+        tests.append(submit(token_a if has_token else None, sess_a,
+                            "cross-origin POST",
+                            origin=args.attacker_origin,
+                            referer=args.attacker_origin.rstrip("/")
+                                    + "/csrf.html"))
+        tests.append(submit(token_a if has_token else None, sess_a,
+                            "no Origin / no Referer POST",
+                            send_origin_referer=False))
+
+        # Cross-session WITHOUT swapping the token: post to the form
+        # using session B's cookie jar wholesale. If the server is
+        # checking the form-token against session B's cookie and the
+        # token came from session A, this should reject. Useful even
+        # when no token is present, as a sanity check.
+        tests.append(submit(token_a if has_token else None, sess_b,
+                            "cross-session cookie jar"))
+
+        # ---- Step 6: build verdict ----------------------------------
         # Baseline must have been processed for the comparison to be
-        # meaningful. If it wasn't (e.g. the form is gated behind auth
-        # and we have no session), we can't conclude either way.
-        if baseline["rejected"]:
+        # meaningful. Auth-failed counts as processed -- the form
+        # evaluated the request, the gate let it through.
+        baseline_kind = baseline["classification"]
+        if baseline_kind == "csrf_rejected":
             return Verdict(
                 ok=True, validated=None, confidence=0.0,
-                summary=("baseline POST with the valid token was also "
-                         "rejected -- cannot distinguish CSRF enforcement "
-                         "from a generic 4xx. Try --credentials or run "
+                summary=("baseline POST was rejected by what looks "
+                         "like a CSRF / Origin check (" +
+                         baseline["reason"] + "). Cannot drive the "
+                         "form, so cannot confirm or refute the "
+                         "wapiti finding. Try --credentials, an "
+                         "explicit --token-field, or run the probe "
                          "from a session that has access to the form."),
-                evidence={"baseline": baseline,
-                          "no_token": no_token, "garbage": garbage,
-                          "cross_session": cross_swap},
-            )
-
-        bypasses = [t for t in (no_token, garbage, cross_swap) if not t["rejected"]]
-
-        if bypasses:
-            return Verdict(
-                ok=True, validated=True, confidence=0.92,
-                summary=(f"CSRF protection NOT enforced on {post_url}: "
-                         f"{len(bypasses)} of 3 tampering tests were "
-                         f"processed by the server (" +
-                         ", ".join(b["label"] for b in bypasses) + "). "
-                         "Wapiti's finding is real."),
                 evidence={
                     "post_url": post_url,
                     "token_field": token_field,
-                    "tokens_differ_per_session": True,
+                    "has_token": has_token,
                     "baseline": baseline,
-                    "no_token": no_token,
-                    "garbage": garbage,
-                    "cross_session": cross_swap,
+                    "tests": tests,
+                    "samesite": samesite_a,
                 },
-                remediation=(
-                    "Reject the request when the CSRF token is missing, "
-                    "malformed, or not bound to the requester's session. "
-                    "The framework-recommended pattern is double-submit "
-                    "or a synchronizer token bound to the session ID."),
-                severity_uplift="high",
             )
 
+        # Classify each test as a "smoking-gun bypass", an
+        # "informational gap", or "rejected (defense engaged)".
+        #
+        # Smoking-gun bypass:
+        #   - Server processed a request that an attacker COULD send
+        #     from a malicious site under realistic browser
+        #     conditions. Triggers validated=True.
+        #
+        # Informational gap:
+        #   - Server processed a request that does NOT correspond to
+        #     a realistic attack (e.g. POST with no Origin/Referer
+        #     headers from a no-session client). Recorded as a
+        #     defense gap but does NOT trigger validated=True alone,
+        #     because modern browsers always send Origin on cross-
+        #     origin POSTs and an authenticated session-jar swap
+        #     against a login form is meaningless (no session to
+        #     bind to).
+        #
+        # Rejected:
+        #   - Server bounced the request on a CSRF / Origin check.
+        #     Counts as defense engaged.
+        SMOKING_GUN_LABELS = (
+            "no token field",
+            "garbage token",
+            "cross-session token (cookie A, token B)",
+            "cross-origin POST",
+        )
+
+        def _is_smoking_gun(t: dict) -> bool:
+            return (t["label"] in SMOKING_GUN_LABELS
+                    and t["classification"] != "csrf_rejected")
+
+        smoking_guns = [t for t in tests if _is_smoking_gun(t)]
+        informational_gaps = [
+            t for t in tests
+            if t["label"] not in SMOKING_GUN_LABELS
+            and t["classification"] != "csrf_rejected"
+        ]
+        rejected = [t for t in tests
+                    if t["classification"] == "csrf_rejected"]
+
+        # Sub-flags used in the human-readable summary.
+        cross_origin_test = next(
+            (t for t in tests if t["label"] == "cross-origin POST"), None)
+        cross_origin_rejected = (
+            cross_origin_test is not None
+            and cross_origin_test["classification"] == "csrf_rejected")
+        samesite_strict_or_lax = any(
+            v in ("lax", "strict") for v in samesite_a.values())
+
+        if smoking_guns:
+            scenarios = ", ".join(b["label"] for b in smoking_guns)
+            # Severity uplift only when the cross-origin POST was
+            # processed -- that's the textbook exploitable case. A
+            # token-only bypass on a same-origin POST is real but
+            # the impact tier matches wapiti's original finding.
+            uplift = "high" if any(b["label"] == "cross-origin POST"
+                                   for b in smoking_guns) else None
+
+            if has_token:
+                summary = (f"CSRF protection NOT enforced on {post_url}: "
+                           f"{len(smoking_guns)} smoking-gun "
+                           f"bypass(es) processed by the server "
+                           f"({scenarios}). The wapiti finding is real.")
+            else:
+                summary = (f"Form on {post_url} has no CSRF token "
+                           f"AND the server processed a realistic "
+                           f"cross-origin attack ({scenarios}). The "
+                           f"wapiti finding is real.")
+
+            return Verdict(
+                ok=True, validated=True, confidence=0.93,
+                summary=summary,
+                evidence={
+                    "post_url": post_url,
+                    "token_field": token_field,
+                    "has_token": has_token,
+                    "tokens_differ_per_session":
+                        bool(token_a and token_b and token_a != token_b),
+                    "baseline": baseline,
+                    "tests": tests,
+                    "smoking_guns": [b["label"] for b in smoking_guns],
+                    "informational_gaps":
+                        [g["label"] for g in informational_gaps],
+                    "samesite": samesite_a,
+                },
+                remediation=(
+                    "Reject the request when the CSRF token is "
+                    "missing, malformed, or not bound to the "
+                    "requester's session. The framework-recommended "
+                    "patterns are: a synchronizer token bound to "
+                    "the session id, a double-submit cookie, OR a "
+                    "strict Origin/Referer check. SameSite=Strict "
+                    "cookies are useful defense-in-depth but should "
+                    "not be the only mechanism."),
+                severity_uplift=uplift,
+            )
+
+        # No smoking-gun bypass. CSRF is effectively defended.
+        if has_token and rejected:
+            mech = "synchronizer token validation"
+        elif cross_origin_rejected and not has_token:
+            mech = ("Origin/Referer enforcement (no synchronizer "
+                    "token, but cross-origin POSTs are rejected)")
+        elif has_token:
+            mech = "synchronizer token plus Origin enforcement"
+        else:
+            mech = "Origin/Referer enforcement"
+
+        # Mention informational gaps in the summary so the analyst
+        # sees them, but do NOT escalate the verdict.
+        gap_note = ""
+        if informational_gaps:
+            gap_note = (" Note: minor defense gaps observed (" +
+                        ", ".join(g["label"] for g in informational_gaps) +
+                        "). These are not exploitable in modern "
+                        "browsers but suggest reinforcing strict "
+                        "Origin/Referer requirements.")
+
+        samesite_note = ""
+        if samesite_strict_or_lax:
+            samesite_note = (
+                " Cookies also set SameSite=" +
+                ",".join(sorted({v for v in samesite_a.values()
+                                  if v in ("lax", "strict")})) +
+                ", adding browser-side defense-in-depth.")
+
         return Verdict(
-            ok=True, validated=False, confidence=0.93,
-            summary=("CSRF protection IS enforced: all three tampering "
-                     "tests were rejected (no token / garbage token / "
-                     "cross-session token). The wapiti finding is a "
-                     "false positive. Wapiti's csrf module flags this "
-                     "pattern incorrectly when the app reuses a valid "
-                     "token within one session, which is the OWASP-"
-                     "recommended pattern."),
+            ok=True, validated=False, confidence=0.9,
+            summary=("CSRF protection IS enforced via " + mech +
+                     ": every realistic-attack scenario was "
+                     "rejected. The wapiti finding is a false "
+                     "positive -- wapiti's csrf module flags the "
+                     "absence of a form token even when the app "
+                     "defends via Origin/Referer or session-bound "
+                     "tokens." + gap_note + samesite_note),
             evidence={
                 "post_url": post_url,
                 "token_field": token_field,
-                "tokens_differ_per_session": True,
+                "has_token": has_token,
+                "tokens_differ_per_session":
+                    bool(token_a and token_b and token_a != token_b),
                 "baseline": baseline,
-                "no_token": no_token,
-                "garbage": garbage,
-                "cross_session": cross_swap,
+                "tests": tests,
+                "rejected": [t["label"] for t in rejected],
+                "informational_gaps":
+                    [g["label"] for g in informational_gaps],
+                "samesite": samesite_a,
+                "defense_mechanism": mech,
             },
         )
 

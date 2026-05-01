@@ -246,6 +246,35 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
   "Archive (accepted risk)" join Resolved as pseudo-severities.
 
 
+## 2026-05 — High-fidelity CSRF rule
+
+- **2026-05-01** — **`csrf_validation` probe v1.2** — full rewrite
+  of the verdict logic so wapiti CSRF findings are no longer left
+  `inconclusive` when the form has no synchronizer token.
+  - Drop the "first hidden field is the token" fallback that
+    mis-identified post-login redirect inputs (`next`, `redirect_to`)
+    as CSRF tokens, then bailed when they were empty.
+  - Add an Origin/Referer enforcement battery (cross-origin POST,
+    no-Origin POST) that runs whether or not a synchronizer token is
+    present — so apps that defend via Origin checking instead of a
+    form token are correctly classified as defended.
+  - Distinguish auth-failure responses (401, "invalid credentials"
+    body) from CSRF-rejection responses (403/419, "forbidden",
+    "cross-origin", "csrf token mismatch", etc.). The earlier code
+    lumped them together and false-flagged auth-rejected baselines
+    as CSRF-rejected.
+  - Tighten the bypass classification: only "smoking-gun" tampering
+    (no-token / garbage / cross-session swap / cross-origin POST)
+    triggers `validated=True`. Informational gaps (no-Origin
+    requests, cross-session cookie jar against an unauthenticated
+    form) are recorded in evidence but no longer escalate the
+    verdict, since they don't correspond to a realistic
+    modern-browser attack.
+  - Capture cookie SameSite attributes in evidence so analysts can
+    see browser-side defense-in-depth at a glance.
+  - Manifest budgets bumped to typical=9 / max=16 to cover the new
+    Origin tests, plus a new `--attacker-origin` knob.
+
 ## Pending — not yet released
 
 - Tier-3 advanced LLM consolidation pass (per-flow deep analysis hook
