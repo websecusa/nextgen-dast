@@ -91,6 +91,62 @@ def _record(id: str, status: str, notes: str) -> None:
 
 # ---- migration definitions -------------------------------------------------
 
+def m_2026_05_01_reset_stale_traversal_validations() -> str:
+    """Clear validation_status for findings whose verdict was written by
+    path_traversal_ftp_download or path_traversal_extension_bypass before
+    the probe rewrites shipped on 2026-05-01.
+
+    Why: both probes used to walk redirects silently and matched
+    response bodies with loose patterns (`[A-Za-z0-9+/=]{6,}`,
+    single-key JSON detection). On any host that 303s /ftp/* to /login,
+    the login HTML page hit the regex via `doctype` and the probe
+    returned validated=True, severity-uplifting the finding to high.
+    The rewrite added per-file shape validators (KDBX magic bytes,
+    BOTH dependencies+version for package.json, multi-line base64,
+    multi-bullet YAML), `follow_redirects=False`, and a centralized
+    `_response_disqualified` guard. Findings probed before the
+    rewrite landed in the running image are not re-validated until
+    something prompts a re-run.
+
+    What this migration does: for any finding whose
+    validation_probe is one of the rewritten probes AND whose
+    validation_run_at predates the rewrite cutoff, set
+    validation_status back to 'unvalidated' so the next bulk
+    Challenge (manual or auto) re-runs it under the corrected probe.
+    Other probes' verdicts are not touched."""
+    # The cutoff is the moment the first 2.1.1 image with the rewritten
+    # probes was pushed to the registry. Anything validated before this
+    # may have used the loose-regex code path. Hardcoded rather than
+    # parameterised because there is exactly one rewrite event we are
+    # backfilling for.
+    cutoff = "2026-05-01 11:46:00"
+    rewritten = ("path_traversal_ftp_download",
+                 "path_traversal_extension_bypass")
+
+    rows = db.query_all(
+        """SELECT id FROM findings
+            WHERE validation_probe IN %s
+              AND validation_run_at IS NOT NULL
+              AND validation_run_at < %s
+              AND validation_status IN ('validated','false_positive')""",
+        (rewritten, cutoff))
+    if not rows:
+        return f"no stale validations to reset (cutoff {cutoff})"
+
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join(["%s"] * len(ids))
+    db.execute(
+        f"""UPDATE findings
+              SET validation_status = 'unvalidated',
+                  validation_probe = NULL,
+                  validation_run_at = NULL,
+                  validation_evidence = NULL
+            WHERE id IN ({placeholders})""",
+        tuple(ids))
+    return (f"reset {len(ids)} finding(s) probed by rewritten "
+            f"path-traversal probes before {cutoff}")
+
+
 def m_2026_05_01_enrichment_orphan_cleanup() -> str:
     """Re-point findings whose enrichment_id is keyed under the pre-2.1.1
     broad signature hash. Locked manual rows are preserved untouched.
@@ -158,6 +214,8 @@ def m_2026_05_01_enrichment_orphan_cleanup() -> str:
 MIGRATIONS: list = [
     ("2026_05_01_enrichment_orphan_cleanup",
      m_2026_05_01_enrichment_orphan_cleanup),
+    ("2026_05_01_reset_stale_traversal_validations",
+     m_2026_05_01_reset_stale_traversal_validations),
 ]
 
 
