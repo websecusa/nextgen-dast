@@ -287,6 +287,26 @@
                 <span class="sev sev-{{ f.severity }}">{{ f.severity }}</span>
                 <span>·</span>
                 <span>{{ f.source_tool }}</span>
+                {# Validation-status pill. Surfaced here so the analyst
+                   can see at a glance which findings the bulk
+                   "Challenge all" runner will skip (already-validated /
+                   false_positive are terminal) versus which it will
+                   actually probe. Only shown when the row has been
+                   touched by the validation pipeline; an unvalidated
+                   row stays clean to avoid visual noise. #}
+                {% if f.validation_status == 'validated' %}
+                  <span>·</span>
+                  <span class="badge done" title="Validated by toolkit probe — bulk Challenge will skip">✓ validated</span>
+                {% elif f.validation_status == 'false_positive' %}
+                  <span>·</span>
+                  <span class="badge warn" title="Probe confirmed false positive — bulk Challenge will skip">false positive</span>
+                {% elif f.validation_status == 'inconclusive' %}
+                  <span>·</span>
+                  <span class="badge queued" title="Probe ran but result was inconclusive — bulk Challenge will retry">inconclusive</span>
+                {% elif f.validation_status == 'errored' %}
+                  <span>·</span>
+                  <span class="badge error" title="Probe crashed — bulk Challenge will retry">errored</span>
+                {% endif %}
                 {% if f.created_at %}
                   <span>·</span>
                   <span>{{ f.created_at.strftime('%m/%d %H:%M') if f.created_at.strftime else f.created_at }}</span>
