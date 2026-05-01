@@ -502,6 +502,23 @@ async def lifespan(app):
     except Exception as e:
         print(f"[startup] schema verify failed: {e!r}", flush=True)
 
+    # Boot-time data migrations. Idempotent: each migration in
+    # app/migrations.py:MIGRATIONS runs exactly once per database. The
+    # bookkeeping table self-creates on first call. A failure raises so
+    # the operator notices a half-applied state instead of getting a
+    # silently-broken healthy container. We catch the exception here
+    # only to surface it via the same [startup] log channel the rest of
+    # the lifespan uses; the migration row is already marked 'failed' in
+    # the DB, so the next boot will retry it.
+    try:
+        import migrations as _migrations_mod
+        _migrations_mod.run_pending()
+    except Exception as e:
+        print(f"[startup] schema migration FAILED: {e!r} — see "
+              f"schema_migrations table for the failed row; the next "
+              f"boot will retry once the underlying issue is fixed",
+              flush=True)
+
     # One-shot orphan sweep at startup. Catches storage left behind by
     # pre-fix builds whose cleanup did not know about reports / challenge
     # logs, plus any scan dirs / logs whose owning assessment was deleted
