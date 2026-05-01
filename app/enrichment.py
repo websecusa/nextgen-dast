@@ -12,11 +12,32 @@ Lookup order on each finding:
   3. LLM call via the configured endpoint       (paid; cached on success)
   4. minimal stub                                (only when 1–3 all fail)
 
-The cache key is a SHA-256 of (source_tool | normalized title | cwe |
-owasp_category) — independent of assessment_id, so the same finding type
-across every assessment in the system reuses the same enrichment row. A
-manually edited row (`source='manual'`, `is_locked=1`) is never overwritten
-by automatic enrichment.
+The cache key is a SHA-256 of:
+  (source_tool | normalized title | cwe | owasp_category |
+   tool module | normalized parameter | normalized path)
+
+The trailing three fields were added in 2.1.1 because the original four-field
+key was too broad: a single wapiti `anomaly: Internal Server Error` enrichment
+row was being shared across every parameter/endpoint that ever produced a 500.
+That meant an admin's manual edit on one finding silently rewrote every other
+finding of the same anomaly category — and a fresh LLM enrichment for one
+finding's specific parameter would mis-attach to siblings on different
+parameters.
+
+Adding `module` separates wapiti rules that share an OWASP category but mean
+different things (e.g. `csrf` vs `xxe`). Adding `parameter` separates the
+same probe firing on different inputs. Adding `path` separates per-endpoint
+findings that legitimately need different remediation copy.
+
+The signature is still independent of assessment_id, so the same finding type
+across every assessment reuses one row. A manually edited row
+(`source='manual'`, `is_locked=1`) is never overwritten by automatic
+enrichment.
+
+Backward compatibility: `_signature_legacy()` is kept as a fallback. When the
+new signature misses cache, we look up the legacy signature and reuse the
+row only if it is locked / manual — that preserves admin-authored guidance
+across the upgrade. New entries are always written under the new signature.
 """
 from __future__ import annotations
 
@@ -24,6 +45,7 @@ import hashlib
 import json
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 import db
 import enrichment_catalog
@@ -33,6 +55,14 @@ import llm as llm_mod
 # ---- signature -------------------------------------------------------------
 
 _TITLE_NORM_RE = re.compile(r"\s+")
+_PATH_TRAILING_SLASH_RE = re.compile(r"/+$")
+# Numeric path segments (resource ids) and obvious uuids are normalized to a
+# placeholder so /users/123 and /users/456 share an enrichment row.
+_NUMERIC_SEGMENT_RE = re.compile(r"^\d+$")
+_UUID_SEGMENT_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def normalize_title(title: str) -> str:
@@ -45,12 +75,89 @@ def normalize_title(title: str) -> str:
     return t[:500]
 
 
-def signature(finding: dict) -> str:
+def _finding_field(finding: dict, name: str) -> str:
+    """Look up a discriminator field on the canonical finding shape, then
+    fall back to `raw_data`. Wapiti carries `module` and `parameter` only in
+    `raw_data`; nuclei / sqlmap / dalfox vary by tool. Returning '' for
+    missing keeps the hash stable when a tool simply does not populate the
+    field."""
+    v = finding.get(name)
+    if v:
+        return str(v).strip().lower()
+    raw = finding.get("raw_data") or {}
+    if isinstance(raw, dict):
+        v = raw.get(name)
+        if v:
+            return str(v).strip().lower()
+    return ""
+
+
+def _normalize_path(url: str) -> str:
+    """Reduce a finding's evidence URL to a stable, hash-friendly path.
+
+    Strategy:
+      - drop scheme, host, query string, and fragment (these vary per
+        environment and per fuzz iteration);
+      - normalize numeric and UUID path segments to placeholders so that
+        per-record findings share a row (e.g. /users/123 == /users/456);
+      - lowercase and strip a trailing slash.
+
+    A bare path like `/login` is returned as-is. An empty / unparseable URL
+    becomes the empty string (treated like any other missing field)."""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return ""
+    path = parts.path or url
+    if not path:
+        return ""
+    segments = []
+    for seg in path.split("/"):
+        if not seg:
+            segments.append(seg)
+            continue
+        if _NUMERIC_SEGMENT_RE.match(seg):
+            segments.append(":id")
+        elif _UUID_SEGMENT_RE.match(seg):
+            segments.append(":uuid")
+        else:
+            segments.append(seg.lower())
+    norm = "/".join(segments)
+    norm = _PATH_TRAILING_SLASH_RE.sub("", norm) or "/"
+    return norm[:256]
+
+
+def _signature_legacy(finding: dict) -> str:
+    """The pre-2.1.1 four-field signature.
+
+    Kept ONLY so locked / manual rows authored under the old key are still
+    reachable after the upgrade. New writes always use `signature()`."""
     parts = [
         (finding.get("source_tool") or "").lower(),
         normalize_title(finding.get("title") or ""),
         (finding.get("cwe") or "").strip(),
         (finding.get("owasp_category") or "").strip(),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def signature(finding: dict) -> str:
+    """Stable per-finding-type cache key.
+
+    See module docstring for the discriminator rationale. Each input is
+    lowercased and trimmed; missing fields contribute the empty string so
+    findings without a parameter (e.g. anomaly category at site root)
+    still produce a deterministic hash."""
+    parts = [
+        (finding.get("source_tool") or "").lower(),
+        normalize_title(finding.get("title") or ""),
+        (finding.get("cwe") or "").strip(),
+        (finding.get("owasp_category") or "").strip(),
+        _finding_field(finding, "module"),
+        _finding_field(finding, "parameter"),
+        _normalize_path(finding.get("evidence_url") or ""),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
@@ -269,11 +376,24 @@ def get_or_create(finding: dict, endpoint: Optional[dict]) -> Optional[int]:
 
     Cache hits short-circuit. On miss: try the static catalog first; if that
     misses, try the LLM (when an endpoint is configured); if that fails too,
-    insert a minimal stub so downstream code always has something to render."""
+    insert a minimal stub so downstream code always has something to render.
+
+    Legacy fallback (for the 2.1.1 hash widening): if the new signature
+    misses, look up the legacy four-field signature and reuse the row only
+    if an admin had manually authored it. That preserves curated guidance
+    across the schema-compatible upgrade — the legacy row continues to live
+    untouched, and we point this finding at it. Non-locked legacy rows are
+    ignored so over-broad LLM-cached entries don't keep mis-attaching."""
     sig = signature(finding)
     cached = get_cached(sig)
     if cached:
         return cached["id"]
+
+    legacy_sig = _signature_legacy(finding)
+    if legacy_sig != sig:
+        legacy = get_cached(legacy_sig)
+        if legacy and legacy.get("is_locked"):
+            return legacy["id"]
 
     static = enrichment_catalog.lookup(
         finding.get("source_tool") or "",

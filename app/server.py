@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import psutil
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -709,6 +710,50 @@ def check_csrf(request: Request, token: str) -> None:
     sent = (token or "").strip()
     if not expected or not sent or not hmac.compare_digest(expected, sent):
         raise HTTPException(status_code=403, detail="invalid CSRF token")
+
+
+def _same_origin(request: Request) -> bool:
+    """Return True when the request's Origin / Referer either match the
+    request Host or are absent.
+
+    Used by pre-auth state-changing endpoints (e.g. POST /login) where
+    the standard CSRF token cannot apply because there is no session
+    yet to bind a token to. Defense-in-depth on top of the SameSite=
+    Strict session cookie: SameSite blocks the *post-login* cookie from
+    being sent on cross-site navigation, but does not stop a malicious
+    page from POSTing the login itself. Comparing Origin/Referer
+    against Host catches that vector — a browser-driven cross-origin
+    POST will always carry one of those headers set to the attacker's
+    origin, so any mismatch is rejected.
+
+    When neither Origin nor Referer is present (curl, server-to-server
+    integrations, some legacy clients), there is no browser claim to
+    validate and the request is allowed through. Browsers always send
+    Origin on cross-site POSTs, so absence implies same-origin or non-
+    browser traffic.
+    """
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host:
+        # Nothing to compare against; do not block on a missing Host.
+        return True
+    claimed = (request.headers.get("origin")
+               or request.headers.get("referer")
+               or "").strip()
+    if not claimed:
+        return True
+    try:
+        parsed = urlparse(claimed)
+    except Exception:
+        return False
+    claimed_host = (parsed.netloc or "").lower()
+    if not claimed_host:
+        return False
+    # Strip default ports so https://x.com and https://x.com:443 match.
+    for default_port in (":443", ":80"):
+        if claimed_host.endswith(default_port):
+            claimed_host = claimed_host[:-len(default_port)]
+            break
+    return claimed_host == host
 
 
 def client_ip(request: Request) -> str:
@@ -3842,6 +3887,20 @@ def login_submit(request: Request,
                  username: str = Form(...),
                  password: str = Form(...),
                  next: str = Form("")):
+    # Login CSRF defense. The session cookie is SameSite=Strict (see
+    # _set_session_cookie), which prevents an attacker-forced session
+    # from being used after the fact, but does not stop the login POST
+    # itself from being submitted cross-origin. Reject the POST if the
+    # browser tells us it came from somewhere other than this host.
+    # Non-browser clients (curl, server-to-server) carry no Origin or
+    # Referer and are allowed through.
+    if not _same_origin(request):
+        audit_mod.log_event(
+            "login_origin_rejected", ok=False,
+            target={"id": None, "username": username},
+            ip=client_ip(request),
+        )
+        raise HTTPException(status_code=403, detail="cross-origin login rejected")
     u = users_mod.authenticate(username, password)
     ip = client_ip(request)
     if not u:
