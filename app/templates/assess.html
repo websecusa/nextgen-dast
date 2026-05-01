@@ -79,15 +79,56 @@ ports, check only the scheme that actually listens on that port.</p>
 
     {% set tier_sel = prefill.llm_tier or 'none' %}
     <label>LLM tier
-      <select name="llm_tier">
+      <select name="llm_tier" id="llm_tier_select"
+              onchange="document.getElementById('advanced-ai-fields').style.display = (this.value === 'advanced') ? '' : 'none'">
         {# Default selection is `none`. Pulling in the LLM is opt-in so a
            caller never accrues LLM cost (or sends scan output off-box)
            without explicitly choosing a tier. #}
         <option value="none"     {% if tier_sel == 'none' %}selected{% endif %}>none — scanners only, no LLM</option>
         <option value="basic"    {% if tier_sel == 'basic' %}selected{% endif %}>basic — roll-up + executive summary (~$5–10 / scan)</option>
-        <option value="advanced" {% if tier_sel == 'advanced' %}selected{% endif %}>advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
+        <option value="advanced" {% if tier_sel == 'advanced' %}selected{% endif %}>advanced — Enhanced-AI-Testing (weakness scenarios + fidelity grading) + roll-up</option>
       </select>
     </label>
+
+    {# Enhanced-AI controls — only relevant on the advanced tier.
+       Default visibility tracks the currently-selected tier. The budget
+       field is editable only by superadmins; for plain admins it
+       renders disabled (server clamps to min(system_default,
+       user.max_spend) at submit so a tampered DOM cannot exceed). #}
+    <fieldset id="advanced-ai-fields"
+              style="border:1px solid var(--border); border-radius:6px;
+                     padding:.8em 1em; margin-top:.6em;
+                     display: {% if tier_sel == 'advanced' %}block{% else %}none{% endif %}">
+      <legend style="padding:0 .4em; color: var(--muted)">Enhanced-AI-Testing (advanced tier)</legend>
+      <label>Per-scan budget (USD)
+        <input name="enhanced_ai_budget_usd" type="number" min="0" step="0.01"
+               value="{{ prefill.enhanced_ai_budget_usd or ai_budget_default }}"
+               {% if not is_superadmin %}readonly{% endif %}>
+        <small class="muted">
+          {% if is_superadmin %}
+            System default: ${{ '%.2f'|format(ai_budget_system_default) }}.
+            {% if ai_budget_user_cap is not none %}
+              Your max_spend cap: ${{ '%.2f'|format(ai_budget_user_cap) }}.
+            {% endif %}
+            Submitted value is clamped to the lesser of those two on submit.
+          {% else %}
+            Locked to ${{ '%.2f'|format(ai_budget_default) }}. Only a superadmin
+            can change the per-scan budget.
+          {% endif %}
+        </small>
+      </label>
+      <label class="check" style="margin-top:.6em">
+        <input type="checkbox" name="llm_debug"
+               {% if prefill.llm_debug %}checked{% endif %}>
+        Capture LLM debug log (prompts + responses)
+        <small class="muted">
+          — When enabled, every LLM call for this scan persists its full
+          prompt and response. Visible to superadmins only via the
+          "View LLM Debug Log" button on the assessment page. Off by default
+          since prompts can include captured cookies/tokens/PII.
+        </small>
+      </label>
+    </fieldset>
 
     <label>LLM endpoint
       <select name="llm_endpoint_id">

@@ -92,13 +92,33 @@
     </label>
 
     <label>LLM tier
-      <select name="llm_tier">
+      <select name="llm_tier"
+              onchange="document.getElementById('sched-advanced-ai').style.display = (this.value === 'advanced') ? '' : 'none'">
         {% for t in ('none','basic','advanced') %}
           <option value="{{ t }}"
             {% if schedule.llm_tier == t %}selected{% endif %}>{{ t }}</option>
         {% endfor %}
       </select>
     </label>
+
+    {# Enhanced-AI controls inherited by every materialized assessment.
+       Visibility tracks llm_tier; budget editing is superadmin-only. #}
+    <fieldset id="sched-advanced-ai"
+              style="border:1px solid var(--border); border-radius:6px;
+                     padding:.8em 1em; margin-top:.6em;
+                     display: {% if schedule.llm_tier == 'advanced' %}block{% else %}none{% endif %}">
+      <legend style="padding:0 .4em; color: var(--muted)">Enhanced-AI-Testing</legend>
+      <label>Per-scan budget (USD)
+        <input name="enhanced_ai_budget_usd" type="number" min="0" step="0.01"
+               value="{{ '%.2f'|format(schedule.enhanced_ai_budget_usd) if schedule.enhanced_ai_budget_usd is not none else '' }}"
+               {% if not is_superadmin %}readonly{% endif %}>
+        <small class="muted">Empty = system default at materialization time.</small>
+      </label>
+      <label class="check">
+        <input type="checkbox" name="llm_debug" {% if schedule.llm_debug %}checked{% endif %}>
+        Capture LLM debug log on every materialized scan
+      </label>
+    </fieldset>
 
     <label>LLM endpoint
       <select name="llm_endpoint_id">

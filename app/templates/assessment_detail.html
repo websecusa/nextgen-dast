@@ -120,6 +120,16 @@
         </div>
       </dialog>
     {% endif %}
+    {# View LLM Debug Log — only rendered when the assessment opted into
+       debug capture AND the viewer is a superadmin. The debug transcript
+       contains full prompts and full responses, which can include
+       credentials the scanner observed; the gate here mirrors the
+       require_superadmin check on the route handler. #}
+    {% if a.llm_debug and is_superadmin %}
+      <a href="{{ base }}/assessment/{{ a.id }}/llm-debug" class="button ghost">
+        View LLM Debug Log
+      </a>
+    {% endif %}
     {# Re-scan: jump to /assess with the assessment id pre-loaded so the
        form arrives with this site's last scan settings already filled in
        (FQDN, profile, schemes, LLM tier, user agent, application id,

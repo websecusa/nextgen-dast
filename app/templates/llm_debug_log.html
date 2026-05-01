@@ -1,0 +1,67 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  LLM Debug Log — every LLM call captured for one assessment.
+
+  Visible only to superadmins (the route enforces require_superadmin).
+  Contents include captured cookies, bearer tokens, and any other
+  secrets the prompt sent or the response echoed; treat the page as
+  sensitive output.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>LLM Debug Log — Assessment #{{ assessment.id }} <span class="muted">{{ assessment.fqdn }}</span></h1>
+<p class="muted">
+  {{ rows|length }} LLM call(s) captured.
+  llm_tier=<code>{{ assessment.llm_tier }}</code>,
+  llm_debug={% if assessment.llm_debug %}<code>on</code>{% else %}<code>off</code>{% endif %},
+  status=<code>{{ assessment.status }}</code>.
+</p>
+<p class="muted small">
+  Calls are listed in chronological order. <strong>Prompts and responses
+  may include captured cookies, bearer tokens, and PII observed by the
+  scanner.</strong> This page is restricted to superadmin sessions —
+  do not screenshot or copy the contents into less-restricted channels.
+</p>
+
+<p>
+  <a href="{{ base }}/assessment/{{ assessment.id }}" class="button ghost">← Back to assessment</a>
+</p>
+
+{% if not rows %}
+  <p class="muted">No LLM calls were recorded for this assessment. If
+  llm_debug was enabled, the orchestrator may not have reached the
+  enhanced_ai pass — check the assessment's error_text and the
+  orchestrator log under <code>/data/logs/orchestrator_{{ assessment.id }}.log</code>.</p>
+{% endif %}
+
+{% for r in rows %}
+<details class="card" style="margin-bottom:.6em" {% if loop.index <= 3 %}open{% endif %}>
+  <summary style="cursor:pointer">
+    <strong>#{{ r.id }}</strong>
+    <code>{{ r.target_type }}</code> · <code>{{ r.target_id }}</code>
+    · <span class="badge">{{ r.status }}</span>
+    · <span class="muted">{{ r.endpoint_name or '?' }} ({{ r.model or '?' }})</span>
+    · <span class="muted small">in={{ r.request_tokens or 0 }} out={{ r.response_tokens or 0 }}</span>
+    · <span class="muted small">{{ r.created_at }}</span>
+  </summary>
+
+  {% if r.error_text %}
+    <p style="color: var(--sev-high)"><strong>Error:</strong> {{ r.error_text }}</p>
+  {% endif %}
+
+  {% if r.request_prompt %}
+    <h4>Request prompt (rendered user template)</h4>
+    <pre style="white-space:pre-wrap; max-height:30em; overflow:auto; background:var(--code-bg); padding:.6em">{{ r.request_prompt }}</pre>
+  {% else %}
+    <p class="muted small">Request prompt not stored — debug capture was off when this call was made, or the call predated the Enhanced-AI release.</p>
+  {% endif %}
+
+  {% if r.raw_response %}
+    <h4>Raw response (full LLM payload)</h4>
+    <pre style="white-space:pre-wrap; max-height:30em; overflow:auto; background:var(--code-bg); padding:.6em">{{ r.raw_response }}</pre>
+  {% endif %}
+</details>
+{% endfor %}
+{% endblock %}

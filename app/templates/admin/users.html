@@ -10,7 +10,7 @@
 <section>
   <table>
     <thead><tr>
-      <th>Username</th><th>Role</th><th>Status</th>
+      <th>Username</th><th>Role</th><th>Max spend (USD)</th><th>Status</th>
       <th>Last login</th><th>Created</th><th>Actions</th>
     </tr></thead>
     <tbody>
@@ -18,12 +18,38 @@
       <tr>
         <td><code>{{ u.username }}</code>{% if u.id == user.id %} <span class="muted">(you)</span>{% endif %}</td>
         <td>
+          {# Promoting to / demoting from superadmin requires a superadmin
+             session — server-side require_superadmin enforces. We hide
+             the 'superadmin' option from the dropdown below superadmin
+             tier so a plain admin can't even attempt the promotion. The
+             dropdown is also disabled when editing your own row to prevent
+             accidental self-demotion. #}
           <form method="post" action="{{ base }}/admin/users/{{ u.id }}/role" style="display:inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <select name="role" onchange="this.form.submit()" {% if u.id == user.id %}disabled{% endif %}>
+            <select name="role" onchange="this.form.submit()"
+                    {% if u.id == user.id or (u.role == 'superadmin' and not is_superadmin) %}disabled{% endif %}>
               <option value="readonly" {% if u.role == 'readonly' %}selected{% endif %}>readonly</option>
               <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
+              {% if is_superadmin or u.role == 'superadmin' %}
+                <option value="superadmin" {% if u.role == 'superadmin' %}selected{% endif %}>superadmin</option>
+              {% endif %}
             </select>
+          </form>
+        </td>
+        <td>
+          {# max_spend per-user cap. Editable only by superadmin; for
+             plain admins the input renders disabled and just shows the
+             current value. Empty = no per-user cap (system default applies). #}
+          <form method="post" action="{{ base }}/admin/users/{{ u.id }}/max_spend"
+                style="display:flex; gap:.3em; align-items:center">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input name="max_spend_usd" type="number" min="0" step="0.01" size="6"
+                   value="{{ '%.2f'|format(u.max_spend_usd) if u.max_spend_usd is not none else '' }}"
+                   placeholder="(default)"
+                   {% if not is_superadmin %}disabled{% endif %}>
+            {% if is_superadmin %}
+              <button type="submit" class="ghost small">Save</button>
+            {% endif %}
           </form>
         </td>
         <td>
@@ -77,6 +103,9 @@
       <select name="role">
         <option value="readonly" selected>readonly — can view, can't run scans</option>
         <option value="admin">admin — full read/write</option>
+        {% if is_superadmin %}
+          <option value="superadmin">superadmin — admin + can edit AI prompts, system budget, and per-user caps</option>
+        {% endif %}
       </select>
     </label>
     <label>Password (leave blank to auto-generate)

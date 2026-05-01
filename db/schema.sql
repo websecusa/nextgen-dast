@@ -82,12 +82,20 @@ CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(64) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  -- Two-tier authorization: 'admin' can read/write everything including the
-  -- /admin/* settings area; 'readonly' can browse assessments but cannot
-  -- mutate. The legacy is_admin column is retained for backward-compat with
-  -- any callers that pre-date the role column; new code should use `role`.
-  role ENUM('admin','readonly') NOT NULL DEFAULT 'readonly',
+  -- Three-tier authorization. 'superadmin' can do everything 'admin' can plus
+  -- edit AI prompts, the system-default Enhanced-AI budget, per-user
+  -- max_spend caps, and other tenant-wide knobs that affect cost and risk
+  -- posture. 'admin' can read/write assessments and the /admin/* settings
+  -- area but cannot change spend limits or AI prompts. 'readonly' can
+  -- browse assessments but cannot mutate. The legacy is_admin column is
+  -- retained for backward-compat; new code uses `role`.
+  role ENUM('superadmin','admin','readonly') NOT NULL DEFAULT 'readonly',
   is_admin TINYINT(1) NOT NULL DEFAULT 0,
+  -- Per-user hard cap on the Enhanced-AI per-scan budget the user is allowed
+  -- to set. NULL = no per-user cap (system default applies). Enforced at
+  -- assessment-submit time: server clamps the submitted budget to
+  -- min(system_default, user.max_spend_usd). Editable only by superadmin.
+  max_spend_usd DECIMAL(8,2) NULL,
   disabled TINYINT(1) NOT NULL DEFAULT 0,
   last_login DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -176,6 +184,19 @@ CREATE TABLE IF NOT EXISTS assessments (
   -- assessment in (done, error, cancelled) so only the most recent run
   -- survives. Ignored while the scan is in flight.
   keep_only_latest TINYINT(1) NOT NULL DEFAULT 0,
+  -- When 1, every LLM call made for this assessment (enrichment,
+  -- consolidation, enhanced_ai_testing) writes its full prompt + response
+  -- into llm_analyses, and a "View LLM Debug Log" button is rendered on
+  -- the assessment detail page (superadmin only). Defaults to 0 because
+  -- prompts and responses can contain captured cookies / tokens / PII.
+  llm_debug TINYINT(1) NOT NULL DEFAULT 0,
+  -- Per-scan hard cap on Enhanced-AI-Testing spend (USD). Only relevant
+  -- when llm_tier='advanced'. NULL = system default applies. Server
+  -- clamps to min(system_default, user.max_spend_usd) at submit. The
+  -- enhanced_ai pass tracks accumulated cost via app/llm.py:cost() and
+  -- short-circuits the remaining work when this cap is reached, keeping
+  -- partial findings produced so far.
+  enhanced_ai_budget_usd DECIMAL(8,2) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
   finished_at DATETIME,
@@ -417,22 +438,115 @@ CREATE TABLE IF NOT EXISTS sca_assessment_packages (
 -- Used by the LLM admin page and the per-assessment cost rollups.
 CREATE TABLE IF NOT EXISTS llm_analyses (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  target_type ENUM('flow','scan') NOT NULL,
+  -- target_type names which pipeline produced this row. 'scan' is the
+  -- consolidation roll-up; 'flow' is reserved for per-flow advanced
+  -- analyses; 'enrichment' is per-finding catalog enrichment;
+  -- 'enhanced_ai_weakness' is one weakness-discovery scenario emitted
+  -- by the enhanced_ai pass; 'enhanced_ai_fidelity' is a fidelity batch.
+  target_type ENUM('flow','scan','enrichment','enhanced_ai_weakness','enhanced_ai_fidelity')
+    NOT NULL,
   target_id VARCHAR(128) NOT NULL,
+  -- Direct foreign key to the owning assessment so the LLM debug log page
+  -- can stream every call for an assessment in chronological order with
+  -- one indexed query — without parsing the polymorphic target_id. NULL
+  -- only for orphan / pre-migration rows.
+  assessment_id INT NULL,
   endpoint_id INT,
   endpoint_name VARCHAR(128),
   model VARCHAR(128),
   status ENUM('running','done','error') NOT NULL,
   request_tokens INT,
   response_tokens INT,
+  -- Full request prompt sent to the LLM. Only populated when the owning
+  -- assessment had llm_debug=1 at the time of the call. NULL otherwise so
+  -- the debug-log storage cost is opt-in. Captures the rendered user
+  -- template; the system prompt is reconstructible from ai_prompts at
+  -- view time, so we only store the user-facing portion to halve storage.
+  request_prompt LONGTEXT,
   raw_response LONGTEXT,
   findings_json LONGTEXT,
   error_text TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   finished_at DATETIME,
   KEY idx_target (target_type, target_id),
+  KEY idx_assessment (assessment_id, created_at),
   CONSTRAINT fk_endpoint FOREIGN KEY (endpoint_id)
-    REFERENCES llm_endpoints(id) ON DELETE SET NULL
+    REFERENCES llm_endpoints(id) ON DELETE SET NULL,
+  CONSTRAINT fk_llm_assess FOREIGN KEY (assessment_id)
+    REFERENCES assessments(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- Editable LLM prompts used by the Enhanced-AI-Testing pass.
+--
+-- Each row is one prompt scenario in a named slot. A slot is the runtime hook
+-- the orchestrator dispatches to:
+--   advanced_ai_testing.weakness_discovery — one LLM call per active row,
+--       each call sees the full scan telemetry and emits a JSON array of
+--       findings. Multiple rows let the operator stack scenario angles
+--       (Business Logic, BOLA, SSRF, Race Conditions, …) without code
+--       changes; the orchestrator iterates rows ordered by sort_order.
+--   advanced_ai_testing.fidelity — per-finding fidelity evaluator; one row
+--       expected (the default), but multiple are supported for A/B work.
+--
+-- The 11 default rows ship pre-seeded by app/enhanced_ai_prompts.py. is_seeded
+-- marks "shipped with the product" so the AI-Prompts admin page can render a
+-- "Restore to default" button for those slots — restore reads the in-code
+-- defaults, not a DB row, so a deleted seeded prompt can always be brought
+-- back. fire_when is a small expression evaluated against a per-assessment
+-- telemetry summary (e.g. "has_creds AND findings_count >= 3"); a row whose
+-- expression evaluates false is silently skipped, so no LLM cost is incurred
+-- when a scenario has no input data.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ai_prompts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  slot VARCHAR(96) NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  description TEXT,
+  -- Full system prompt. Cacheable via Anthropic prompt caching when the
+  -- backend is anthropic; the per-scenario user prompt varies so only the
+  -- system block is cached.
+  system_prompt LONGTEXT NOT NULL,
+  -- Per-scenario user-prompt template. Substitutable {placeholder} names
+  -- are validated against a per-slot allowlist defined in code. Unknown
+  -- placeholders render as the literal string `{placeholder=??unknown??}`
+  -- so a typo never crashes the run.
+  user_template LONGTEXT NOT NULL,
+  -- Finding category emitted by this scenario (only used by weakness-
+  -- discovery slots; ignored by fidelity). Drives the `category` field of
+  -- the findings the LLM emits — kept on the row so the operator can
+  -- relabel without changing the prompt body.
+  category VARCHAR(64),
+  -- Boolean expression evaluated against the per-assessment telemetry
+  -- summary at runtime. Empty string / NULL means "always fire". Allowed
+  -- terms are documented in app/enhanced_ai.py:_eval_fire_when.
+  fire_when VARCHAR(255),
+  -- Display + execution order within a slot. Lower runs first.
+  sort_order INT NOT NULL DEFAULT 100,
+  -- Optional batch size for fidelity-style scenarios that group multiple
+  -- findings into one LLM call. Ignored for weakness-discovery scenarios
+  -- (which always send the full telemetry once per call).
+  batch_size INT NULL,
+  -- 0 disables the row without deleting it. Useful for temporarily
+  -- pausing a costly scenario without losing its prompt text.
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  -- 1 marks rows seeded from in-code defaults (mirrors user_agents
+  -- pattern). Restore-to-default re-seeds these from the in-code defaults
+  -- in app/enhanced_ai_prompts.py.
+  is_seeded TINYINT(1) NOT NULL DEFAULT 0,
+  -- Bumped on every save so the audit log can reference a specific
+  -- iteration of the prompt.
+  version INT NOT NULL DEFAULT 1,
+  created_by_user_id INT NULL,
+  updated_by_user_id INT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_slot_name (slot, name),
+  KEY idx_slot_order (slot, is_active, sort_order),
+  CONSTRAINT fk_prompt_creator FOREIGN KEY (created_by_user_id)
+    REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_prompt_updater FOREIGN KEY (updated_by_user_id)
+    REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------
@@ -480,6 +594,12 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
   -- Copied into every materialized assessment. The dedupe sweep then runs
   -- automatically when the assessment finishes.
   keep_only_latest TINYINT(1) NOT NULL DEFAULT 0,
+  -- Copied into every materialized assessment so scheduled scans can inherit
+  -- the same Enhanced-AI debug + budget settings as a one-off scan would.
+  -- See assessments.llm_debug / assessments.enhanced_ai_budget_usd for
+  -- semantics. Only meaningful when llm_tier='advanced'; ignored otherwise.
+  llm_debug TINYINT(1) NOT NULL DEFAULT 0,
+  enhanced_ai_budget_usd DECIMAL(8,2) NULL,
   next_run_at DATETIME NULL,
   last_run_at DATETIME NULL,
   last_assessment_id INT NULL,
@@ -582,6 +702,45 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled TINYINT(1) NOT NULL DEFAULT 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login DATETIME;
 UPDATE users SET role='admin' WHERE is_admin = 1 AND role = 'readonly';
 
+-- Enhanced-AI-Testing additions. Widen the role enum so existing 2.1.1 DBs
+-- pick up the new 'superadmin' tier without losing data; MODIFY is idempotent
+-- when the target definition is identical, so re-applying on every boot is
+-- harmless. The one-shot bump of existing role='admin' rows to 'superadmin'
+-- lives in app/migrations.py so it runs exactly once per database (a plain
+-- UPDATE here would re-promote anyone a superadmin had intentionally
+-- demoted on subsequent boots).
+ALTER TABLE users MODIFY COLUMN role
+  ENUM('superadmin','admin','readonly') NOT NULL DEFAULT 'readonly';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS max_spend_usd DECIMAL(8,2) NULL;
+
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS llm_debug
+  TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS enhanced_ai_budget_usd
+  DECIMAL(8,2) NULL;
+
+ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS llm_debug
+  TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS enhanced_ai_budget_usd
+  DECIMAL(8,2) NULL;
+
+-- llm_analyses additions. Widen target_type so the new pipelines
+-- (enrichment, enhanced_ai_weakness, enhanced_ai_fidelity) can write to
+-- the same table; add request_prompt for debug-mode capture; add
+-- assessment_id so the LLM Debug Log page is one indexed query.
+ALTER TABLE llm_analyses MODIFY COLUMN target_type
+  ENUM('flow','scan','enrichment','enhanced_ai_weakness','enhanced_ai_fidelity')
+  NOT NULL;
+ALTER TABLE llm_analyses ADD COLUMN IF NOT EXISTS request_prompt LONGTEXT;
+ALTER TABLE llm_analyses ADD COLUMN IF NOT EXISTS assessment_id INT NULL;
+ALTER TABLE llm_analyses ADD INDEX IF NOT EXISTS idx_assessment
+  (assessment_id, created_at);
+-- Note: the FK from llm_analyses.assessment_id to assessments.id only
+-- exists on databases created from this schema fresh; existing 2.1.1 DBs
+-- that get the column ADDed don't pick it up, since MariaDB's ADD
+-- CONSTRAINT is not idempotent. The app-level assessment-delete path
+-- in app/cleanup.py:cleanup_assessment explicitly deletes dependent
+-- llm_analyses rows so cascade behaviour is identical regardless.
+
 -- ===========================================================================
 -- §3  Seed data (INSERT IGNORE — safe on every boot)
 -- ===========================================================================
@@ -612,4 +771,9 @@ INSERT IGNORE INTO config (`key`, value) VALUES
   ('sca_update_interval_hours', '24'),
   ('sca_signature_max_age_days', '7'),
   ('sca_last_updated_at', ''),
-  ('sca_last_update_log', '');
+  ('sca_last_update_log', ''),
+  -- System-wide default for the per-scan Enhanced-AI-Testing budget (USD).
+  -- Editable on /admin/llm by superadmin only. Per-user max_spend_usd
+  -- (users.max_spend_usd) clamps below this when set, so a user without
+  -- a personal cap inherits the system default at submit time.
+  ('advanced_ai_budget_default_usd', '25');

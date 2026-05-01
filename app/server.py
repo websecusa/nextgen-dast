@@ -519,6 +519,24 @@ async def lifespan(app):
               f"boot will retry once the underlying issue is fixed",
               flush=True)
 
+    # Seed Enhanced-AI default prompts on a fresh DB. Idempotent: each row
+    # is matched by (slot, name) and only inserted if missing, so re-running
+    # on every boot is safe. The schema-drift heal above creates the
+    # ai_prompts table on existing 2.1.1 databases the first time the new
+    # image boots; this block then populates it with the eleven default
+    # scenarios. A failure does not block startup — the AI-Prompts admin
+    # page can re-seed via "Restore to default".
+    try:
+        import enhanced_ai_prompts as _eap_mod
+        n_seeded = _eap_mod.seed_defaults_if_empty(db)
+        if n_seeded:
+            print(f"[startup] seeded {n_seeded} default Enhanced-AI prompt(s)",
+                  flush=True)
+    except Exception as e:
+        print(f"[startup] enhanced_ai_prompts seed failed: {e!r} — "
+              f"defaults can be reseeded from /admin/ai-prompts",
+              flush=True)
+
     # One-shot orphan sweep at startup. Catches storage left behind by
     # pre-fix builds whose cleanup did not know about reports / challenge
     # logs, plus any scan dirs / logs whose owning assessment was deleted
@@ -690,12 +708,19 @@ async def auth_middleware(request: Request, call_next):
 
     request.state.user = user
 
-    if any(path.startswith(p) for p in ADMIN_PATHS) and user.get("role") != "admin":
+    # Both 'admin' and 'superadmin' satisfy the coarse admin gate.
+    # Per-route superadmin-only enforcement (AI Prompts editor, system-
+    # default budget, per-user max_spend changes) lives in the individual
+    # handlers via require_superadmin() so the middleware can stay
+    # path-pattern-based and route changes can adjust gating without
+    # touching the middleware.
+    if (any(path.startswith(p) for p in ADMIN_PATHS)
+            and user.get("role") not in ("admin", "superadmin")):
         return JSONResponse({"error": "admin only"}, status_code=403)
 
-    if request.method in ("POST", "PUT", "DELETE", "PATCH") \
-            and user.get("role") != "admin" \
-            and not any(path.startswith(p) for p in READONLY_WRITE_OK):
+    if (request.method in ("POST", "PUT", "DELETE", "PATCH")
+            and user.get("role") not in ("admin", "superadmin")
+            and not any(path.startswith(p) for p in READONLY_WRITE_OK)):
         return JSONResponse(
             {"error": "read-only account — write actions require an admin"},
             status_code=403,
@@ -727,6 +752,21 @@ def check_csrf(request: Request, token: str) -> None:
     sent = (token or "").strip()
     if not expected or not sent or not hmac.compare_digest(expected, sent):
         raise HTTPException(status_code=403, detail="invalid CSRF token")
+
+
+def require_superadmin(request: Request) -> dict:
+    """Raise 403 unless the current session is a superadmin. Returns the
+    user dict on success so callers can use it without a second
+    current_user(request) round-trip. Use this on handlers that mutate
+    AI prompts, the system-default Enhanced-AI budget, per-user
+    max_spend caps, or role transitions involving 'superadmin' — these
+    are the screens we deliberately gate above admin to prevent an
+    admin compromise from raising costs or weakening AI guardrails."""
+    user = current_user(request) or {}
+    if user.get("role") != "superadmin":
+        raise HTTPException(status_code=403,
+                              detail="superadmin role required")
+    return user
 
 
 def _same_origin(request: Request) -> bool:
@@ -814,7 +854,17 @@ def ctx(request: Request, **extra) -> dict:
         "state": state,
         "proxy_running": proxy_pid() is not None,
         "user": user,
-        "is_admin": (user.get("role") == "admin") if user else False,
+        # is_admin is the coarse "can mutate" gate consulted by every
+        # admin-only screen. Both 'admin' and the new 'superadmin' tier
+        # pass this check — superadmin is a strict superset of admin.
+        # Template fragments that need superadmin-only behavior (AI
+        # Prompts editor, system-default budget, max_spend column, the
+        # editable per-scan budget input) should consult is_superadmin
+        # below instead.
+        "is_admin": ((user.get("role") in ("admin", "superadmin"))
+                     if user else False),
+        "is_superadmin": ((user.get("role") == "superadmin")
+                          if user else False),
         # csrf_token is rendered into the hidden field of every form that
         # POSTs to a CSRF-protected endpoint. Empty string when the user
         # is not logged in (templates handle that case themselves).
@@ -1317,6 +1367,75 @@ def _opt_int(v) -> Optional[int]:
         return None
 
 
+def _opt_float(v) -> Optional[float]:
+    """Same shape as _opt_int but for decimal-typed inputs (per-scan
+    budget, max_spend). Empty string and unparseable values both yield
+    None so the calling form path can apply its default rather than
+    crashing on a stray comma."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _system_default_budget_usd() -> float:
+    """Read the system-default Enhanced-AI per-scan budget from the
+    config k/v table. Falls back to 25.0 if the row is missing — the
+    schema seeds 25 on a fresh DB but a heal-failure scenario could
+    leave the row absent on an upgraded DB. Returning a sensible
+    default keeps the assessment form usable."""
+    if not db.healthy():
+        return 25.0
+    row = db.query_one(
+        "SELECT value FROM config WHERE `key`='advanced_ai_budget_default_usd'")
+    if row and (row.get("value") or "").strip():
+        try:
+            return round(float(row["value"]), 2)
+        except (TypeError, ValueError):
+            pass
+    return 25.0
+
+
+def _resolve_enhanced_ai_budget(submitted: Optional[float],
+                                 user: Optional[dict]) -> Optional[float]:
+    """Compute the effective per-scan Enhanced-AI budget at submit time.
+
+    Rules:
+      1. Hard cap = system default (config row).
+      2. If the user has a max_spend_usd set, hard cap drops to that.
+      3. Submitted value is clamped to [0, hard_cap]. None / empty
+         submission inherits the hard cap.
+      4. Non-superadmin users have their submission ignored — they
+         always get the hard cap. Submit-time enforcement so a tampered
+         form (read-only field defeated by devtools) cannot exceed the
+         user's allowance.
+    Returns the clamped budget as a float (USD, two decimals). Always
+    returns a positive value so the storage column stays non-NULL when
+    the assessment is on the advanced tier (the column itself stays
+    NULLable to allow non-advanced scans to skip it entirely).
+    """
+    sysd = _system_default_budget_usd()
+    user_cap: Optional[float] = None
+    if user and user.get("max_spend_usd") is not None:
+        try:
+            user_cap = float(user["max_spend_usd"])
+        except (TypeError, ValueError):
+            user_cap = None
+    hard_cap = min(sysd, user_cap) if user_cap is not None else sysd
+
+    is_super = bool(user and user.get("role") == "superadmin")
+    if not is_super or submitted is None:
+        # Plain admin: ignore whatever the form sent — they get the cap.
+        # Superadmin who omitted the field: same default.
+        return round(hard_cap, 2)
+    return round(max(0.0, min(float(submitted), hard_cap)), 2)
+
+
 def _resolve_user_agent(uid: Optional[int]) -> Optional[str]:
     if not db.healthy():
         return None
@@ -1603,8 +1722,39 @@ def llm_page(request: Request, msg: str = ""):
         endpoints = db.query("SELECT * FROM llm_endpoints ORDER BY name")
     return templates.TemplateResponse(
         "llm.html",
-        ctx(request, endpoints=endpoints, msg=msg, db_ok=db.healthy()),
+        ctx(request, endpoints=endpoints, msg=msg, db_ok=db.healthy(),
+            ai_budget_system_default=_system_default_budget_usd()),
     )
+
+
+@app.post("/llm/budget_default")
+def llm_budget_default_save(request: Request,
+                              advanced_ai_budget_default_usd: str = Form(""),
+                              csrf_token: str = Form("")):
+    """Superadmin-only. Updates the system-wide default per-scan
+    Enhanced-AI budget (the value pre-filled into the assess form when
+    the user has no per-user max_spend cap)."""
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    raw = (advanced_ai_budget_default_usd or "").strip()
+    try:
+        val = round(float(raw), 2)
+    except ValueError:
+        return redirect("/llm?msg=budget+must+be+a+number")
+    if val < 0:
+        return redirect("/llm?msg=budget+cannot+be+negative")
+    db.execute(
+        "INSERT INTO config (`key`, value) VALUES "
+        "('advanced_ai_budget_default_usd', %s) "
+        "ON DUPLICATE KEY UPDATE value=VALUES(value)",
+        (str(val),))
+    audit_mod.log_event(
+        "system_budget_changed",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        ip=client_ip(request),
+        extra={"new_default_usd": val},
+    )
+    return redirect("/llm?msg=system+default+budget+updated")
 
 
 @app.post("/llm/endpoint")
@@ -1641,6 +1791,227 @@ def llm_endpoint_save(
 def llm_endpoint_delete(eid: int):
     db.execute("DELETE FROM llm_endpoints WHERE id = %s", (eid,))
     return redirect("/llm?msg=deleted")
+
+
+# ---- AI Prompts admin (Enhanced-AI-Testing scenarios) ----------------------
+# Superadmin-only CRUD for the ai_prompts table. Plain admins / readonly
+# users hit a 403 from require_superadmin in every handler. The templates
+# also condition on is_superadmin so the link doesn't render below that
+# tier — the require_superadmin call is the actual security gate.
+
+@app.get("/admin/ai-prompts", response_class=HTMLResponse)
+def admin_ai_prompts_page(request: Request, msg: str = ""):
+    require_superadmin(request)
+    rows = db.query(
+        "SELECT id, slot, name, description, category, fire_when, "
+        "sort_order, batch_size, is_active, is_seeded, version, "
+        "updated_at FROM ai_prompts ORDER BY slot, sort_order, id")
+    # Group by slot for the page so the operator sees scenarios listed
+    # under their slot heading.
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r["slot"], []).append(r)
+    return templates.TemplateResponse(
+        "admin/ai_prompts.html",
+        ctx(request, grouped=grouped, msg=msg))
+
+
+@app.get("/admin/ai-prompts/new", response_class=HTMLResponse)
+def admin_ai_prompts_new(request: Request, slot: str = "",
+                          msg: str = ""):
+    """Render the editor for a brand-new prompt. The form posts to
+    /admin/ai-prompts on submit. We pre-fill slot from the query string
+    (the listing page links here as ?slot=advanced_ai_testing.weakness_discovery)
+    so the editor knows which placeholder set to surface."""
+    require_superadmin(request)
+    import enhanced_ai_prompts as eap
+    placeholders = sorted(eap.PLACEHOLDERS_BY_SLOT.get(
+        slot, eap.PLACEHOLDERS_BY_SLOT[eap.SLOT_WEAKNESS]))
+    row = {
+        "id": None, "slot": slot or eap.SLOT_WEAKNESS,
+        "name": "", "description": "",
+        "system_prompt": eap.HEADER + "\n\n[Persona + analytical task here]\n"
+                         + eap.FOOTER_TEMPLATE.format(category="custom"),
+        "user_template": "TARGET\n======\n{fqdn}\n\n[Data placeholders here]\n",
+        "category": "", "fire_when": "", "sort_order": 999,
+        "batch_size": None, "is_active": 1, "is_seeded": 0, "version": 0,
+    }
+    return templates.TemplateResponse(
+        "admin/ai_prompt_edit.html",
+        ctx(request, row=row, placeholders=placeholders,
+            slot_options=sorted(eap.PLACEHOLDERS_BY_SLOT.keys()),
+            msg=msg, is_new=True))
+
+
+@app.get("/admin/ai-prompts/{pid}", response_class=HTMLResponse)
+def admin_ai_prompts_edit(request: Request, pid: int, msg: str = ""):
+    require_superadmin(request)
+    import enhanced_ai_prompts as eap
+    row = db.query_one("SELECT * FROM ai_prompts WHERE id=%s", (pid,))
+    if not row:
+        raise HTTPException(404)
+    placeholders = sorted(eap.PLACEHOLDERS_BY_SLOT.get(
+        row["slot"], eap.PLACEHOLDERS_BY_SLOT[eap.SLOT_WEAKNESS]))
+    return templates.TemplateResponse(
+        "admin/ai_prompt_edit.html",
+        ctx(request, row=row, placeholders=placeholders,
+            slot_options=sorted(eap.PLACEHOLDERS_BY_SLOT.keys()),
+            msg=msg, is_new=False))
+
+
+@app.post("/admin/ai-prompts")
+def admin_ai_prompts_create(request: Request,
+                              slot: str = Form(...),
+                              name: str = Form(...),
+                              description: str = Form(""),
+                              system_prompt: str = Form(...),
+                              user_template: str = Form(...),
+                              category: str = Form(""),
+                              fire_when: str = Form(""),
+                              sort_order: str = Form("999"),
+                              batch_size: str = Form(""),
+                              is_active: Optional[str] = Form(None),
+                              csrf_token: str = Form("")):
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    sort_i = _opt_int(sort_order) or 999
+    batch_i = _opt_int(batch_size)
+    pid = db.execute(
+        """INSERT INTO ai_prompts
+              (slot, name, description, system_prompt, user_template,
+               category, fire_when, sort_order, batch_size,
+               is_active, is_seeded, version,
+               created_by_user_id, updated_by_user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 1, %s, %s)""",
+        (slot, name, description, system_prompt, user_template,
+         category.strip() or None, fire_when.strip(),
+         sort_i, batch_i,
+         1 if is_active else 0,
+         (current_user(request) or {}).get("id"),
+         (current_user(request) or {}).get("id")))
+    audit_mod.log_event(
+        "ai_prompt_created",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": pid, "slot": slot, "name": name},
+        ip=client_ip(request))
+    return redirect(f"/admin/ai-prompts?msg=created+{name.replace(' ', '+')}")
+
+
+@app.post("/admin/ai-prompts/{pid}")
+def admin_ai_prompts_save(request: Request, pid: int,
+                            name: str = Form(...),
+                            description: str = Form(""),
+                            system_prompt: str = Form(...),
+                            user_template: str = Form(...),
+                            category: str = Form(""),
+                            fire_when: str = Form(""),
+                            sort_order: str = Form("999"),
+                            batch_size: str = Form(""),
+                            is_active: Optional[str] = Form(None),
+                            csrf_token: str = Form("")):
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    existing = db.query_one("SELECT id, slot, name FROM ai_prompts WHERE id=%s",
+                              (pid,))
+    if not existing:
+        raise HTTPException(404)
+    sort_i = _opt_int(sort_order) or 999
+    batch_i = _opt_int(batch_size)
+    db.execute(
+        """UPDATE ai_prompts
+              SET name=%s, description=%s, system_prompt=%s,
+                  user_template=%s, category=%s, fire_when=%s,
+                  sort_order=%s, batch_size=%s, is_active=%s,
+                  version=version+1, updated_by_user_id=%s
+            WHERE id=%s""",
+        (name.strip(), description, system_prompt, user_template,
+         category.strip() or None, fire_when.strip(),
+         sort_i, batch_i,
+         1 if is_active else 0,
+         (current_user(request) or {}).get("id"),
+         pid))
+    audit_mod.log_event(
+        "ai_prompt_edited",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": pid, "slot": existing["slot"], "name": existing["name"]},
+        ip=client_ip(request))
+    return redirect("/admin/ai-prompts?msg=saved")
+
+
+@app.post("/admin/ai-prompts/{pid}/restore")
+def admin_ai_prompts_restore(request: Request, pid: int,
+                              csrf_token: str = Form("")):
+    """Reset a single seeded prompt back to its in-code default. The
+    caller must own a superadmin session — the restore action rewrites
+    the system_prompt body, so a tenant-wide weakening of safety rules
+    by a compromised admin is denied here."""
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    import enhanced_ai_prompts as eap
+    row = db.query_one("SELECT id, slot, name FROM ai_prompts WHERE id=%s",
+                        (pid,))
+    if not row:
+        raise HTTPException(404)
+    result = eap.restore_defaults(
+        db, only_slot=row["slot"], only_name=row["name"],
+        updated_by_user_id=(current_user(request) or {}).get("id"))
+    audit_mod.log_event(
+        "ai_prompt_restored",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": pid, "slot": row["slot"], "name": row["name"]},
+        ip=client_ip(request),
+        extra=result)
+    return redirect("/admin/ai-prompts?msg=restored+to+default")
+
+
+@app.post("/admin/ai-prompts/{pid}/delete")
+def admin_ai_prompts_delete(request: Request, pid: int,
+                              csrf_token: str = Form("")):
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    row = db.query_one("SELECT id, slot, name FROM ai_prompts WHERE id=%s",
+                        (pid,))
+    if not row:
+        raise HTTPException(404)
+    db.execute("DELETE FROM ai_prompts WHERE id=%s", (pid,))
+    audit_mod.log_event(
+        "ai_prompt_deleted",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": pid, "slot": row["slot"], "name": row["name"]},
+        ip=client_ip(request))
+    return redirect("/admin/ai-prompts?msg=deleted")
+
+
+# ---- LLM Debug Log per assessment ------------------------------------------
+
+@app.get("/assessment/{aid}/llm-debug", response_class=HTMLResponse)
+def assessment_llm_debug(request: Request, aid: int):
+    """View every LLM call captured for this assessment.
+
+    Superadmin-only because the captured prompts can include cookies,
+    bearer tokens, and other live secrets the scanner observed. Showing
+    the page to an admin tier would broaden the credential blast radius
+    for very little operational value (admins can already see the
+    finding-level outputs through the regular assessment page)."""
+    require_superadmin(request)
+    a = db.query_one(
+        "SELECT id, fqdn, llm_debug, llm_tier, status FROM assessments "
+        "WHERE id=%s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    rows = db.query(
+        "SELECT id, target_type, target_id, endpoint_name, model, status, "
+        "request_tokens, response_tokens, "
+        "request_prompt, raw_response, error_text, "
+        "created_at, finished_at "
+        "FROM llm_analyses WHERE assessment_id=%s "
+        "ORDER BY created_at, id", (aid,))
+    return templates.TemplateResponse(
+        "llm_debug_log.html",
+        ctx(request, assessment=a, rows=rows))
 
 
 def _resolve_endpoint(endpoint_id: Optional[int]) -> Optional[dict]:
@@ -1790,15 +2161,33 @@ def assess_page(request: Request):
             # template (and thus never reaches the rendered DOM).
             prefill["creds_password_stored"] = bool(src.get("creds_password"))
             prefill.pop("creds_password", None)
+    # Resolve the current user's effective Enhanced-AI budget cap so the
+    # per-scan field can pre-fill min(system_default, user.max_spend_usd).
+    # Re-scan paths take precedence: if the source assessment had a
+    # specific budget, use that, but still server-side-clamped to the
+    # user's cap on submit.
+    user = current_user(request) or {}
+    sysd = _system_default_budget_usd()
+    user_cap_raw = user.get("max_spend_usd")
+    try:
+        user_cap = (float(user_cap_raw)
+                    if user_cap_raw is not None else None)
+    except (TypeError, ValueError):
+        user_cap = None
+    effective_cap = (min(sysd, user_cap) if user_cap is not None else sysd)
     return templates.TemplateResponse(
         "assess.html",
         ctx(request, endpoints=endpoints, user_agents=uas, recent=recent,
-            prefill=prefill),
+            prefill=prefill,
+            ai_budget_default=effective_cap,
+            ai_budget_system_default=sysd,
+            ai_budget_user_cap=user_cap),
     )
 
 
 @app.post("/assess")
 def assess_start(
+    request: Request,
     fqdn: str = Form(...),
     profile: str = Form("standard"),
     llm_tier: str = Form("none"),
@@ -1811,6 +2200,14 @@ def assess_start(
     login_url: str = Form(""),
     application_id: str = Form(""),
     keep_only_latest: Optional[str] = Form(None),
+    # Enhanced-AI controls — only meaningful on llm_tier='advanced'.
+    # llm_debug enables the prompt+response capture used by the View
+    # LLM Debug Log page. enhanced_ai_budget_usd is the per-scan spend
+    # cap (USD); _resolve_enhanced_ai_budget clamps it to the lesser of
+    # system default and the user's max_spend_usd, and ignores
+    # whatever a non-superadmin submitted.
+    llm_debug: Optional[str] = Form(None),
+    enhanced_ai_budget_usd: str = Form(""),
     # Re-scan flow. When the form was reached via "Re-scan" on an
     # assessment detail page, this hidden field carries the source
     # assessment id. If the visible password field is left as the
@@ -1876,6 +2273,19 @@ def assess_start(
     # side. Empty string normalises to NULL so the column index stays clean.
     application_id = (application_id or "").strip()[:128] or None
     keep_flag = 1 if keep_only_latest else 0
+    # Resolve the Enhanced-AI flags. Only persisted when the assessment
+    # is on the advanced tier; on basic/none tiers we store NULL/0 so
+    # nothing in the orchestrator's enhanced_ai branch picks up stray
+    # values, and the assessment page doesn't render a debug-log button
+    # for a tier that produced no LLM calls.
+    submitted_budget = _opt_float(enhanced_ai_budget_usd)
+    if llm_tier == "advanced":
+        effective_budget = _resolve_enhanced_ai_budget(
+            submitted_budget, current_user(request))
+        debug_flag = 1 if llm_debug else 0
+    else:
+        effective_budget = None
+        debug_flag = 0
 
     # Schedule branch: persist a scan_schedules row instead of running now.
     # Validation lives in app/schedules.py; we surface ValueError as a 400
@@ -1901,6 +2311,8 @@ def assess_start(
                 "enabled": 1,
                 "skip_if_running": 1 if skip_if_running else 0,
                 "keep_only_latest": keep_flag,
+                "llm_debug": debug_flag,
+                "enhanced_ai_budget_usd": effective_budget,
             })
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -1910,8 +2322,10 @@ def assess_start(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
-            application_id, keep_only_latest, status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')""",
+            application_id, keep_only_latest, llm_debug,
+            enhanced_ai_budget_usd, status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   'queued')""",
         (fqdn,
          1 if scan_http else 0,
          1 if scan_https else 0,
@@ -1921,7 +2335,9 @@ def assess_start(
          creds_password or None,
          login_url or None,
          application_id,
-         keep_flag),
+         keep_flag,
+         debug_flag,
+         effective_budget),
     )
     # spawn detached orchestrator
     log_path = LOGS_DIR / f"orchestrator_{aid}.log"
@@ -2018,6 +2434,7 @@ def schedule_detail(request: Request, sid: int):
 
 @app.post("/schedule/{sid}/update")
 def schedule_update(
+    request: Request,
     sid: int,
     name: str = Form(""),
     fqdn: str = Form(""),
@@ -2036,10 +2453,24 @@ def schedule_update(
     end_before: str = Form(""),
     skip_if_running: Optional[str] = Form(None),
     keep_only_latest: Optional[str] = Form(None),
+    # Same Enhanced-AI controls as /assess. The schedule update path is
+    # the long-lived authority for a recurring scan, so persisting them
+    # here means every materialization inherits the right values without
+    # touching schedules_mod._materialize beyond the column list.
+    llm_debug: Optional[str] = Form(None),
+    enhanced_ai_budget_usd: str = Form(""),
 ):
     """Apply edits from the schedule detail form. Empty strings are
     forwarded to schedules_mod.update which normalizes them to NULL for
     nullable columns; the cron expression is re-validated there."""
+    submitted_budget = _opt_float(enhanced_ai_budget_usd)
+    if (llm_tier or "") == "advanced":
+        effective_budget = _resolve_enhanced_ai_budget(
+            submitted_budget, current_user(request))
+        debug_flag = 1 if llm_debug else 0
+    else:
+        effective_budget = None
+        debug_flag = 0
     payload = {
         "name": name, "fqdn": fqdn,
         "profile": profile or None, "llm_tier": llm_tier or None,
@@ -2056,6 +2487,8 @@ def schedule_update(
         "end_before": end_before,
         "skip_if_running": 1 if skip_if_running else 0,
         "keep_only_latest": 1 if keep_only_latest else 0,
+        "llm_debug": debug_flag,
+        "enhanced_ai_budget_usd": effective_budget,
     }
     try:
         schedules_mod.update(sid, payload)
@@ -4056,6 +4489,11 @@ def admin_users_create(
         raise HTTPException(400, "username must be 2–64 chars, [A-Za-z0-9_.-]")
     if role not in users_mod.ROLES:
         raise HTTPException(400, "invalid role")
+    # Only a superadmin may create another superadmin. A plain admin
+    # creating one would let them bootstrap themselves to the highest
+    # tier on a compromised account; the gate here prevents that.
+    if role == "superadmin":
+        require_superadmin(request)
     if users_mod.get_by_username(username):
         return redirect(f"/admin/users?msg=user+already+exists")
     # Blank field generates a random password — only allowed for the
@@ -4082,7 +4520,22 @@ def admin_users_set_role(request: Request, uid: int,
     check_csrf(request, csrf_token)
     if role not in users_mod.ROLES:
         raise HTTPException(400, "invalid role")
-    users_mod.set_role(uid, role)
+    # Superadmin gate fires when EITHER:
+    #   - the new role is 'superadmin' (promoting), OR
+    #   - the current role on the target is 'superadmin' (demoting).
+    # Both transitions go through superadmin so a compromised admin
+    # cannot escalate by promoting a co-conspirator or demoting the
+    # only existing superadmin out of the way.
+    target = users_mod.get_by_id(uid)
+    if (role == "superadmin"
+            or (target and target.get("role") == "superadmin")):
+        require_superadmin(request)
+    try:
+        users_mod.set_role(uid, role)
+    except ValueError as e:
+        # Last-superadmin lockout protection (raised from users.set_role).
+        return redirect(
+            f"/admin/users?msg={str(e).replace(' ', '+')}")
     target = users_mod.get_by_id(uid)
     audit_mod.log_event(
         "role_changed",
@@ -4094,13 +4547,53 @@ def admin_users_set_role(request: Request, uid: int,
     return redirect("/admin/users?msg=role+updated")
 
 
+@app.post("/admin/users/{uid}/max_spend")
+def admin_users_set_max_spend(request: Request, uid: int,
+                                max_spend_usd: str = Form(""),
+                                csrf_token: str = Form("")):
+    """Superadmin-only. Sets or clears the per-user Enhanced-AI per-scan
+    budget cap. An empty / cleared field stores NULL, which means the
+    system default applies. Negative values are refused; the column
+    stores DECIMAL(8,2) so the input accepts cents."""
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    raw = (max_spend_usd or "").strip()
+    val: Optional[float] = None
+    if raw:
+        try:
+            val = round(float(raw), 2)
+        except ValueError:
+            return redirect("/admin/users?msg=max_spend+must+be+a+number")
+        if val < 0:
+            return redirect("/admin/users?msg=max_spend+cannot+be+negative")
+    users_mod.set_max_spend(uid, val)
+    target = users_mod.get_by_id(uid)
+    audit_mod.log_event(
+        "max_spend_changed",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target=audit_mod.actor_from_user(target),
+        ip=client_ip(request),
+        extra={"new_max_spend_usd": val},
+    )
+    return redirect("/admin/users?msg=max_spend+updated")
+
+
 @app.post("/admin/users/{uid}/disabled")
 def admin_users_disabled(request: Request, uid: int,
                          disabled: str = Form(""),
                          csrf_token: str = Form("")):
     check_csrf(request, csrf_token)
     is_disabled = bool(disabled)
-    users_mod.set_disabled(uid, is_disabled)
+    # Disabling a superadmin is gated behind another superadmin so a
+    # compromised admin cannot freeze the only superadmin out.
+    target = users_mod.get_by_id(uid)
+    if target and target.get("role") == "superadmin" and is_disabled:
+        require_superadmin(request)
+    try:
+        users_mod.set_disabled(uid, is_disabled)
+    except ValueError as e:
+        return redirect(
+            f"/admin/users?msg={str(e).replace(' ', '+')}")
     target = users_mod.get_by_id(uid)
     audit_mod.log_event(
         "user_disabled" if is_disabled else "user_enabled",
@@ -4149,7 +4642,15 @@ def admin_users_delete(request: Request, uid: int,
     if int(uid) == int(me.get("id", -1)):
         raise HTTPException(400, "cannot delete the account you're logged in as")
     target = users_mod.get_by_id(uid)
-    users_mod.delete(uid)
+    # Deleting a superadmin is gated behind another superadmin so a
+    # compromised admin cannot remove the privilege ceiling.
+    if target and target.get("role") == "superadmin":
+        require_superadmin(request)
+    try:
+        users_mod.delete(uid)
+    except ValueError as e:
+        return redirect(
+            f"/admin/users?msg={str(e).replace(' ', '+')}")
     audit_mod.log_event(
         "user_deleted",
         actor=audit_mod.actor_from_user(me),
@@ -5203,7 +5704,7 @@ def finding_challenge_inline(request: Request, fid: int):
     against the target.
     """
     user = current_user(request) or {}
-    if user.get("role") != "admin":
+    if user.get("role") not in ("admin", "superadmin"):
         return JSONResponse(
             {"ok": False, "error": "forbidden",
              "message": "Challenge runs require admin role."},

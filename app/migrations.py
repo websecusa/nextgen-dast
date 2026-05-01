@@ -207,6 +207,33 @@ def m_2026_05_01_enrichment_orphan_cleanup() -> str:
             f"locked_kept={locked_kept}, cleared={cleared}")
 
 
+def m_2026_05_01_promote_existing_admins_to_superadmin() -> str:
+    """Bump every existing role='admin' user to role='superadmin' on the
+    database where the Enhanced-AI-Testing release first lands.
+
+    Why a one-shot migration rather than a schema.sql UPDATE: the schema
+    file is re-applied on every drift-heal pass, so a plain `UPDATE users
+    SET role='superadmin' WHERE role='admin'` would re-promote anyone a
+    superadmin had intentionally demoted. The migration framework
+    guarantees exactly-once-per-database execution, which is what
+    "preserve existing privilege on first deploy, then leave humans to
+    manage the role as they see fit" requires.
+
+    On fresh databases this migration is a no-op — the schema seeds no
+    role='admin' rows, so there's nothing to promote. The legacy
+    is_admin=1 rows get bumped from 'readonly' to 'admin' by
+    schema.sql's existing UPDATE, then this migration moves them on to
+    'superadmin'. New users created by the admin UI default to
+    'readonly' as before."""
+    rows = db.query_all(
+        "SELECT id, username FROM users WHERE role = 'admin'")
+    if not rows:
+        return "no role='admin' users to promote"
+    db.execute("UPDATE users SET role = 'superadmin' WHERE role = 'admin'")
+    return (f"promoted {len(rows)} user(s) to superadmin: "
+            + ", ".join(r["username"] for r in rows))
+
+
 # Append-only registration list. Ids are date-prefixed (YYYY_MM_DD_) so
 # alphabetical ordering matches chronological ordering. Ids never change
 # once shipped — renaming would re-run the migration on databases that
@@ -216,6 +243,8 @@ MIGRATIONS: list = [
      m_2026_05_01_enrichment_orphan_cleanup),
     ("2026_05_01_reset_stale_traversal_validations",
      m_2026_05_01_reset_stale_traversal_validations),
+    ("2026_05_01_promote_existing_admins_to_superadmin",
+     m_2026_05_01_promote_existing_admins_to_superadmin),
 ]
 
 

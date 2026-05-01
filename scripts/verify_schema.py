@@ -48,6 +48,7 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
     },
     "users": {
         "id", "username", "password_hash", "role", "is_admin",
+        "max_spend_usd",
         "disabled", "last_login", "created_at", "updated_at",
     },
     "config": {"key", "value", "updated_at"},
@@ -67,6 +68,7 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
         "llm_cost_usd", "llm_in_tokens", "llm_out_tokens", "error_text",
         "worker_pid", "filter_info", "application_id",
         "schedule_id", "keep_only_latest",
+        "llm_debug", "enhanced_ai_budget_usd",
         "created_at", "started_at", "finished_at",
     },
     "api_tokens": {
@@ -109,18 +111,31 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
         "observed_at",
     },
     "llm_analyses": {
-        "id", "target_type", "target_id", "endpoint_id", "endpoint_name",
-        "model", "status", "request_tokens", "response_tokens",
-        "raw_response", "findings_json", "error_text", "created_at",
-        "finished_at",
+        "id", "target_type", "target_id", "assessment_id",
+        "endpoint_id", "endpoint_name", "model", "status",
+        "request_tokens", "response_tokens",
+        "request_prompt", "raw_response", "findings_json", "error_text",
+        "created_at", "finished_at",
     },
     "scan_schedules": {
         "id", "name", "fqdn", "scan_http", "scan_https", "profile",
         "llm_tier", "llm_endpoint_id", "user_agent_id", "creds_username",
         "creds_password", "login_url", "application_id", "cron_expr",
         "start_after", "end_before", "enabled", "skip_if_running",
-        "keep_only_latest", "next_run_at", "last_run_at",
+        "keep_only_latest", "llm_debug", "enhanced_ai_budget_usd",
+        "next_run_at", "last_run_at",
         "last_assessment_id", "created_by", "created_at", "updated_at",
+    },
+    # New table — Enhanced-AI-Testing prompts. Drift detection here forces
+    # a schema-heal pass on existing 2.1.1 DBs the first time the new
+    # image boots, which creates the table, after which the seed module
+    # in app/enhanced_ai_prompts.py inserts the default rows.
+    "ai_prompts": {
+        "id", "slot", "name", "description", "system_prompt",
+        "user_template", "category", "fire_when", "sort_order",
+        "batch_size", "is_active", "is_seeded", "version",
+        "created_by_user_id", "updated_by_user_id",
+        "created_at", "updated_at",
     },
 }
 

@@ -49,5 +49,15 @@
        osv-scanner) and signature DBs.</p>
     <p><a href="{{ base }}/admin/sca">Open SCA →</a></p>
   </div>
+  {% if is_superadmin %}
+  <div class="card">
+    <h2>AI Prompts</h2>
+    <p>Edit the LLM prompts that drive the Enhanced-AI-Testing pass on
+       advanced-tier scans. Multiple scenarios per slot run sequentially;
+       <em>Restore to default</em> re-seeds any seeded row from the
+       in-code baseline. <strong>Superadmin only.</strong></p>
+    <p><a href="{{ base }}/admin/ai-prompts">Manage AI prompts →</a></p>
+  </div>
+  {% endif %}
 </section>
 {% endblock %}

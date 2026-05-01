@@ -349,6 +349,17 @@ class CreateScanRequest(BaseModel):
                     "every other completed (done/error/cancelled) "
                     "assessment for the same FQDN once this scan finishes. "
                     "In-flight scans are never touched.")
+    llm_debug: bool = Field(
+        False,
+        description="When true (and llm_tier='advanced'), captures every "
+                    "LLM prompt + response into the LLM Debug Log for "
+                    "this assessment. Superadmin-only viewable.")
+    enhanced_ai_budget_usd: Optional[float] = Field(
+        None,
+        description="Per-scan Enhanced-AI-Testing budget cap in USD. "
+                    "Server clamps to min(system_default, "
+                    "user.max_spend_usd); non-superadmin callers always "
+                    "get the clamped value regardless of submitted.")
 
 
 class CreateScheduleRequest(BaseModel):
@@ -391,6 +402,14 @@ class CreateScheduleRequest(BaseModel):
         description="Carries through to every materialized assessment so "
                     "the orchestrator's finalize step auto-deletes prior "
                     "completed scans for the same FQDN.")
+    llm_debug: bool = Field(
+        False,
+        description="Carried into every materialized assessment when "
+                    "llm_tier='advanced'.")
+    enhanced_ai_budget_usd: Optional[float] = Field(
+        None,
+        description="Per-scan Enhanced-AI budget cap in USD; server "
+                    "clamps to system + user max on each materialization.")
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -415,6 +434,8 @@ class UpdateScheduleRequest(BaseModel):
     enabled: Optional[bool] = None
     skip_if_running: Optional[bool] = None
     keep_only_latest: Optional[bool] = None
+    llm_debug: Optional[bool] = None
+    enhanced_ai_budget_usd: Optional[float] = None
 
 
 class CreateScanResponse(BaseModel):
@@ -606,12 +627,29 @@ def api_create_scan(
     if body.llm_tier not in ("none", "basic", "advanced"):
         raise HTTPException(400, "invalid llm_tier")
     application_id = (body.application_id or "").strip()[:128] or None
+
+    # Clamp the Enhanced-AI budget to the system default. API tokens
+    # don't (yet) carry a per-token max_spend, so the only ceiling
+    # available is the system-wide value. This mirrors the form path
+    # for non-superadmin users — no submitted value can exceed the cap.
+    debug_flag = 1 if (body.llm_tier == "advanced" and body.llm_debug) else 0
+    effective_budget: Optional[float] = None
+    if body.llm_tier == "advanced":
+        from server import _system_default_budget_usd  # late import — avoids cycle
+        sysd = _system_default_budget_usd()
+        if body.enhanced_ai_budget_usd is None:
+            effective_budget = round(sysd, 2)
+        else:
+            effective_budget = round(
+                max(0.0, min(float(body.enhanced_ai_budget_usd), sysd)), 2)
+
     aid = db.execute(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
-            application_id, keep_only_latest, status)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
+            application_id, keep_only_latest, llm_debug,
+            enhanced_ai_budget_usd, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
         (fqdn,
          1 if body.scan_http else 0,
          1 if body.scan_https else 0,
@@ -622,7 +660,9 @@ def api_create_scan(
          (body.creds_password or None),
          (body.login_url or None),
          application_id,
-         1 if body.keep_only_latest else 0),
+         1 if body.keep_only_latest else 0,
+         debug_flag,
+         effective_budget),
     )
     _spawn_orchestrator(aid)
     row = db.query_one(
