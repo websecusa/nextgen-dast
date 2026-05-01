@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "redirect_allowlist_bypass",
+  "version": "1.0",
+  "summary": "Re-runs the substring-allowlist open-redirect bypass probe.",
+  "validates": [
+    "CWE-601",
+    "CWE-20"
+  ],
+  "matches_titles": [
+    "redirect_allowlist_bypass",
+    "open redirect",
+    "url redirect"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 6,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target origin URL",
+    "--evil-host": "Host name we want the server to redirect to",
+    "--path": "Additional redirect endpoint (repeatable)"
+  }
+}

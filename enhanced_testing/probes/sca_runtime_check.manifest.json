@@ -1,0 +1,20 @@
+{
+  "name": "sca_runtime_check",
+  "version": "1.0",
+  "summary": "Premium-tier SCA gap-fill: fingerprint JS libraries from versioned URLs and consult the SCA cache (LLM-augmented).",
+  "validates": [
+    "A06:2021-Vulnerable_and_Outdated_Components",
+    "CWE-1104",
+    "CWE-937"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 4,
+  "args": {
+    "--url":         "Target page URL (required)",
+    "--max-urls":    "Cap how many script URLs to inspect (default 40)",
+    "--cookie":      "Cookie header value",
+    "--header":      "Extra header 'Name: value' (repeatable)",
+    "--user-agent":  "User-Agent override"
+  }
+}

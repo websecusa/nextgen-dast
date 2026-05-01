@@ -1,0 +1,33 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "htaccess_bypass",
+  "version": "1.1",
+  "summary": "High-fidelity check of an alleged access-control bypass: distinguishes real bypass from 404 / unrestricted resource / 403 noise.",
+  "validates": [
+    "CWE-284",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "htaccess bypass",
+    "weak restriction bypass",
+    "access control bypass",
+    "authorization bypass",
+    "auth bypass",
+    "broken access control",
+    "directory access bypass"
+  ],
+  "matches_tools": [
+    "wapiti",
+    "nuclei",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Target URL the scanner reported (required)",
+    "--cookie": "Cookie header sent on EVERY request (auth + anon baselines + variants). Use this when the orchestrator's challenge route resolves a session cookie via auth.form_login_cookie() and the probe should test under that authenticated context.",
+    "--auth-cookie": "Optional separate cookie used ONLY to compare bypass responses against an authenticated baseline (alternative to --cookie when you want to test the bypass anonymously but still know what an auth-success looks like).",
+    "--baseline-404": "Optional URL of a guaranteed-404 path on this host, used as the negative-control fingerprint. If omitted, the probe synthesizes one by appending a random suffix to the URL's directory."
+  }
+}

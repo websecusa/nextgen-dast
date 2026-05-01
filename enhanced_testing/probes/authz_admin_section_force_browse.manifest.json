@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_admin_section_force_browse",
+  "version": "1.0",
+  "summary": "Re-runs the user-list force-browse probe: unauthenticated GET on /api/Users-style paths and asserts whether emails + password hashes are returned.",
+  "validates": [
+    "CWE-862",
+    "CWE-200",
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "authz_admin_section_force_browse",
+    "force browse",
+    "broken access control",
+    "unauthenticated user list"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional path to test (repeatable)"
+  }
+}

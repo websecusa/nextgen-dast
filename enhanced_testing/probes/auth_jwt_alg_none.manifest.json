@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_jwt_alg_none",
+  "version": "1.0",
+  "summary": "Re-runs the JWT-alg-none probe: forge an unsigned token claiming role='admin' and confirm the server accepts it.",
+  "validates": [
+    "CWE-345",
+    "CWE-287",
+    "CWE-347"
+  ],
+  "matches_titles": [
+    "auth_jwt_alg_none",
+    "jwt alg none",
+    "jwt alg=none",
+    "unsigned jwt"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Site origin to probe (the probe sweeps common authenticated endpoints under it)"
+  }
+}

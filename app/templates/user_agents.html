@@ -1,0 +1,70 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>User-Agents</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+<section class="card">
+  <h2>What this is</h2>
+  <p>The User-Agent string sent by every HTTP scanner during a scan or
+  assessment. Pick one for stealth (look like a real browser), for
+  consistency (so you can grep your access logs), or for compatibility
+  (some apps gate behavior on UA). The default is used when the form
+  leaves <em>User-Agent</em> set to <em>default</em>.</p>
+  <p class="muted">Note: testssl performs raw TLS handshakes with no HTTP
+  layer, so User-Agent doesn't apply there.</p>
+</section>
+
+<section>
+  <h2>Available agents</h2>
+  {% if user_agents %}
+  <table>
+    <thead><tr><th>Label</th><th>User-Agent</th><th>Default</th><th>Source</th><th></th></tr></thead>
+    <tbody>
+    {% for u in user_agents %}
+      <tr>
+        <td><code>{{ u.label }}</code></td>
+        <td class="url"><small>{{ u.user_agent }}</small></td>
+        <td>
+          {% if u.is_default %}
+            <span class="badge finished">default</span>
+          {% else %}
+            <form method="post" action="{{ base }}/user-agents/{{ u.id }}/default" style="display:inline">
+              <button type="submit">make default</button>
+            </form>
+          {% endif %}
+        </td>
+        <td>{{ "seeded" if u.is_seeded else "custom" }}</td>
+        <td>
+          <form method="post" action="{{ base }}/user-agents/{{ u.id }}/delete"
+                onsubmit="return confirm('Delete UA {{ u.label }}?')">
+            <button class="warn" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">None — DB unreachable?</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Add / update an agent</h2>
+  <form method="post" action="{{ base }}/user-agents">
+    <label>Label (unique)
+      <input name="label" required placeholder="e.g. Chrome 132 on Linux">
+    </label>
+    <label>User-Agent string
+      <input name="user_agent" required
+             placeholder='e.g. Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="is_default"> Make this the default
+    </label>
+    <button type="submit">Save</button>
+  </form>
+</section>
+{% endblock %}

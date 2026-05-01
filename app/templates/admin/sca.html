@@ -1,0 +1,264 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Admin → SCA database. Surfaces:
+    - the cached vulnerability inventory (counts by source / severity)
+    - the observed-package inventory across all assessments
+    - last-refresh timestamp and tool overlay versions
+    - one-button trigger for an immediate scanner + SCA refresh, with
+      a live tail of /data/logs/sca_update.log via SSE
+    - a manual entry form for one-off cache overrides
+
+  No client-side framework. We rely on plain <table> + <details> for
+  expanding rows and a small fetch() poll for the SSE log tail. Same
+  rationale as admin/database.html: keeps the admin surface auditable
+  and works with strict CSP.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>SCA database</h1>
+
+{% if msg %}
+<div class="msg" style="margin:.5em 0; padding:.6em .9em;
+                       border:1px solid var(--accent, #5d8aa8);
+                       background:rgba(95,179,215,0.08);
+                       border-radius:6px">
+  {{ msg }}
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>Status</h2>
+  <p class="muted small">
+    Last refresh:
+    <strong>{{ last_updated_at or '(never — kicks off automatically within an hour of first boot)' }}</strong>.
+    Auto-refresh interval:
+    <strong>{{ interval_hours }} h</strong>
+    (<a href="{{ base }}/admin/sca/config">change</a>).
+  </p>
+  <p>
+    <strong>{{ stats.packages or 0 }}</strong> distinct packages observed,
+    <strong>{{ stats.vulnerabilities or 0 }}</strong> vulnerability records cached.
+  </p>
+  {% if stats.by_source %}
+  <p class="muted small">By source:
+    {% for s, n in stats.by_source.items() %}
+      <code>{{ s }}={{ n }}</code>{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+  {% if stats.by_severity %}
+  <p class="muted small">By severity:
+    {% for s, n in stats.by_severity.items() %}
+      <span class="badge {{ s }}">{{ s }}</span>&nbsp;{{ n }}{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Update SCA database &amp; scanner versions</h2>
+  <p>
+    Refreshes nuclei templates, retire.js signatures, the OSV offline DB,
+    and the latest <code>nuclei</code> / <code>dalfox</code> /
+    <code>ffuf</code> / <code>osv-scanner</code> binaries. New binaries
+    land under <code>/data/scanners/</code>; the image baseline is left
+    untouched so a fresh registry pull still works air-gapped.
+  </p>
+  <p class="muted small">
+    Also runs automatically every <strong>{{ interval_hours }} h</strong>
+    on the FastAPI background sweeper, and before any "sca" stage if the
+    on-disk signatures are older than
+    <strong>{{ sig_max_age_days }}</strong> days.
+  </p>
+  <form method="post" action="{{ base }}/admin/sca/update"
+        style="display:inline-block; margin-right:.6em">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="scope" value="all">
+    <button class="primary" type="submit">Update everything now</button>
+  </form>
+  <form method="post" action="{{ base }}/admin/sca/update"
+        style="display:inline-block; margin-right:.6em">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="scope" value="scanners">
+    <button class="ghost" type="submit">Scanners only</button>
+  </form>
+  <form method="post" action="{{ base }}/admin/sca/update"
+        style="display:inline-block">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="scope" value="sca">
+    <button class="ghost" type="submit">SCA databases only</button>
+  </form>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Live update log</h2>
+  <p class="muted small">
+    Tails the last 4 KB of <code>/data/logs/sca_update.log</code>,
+    refreshing every 2 s. Empty when no refresh has run yet.
+  </p>
+  <pre id="sca-log" style="max-height:18em; overflow:auto;
+                          background:#0f1419; color:#d8dee5;
+                          padding:.6em .8em; border-radius:6px;
+                          font-size:0.78em; line-height:1.4">{{ recent_log or '(no log entries yet)' }}</pre>
+  <script>
+    (function(){
+      var el = document.getElementById('sca-log');
+      function poll(){
+        fetch('{{ base }}/admin/sca/log?tail=4096', {credentials:'same-origin'})
+          .then(function(r){ return r.text(); })
+          .then(function(t){ if(t){ el.textContent = t; el.scrollTop = el.scrollHeight; } })
+          .catch(function(){});
+      }
+      setInterval(poll, 2000);
+    })();
+  </script>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Tool overlay versions</h2>
+  <table style="width:100%; border-collapse:collapse">
+    <thead><tr>
+      <th style="text-align:left">Tool</th>
+      <th style="text-align:left">Kind</th>
+      <th style="text-align:left">Overlay version / state</th>
+      <th style="text-align:left">Path</th>
+    </tr></thead>
+    <tbody>
+    {% for t in updater_status.tools %}
+      <tr>
+        <td><code>{{ t.name }}</code></td>
+        <td class="muted small">{{ t.kind }}</td>
+        <td>
+          {% if t.overlay_version %}<code>{{ t.overlay_version }}</code>{% endif %}
+          {% if t.last_commit %}<small>{{ t.last_commit }}</small>{% endif %}
+          {% if t.records is defined %}<small>{{ t.records }} OSV records</small>{% endif %}
+          {% if t.bytes is defined %}<small>{{ t.bytes }} bytes ({{ t.mtime }})</small>{% endif %}
+          {% if t.overlay_present is defined and not t.overlay_version %}
+            <span class="muted small">{{ 'present' if t.overlay_present else 'baseline only' }}</span>
+          {% endif %}
+        </td>
+        <td class="muted small">
+          {% if t.path %}<code>{{ t.path }}</code>{% endif %}
+          {% if t.ecosystem %}<code>{{ t.ecosystem }}</code>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Recent observed packages</h2>
+  {% if not packages %}
+    <p class="muted">No packages have been observed yet. Run an
+    assessment with the <code>standard</code> profile or higher to
+    populate this list.</p>
+  {% else %}
+    <table style="width:100%; border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left">Ecosystem</th>
+        <th style="text-align:left">Name</th>
+        <th style="text-align:left">Version</th>
+        <th style="text-align:left">Last seen</th>
+        <th style="text-align:right">Vulns</th>
+      </tr></thead>
+      <tbody>
+      {% for p in packages %}
+        <tr>
+          <td><code>{{ p.ecosystem }}</code></td>
+          <td><code>{{ p.name }}</code></td>
+          <td><code>{{ p.version }}</code></td>
+          <td class="muted small">{{ p.last_seen }}</td>
+          <td style="text-align:right">{{ p.vuln_count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small">Showing {{ packages|length }} most recent.</p>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Recent vulnerabilities in the cache</h2>
+  {% if not vulns %}
+    <p class="muted">No vulnerability records cached yet.</p>
+  {% else %}
+    <table style="width:100%; border-collapse:collapse">
+      <thead><tr>
+        <th style="text-align:left">Ecosystem</th>
+        <th style="text-align:left">Package</th>
+        <th style="text-align:left">Range</th>
+        <th style="text-align:left">CVE / GHSA</th>
+        <th style="text-align:left">Severity</th>
+        <th style="text-align:left">Source</th>
+        <th style="text-align:left">Fetched</th>
+      </tr></thead>
+      <tbody>
+      {% for v in vulns %}
+        <tr>
+          <td><code>{{ v.ecosystem }}</code></td>
+          <td><code>{{ v.package_name }}</code></td>
+          <td><code>{{ v.vulnerable_range }}</code></td>
+          <td class="muted small">
+            {% if v.cve_id %}<code>{{ v.cve_id }}</code>{% endif %}
+            {% if v.ghsa_id %} {{ v.ghsa_id }}{% endif %}
+          </td>
+          <td><span class="badge {{ v.severity }}">{{ v.severity }}</span></td>
+          <td class="muted small">
+            {{ v.source }}
+            {% if v.is_locked %}<small>(locked)</small>{% endif %}
+          </td>
+          <td class="muted small">{{ v.fetched_at }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Add a manual entry</h2>
+  <p class="muted small">
+    Manual entries override automatic refreshes. Use this for
+    private CVEs, vendor-confirmed advisories that have not made it
+    into OSV yet, or to suppress a known false positive (set severity
+    to <code>info</code> with summary <code>"false positive"</code>).
+  </p>
+  <form method="post" action="{{ base }}/admin/sca/vuln" style="display:grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap:.5em .8em">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Ecosystem<br><input name="ecosystem" required
+        placeholder="npm|PyPI|Maven|Go|RubyGems"></label>
+    <label>Package<br><input name="package_name" required></label>
+    <label>Version range<br><input name="vulnerable_range" required
+        placeholder=">=1.0.3 &lt;3.5.0"></label>
+    <label>CVE id<br><input name="cve_id" placeholder="CVE-2020-11023"></label>
+    <label>GHSA id<br><input name="ghsa_id"></label>
+    <label>Severity<br>
+      <select name="severity">
+        <option value="critical">critical</option>
+        <option value="high">high</option>
+        <option value="medium" selected>medium</option>
+        <option value="low">low</option>
+        <option value="info">info</option>
+      </select>
+    </label>
+    <label>Fixed version<br><input name="fixed_version"></label>
+    <label>CVSS<br><input name="cvss" placeholder="6.1"></label>
+    <label style="grid-column:1 / -1">Summary<br>
+      <input name="summary" maxlength="512"
+             placeholder="One-line description"></label>
+    <label style="grid-column:1 / -1">Description<br>
+      <textarea name="description" rows="3"></textarea></label>
+    <label style="grid-column:1 / -1">References (one per line)<br>
+      <textarea name="references" rows="2"
+                placeholder="https://nvd.nist.gov/&#10;https://github.com/..."></textarea></label>
+    <div style="grid-column:1 / -1">
+      <button class="primary" type="submit">Add (locked)</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,32 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_disclosure",
+  "version": "1.1",
+  "summary": "Info-disclosure check: scans body + headers for stack traces, secrets, debug pages.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "information disclosure",
+    "info disclosure",
+    "sensitive data exposure",
+    "stack trace",
+    "debug page",
+    "phpinfo"
+  ],
+  "matches_tools": [
+    "wapiti",
+    "nuclei",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target URL to fetch (required)",
+    "--method": "HTTP method (default GET)",
+    "--cookie": "Cookie header value",
+    "--pattern": "Custom regex (repeatable)",
+    "--no-default-patterns": "Skip the built-in catalog and only use --pattern"
+  }
+}

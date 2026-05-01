@@ -1,0 +1,151 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Reproduce-&-verify partial. Renders three things, in order:
+
+    1. The exact command an analyst should run to re-issue the request
+       the scanner sent (uses `repro.curl` from reports._repro_for).
+    2. A one-line "what to look for" indicator (`io.indicator`) — a
+       concrete signal the analyst can grep for in their own re-run, so
+       success / failure does not require interpreting the scanner's
+       output format.
+    3. View-request / View-response modal triggers, when the source
+       scanner captured the round-trip in raw_data.
+
+  The captured request and response bytes are emitted into <template>
+  tags rather than into the visible DOM. <template>.content.textContent
+  hands them back to the modal as the original raw text (Jinja's HTML
+  escaping is reversed by the parse-then-read round-trip).
+
+  The modal is just an HTML <dialog>. The openIO / copyIO functions live
+  in the page that includes this partial — script tags inside a fragment
+  swapped via innerHTML do not execute, so we keep this file inert.
+
+  Used by both:
+    * finding_panel.html  — the assessment-workspace middle pane
+    * finding_detail.html — the standalone /finding/<id> page
+#}
+{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.challengeable or io.testable)) %}
+<h3 class="section">Reproduce &amp; verify</h3>
+{# list-style:none + zero left margin/padding so the contained buttons
+   sit flush with the surrounding section content. The earlier 1.2em
+   indent + default decimal markers left the Challenge / Validate /
+   Test row hanging behind the bullet column, which read as wonky
+   alignment against the section heading directly above. #}
+<ol class="repro-steps"
+    style="list-style:none; margin:.25em 0 .8em 0; padding:0">
+  {% if repro and repro.curl %}
+  <li>
+    <span>Run this request:</span>
+    <pre class="log" style="margin:.4em 0; max-height:14em">{{ repro.curl }}</pre>
+    {% if repro.hint %}<p class="muted small" style="margin:.2em 0">{{ repro.hint|safe }}</p>{% endif %}
+  </li>
+  {% endif %}
+  {% if io and io.indicator %}
+  <li><strong>Look for:</strong> {{ io.indicator }}</li>
+  {% endif %}
+  {% if io and (io.request or io.response or io.validatable or io.challengeable or io.testable) %}
+  <li>
+    {% if io.request or io.response %}
+      <span>Compare against the captured round-trip from the scan:</span>
+    {% endif %}
+    <div style="display:flex; gap:.5em; flex-wrap:wrap; margin-top:.4em">
+      {% if io.request %}
+        <button type="button" class="ghost"
+                onclick="openIO('request')"
+                title="The HTTP request the scanner sent (or a synthesized summary when full bytes were not captured).">
+          Scan request
+        </button>
+      {% endif %}
+      {% if io.response %}
+        <button type="button" class="ghost"
+                onclick="openIO('response')"
+                title="The HTTP response the scanner saw (or a synthesized summary when full bytes were not captured).">
+          Scan response
+        </button>
+      {% endif %}
+      {% if io.testable %}
+        <button type="button" class="primary"
+                onclick="runTest({{ f.id }})"
+                title="{% if io.test_kind == 'tls' %}Re-run testssl.sh narrowly against this finding's host:port and show the matched rows.{% elif io.test_kind == 'tls_info' %}Open a TLS connection to the host, fetch the live certificate, and surface subject / issuer / SAN / validity / cipher / protocol.{% elif io.test_kind == 'nuclei' %}Re-run nuclei narrowly with this finding's template id against the URL and show whether the matcher still fires.{% else %}Send this exact request once from the server and show the live response. GET/HEAD only, scoped to the assessment FQDN.{% endif %}">
+          {% if io.test_kind == 'tls' %}Test (TLS){% elif io.test_kind == 'tls_info' %}Test (cert){% elif io.test_kind == 'nuclei' %}Test (nuclei){% else %}Test{% endif %}
+        </button>
+      {% endif %}
+      {% if io.validatable %}
+        <button type="button" class="primary"
+                onclick="runValidate({{ f.id }})"
+                title="Re-run the {{ io.probe_name }} probe (read-only) against this URL and show the result.">
+          Validate
+        </button>
+      {% endif %}
+      {% if io.challengeable %}
+        <button type="button" class="primary"
+                onclick="runChallenge({{ f.id }}, '{{ io.probe_name|e }}', '{{ io.probe_safety|e }}', {{ io.probe_budget_typical or 'null' }}, {{ io.probe_budget_max or 'null' }})"
+                title="Re-run the {{ io.probe_name }} probe ({{ io.probe_safety }} class) against this URL and show the result. Probe-class probes send a small number of POST requests with non-mutating payloads (e.g. login attempts) — admin role required.">
+          Challenge with <code>{{ io.probe_name }}</code>
+        </button>
+      {% endif %}
+    </div>
+    {# Show a discoverability note when the probe is matched so it's
+       visible BEFORE the analyst clicks. Helps non-pentesters understand
+       what the button is going to do. #}
+    {% if io and (io.validatable or io.challengeable) %}
+      <p class="muted small" style="margin:.4em 0 0 0">
+        Probe matched: <code>{{ io.probe_name }}</code>
+        {% if io.probe_safety %}
+          · safety class <code>{{ io.probe_safety }}</code>
+        {% endif %}
+        {% if io.probe_budget_typical %}
+          · ~{{ io.probe_budget_typical }} HTTP requests
+          (max {{ io.probe_budget_max or '?' }})
+        {% endif %}
+      </p>
+    {% endif %}
+  </li>
+  {% endif %}
+</ol>
+
+{# Inert carriers for the captured bytes. The modal reads .content.textContent. #}
+{% if io and io.request %}<template id="io-data-request">{{ io.request }}</template>{% endif %}
+{% if io and io.response %}<template id="io-data-response">{{ io.response }}</template>{% endif %}
+
+{% if io and (io.request or io.response or io.validatable or io.testable) %}
+<style>
+  /* The native ::backdrop pseudo-element can't be set inline, so we
+     scope it on the io-modal id. Slightly darker than the default
+     so the modal reads as visually separated from the workspace
+     behind it. */
+  #io-modal::backdrop { background: rgba(0,0,0,0.55); }
+</style>
+<dialog id="io-modal" class="io-modal"
+        style="max-width:min(90vw, 900px); width:80vw; padding:0;
+               background:var(--panel); color:var(--text);
+               border:2px solid var(--accent, #5d8aa8);
+               border-radius:10px;
+               box-shadow:0 0 0 1px rgba(0,0,0,0.55),
+                          0 18px 48px rgba(0,0,0,0.55)">
+  <div style="display:flex; align-items:center; justify-content:space-between;
+              padding:.7em 1em;
+              border-bottom:2px solid var(--accent, #5d8aa8);
+              background:rgba(255,255,255,0.02)">
+    <strong id="io-modal-title">Scan evidence</strong>
+    <div style="display:flex; gap:.4em">
+      <button type="button" id="io-copy-btn" class="ghost small"
+              onclick="copyIO()">Copy</button>
+      <button type="button" class="ghost small"
+              onclick="document.getElementById('io-modal').close()">Close</button>
+    </div>
+  </div>
+  {# Plain-text body. Used for the captured-request and captured-response
+     views. Hidden when the modal is showing a validation verdict. #}
+  <pre id="io-modal-body" class="log"
+       style="margin:0; padding:1em; max-height:70vh; overflow:auto;
+              white-space:pre-wrap; word-break:break-word"></pre>
+  {# Validation verdict body. Hidden by default; populated by
+     runValidate() when the analyst clicks the Validate button. #}
+  <div id="io-validate-body" hidden
+       style="padding:1em; max-height:70vh; overflow:auto"></div>
+</dialog>
+{% endif %}
+{% endif %}

@@ -1,0 +1,53 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Admin</h1>
+<section class="grid">
+  <div class="card">
+    <h2>Users</h2>
+    <p>Create accounts, change roles, reset passwords.</p>
+    <p><a href="{{ base }}/admin/users">Manage users →</a></p>
+  </div>
+  <div class="card">
+    <h2>Branding</h2>
+    <p>Logo, colors, header / footer text, disclaimer. Drives both the live UI and the PDF report.</p>
+    <p><a href="{{ base }}/admin/branding">Edit branding →</a></p>
+  </div>
+  <div class="card">
+    <h2>Reports</h2>
+    <p>Generated PDF reports are listed on each assessment's detail page.</p>
+  </div>
+  <div class="card">
+    <h2>Toolkit</h2>
+    <p>Validation probes — standalone CLI tools that confirm scanner findings against any target.</p>
+    <p><a href="{{ base }}/admin/toolkit">View installed probes →</a></p>
+  </div>
+  <div class="card">
+    <h2>API tokens</h2>
+    <p>OUI-format bearer tokens for the REST API, restricted to whitelisted source IPs. Includes Swagger / Postman exports and a live playground.</p>
+    <p>
+      <a href="{{ base }}/admin/api-tokens">Manage tokens →</a> ·
+      <a href="{{ base }}/api/v1/docs">Open API playground →</a>
+    </p>
+  </div>
+  <div class="card">
+    <h2>Database</h2>
+    <p>Create gzipped <code>mariadb-dump</code> backups, download or
+       delete prior dumps, and restore the database from an archive.
+       Tuned for multi-GB <code>raw_data</code> blobs (<code>max_allowed_packet=1G</code>).</p>
+    <p><a href="{{ base }}/admin/database">Backup &amp; restore →</a></p>
+  </div>
+  <div class="card">
+    <h2>SCA database</h2>
+    <p>Software-composition cache: observed packages, cached
+       vulnerability records (OSV / retire.js / nuclei / LLM /
+       manual), and last-refresh status. Includes a one-button
+       update for scanner binaries (nuclei, dalfox, ffuf,
+       osv-scanner) and signature DBs.</p>
+    <p><a href="{{ base }}/admin/sca">Open SCA →</a></p>
+  </div>
+</section>
+{% endblock %}

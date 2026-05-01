@@ -1,0 +1,34 @@
+  ┌──────────────────────────────────────────────────┬──────────────────────────────────────────────┐
+  │                  What you want                   │                  Run this                    │
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ First-time host setup (only once per host)       │ sudo ./setup.sh                              │
+  │ First-time stack bring-up (env file + build + up)│ ./pentest.sh bootstrap                       │
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ Start the stack                                  │ ./pentest.sh up -d                           │
+  │ Stop the stack (remove containers, keep data)    │ ./pentest.sh down                            │
+  │ Stop services, keep containers                   │ ./pentest.sh stop                            │
+  │ Start previously-stopped containers              │ ./pentest.sh start                           │
+  │ Restart                                          │ ./pentest.sh restart  (or down && up -d)     │
+  │ Restart just the app                             │ ./pentest.sh restart nextgen-dast            │
+  | Re-installs.                                     | ./pentest.sh pull && ./pentest.sh up -d --force-recreate |
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ Pull a new image from the registry               │ ./pentest.sh pull                            │
+  │ Pull + restart with the new image                │ ./pentest.sh pull && ./pentest.sh up -d      │
+  │ Build the image locally from ./Dockerfile        │ ./pentest.sh build                           │
+  │ Rebuild from local source + restart              │ ./pentest.sh build && ./pentest.sh up -d     │
+  │ Force a clean rebuild (no cache)                 │ ./pentest.sh build --no-cache                │
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ See what's running                               │ ./pentest.sh ps                              │
+  │ Tail app logs                                    │ ./pentest.sh logs -f nextgen-dast            │
+  │ Tail DB logs                                     │ ./pentest.sh logs -f mariadb                 │
+  │ Dump last 200 app log lines                      │ ./pentest.sh logs --tail 200 nextgen-dast    │
+  │ Container resource usage                         │ ./pentest.sh top                             │
+  │ Validate rendered compose config                 │ ./pentest.sh config                          │
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ Shell into the app container                     │ ./pentest.sh exec nextgen-dast bash          │
+  │ MariaDB SQL shell as root                        │ ./pentest.sh exec mariadb mariadb -uroot -p  │
+  ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
+  │ Rotate admin password / re-seed                  │ ./pentest.sh reset                           │
+  │ Change admin password to a known value           │ ./pentest.sh reset --admin-password 'pass'   │
+  │ Wipe DB tables AND rotate admin (destructive!)   │ ./pentest.sh reset-full                      │
+  └──────────────────────────────────────────────────┴──────────────────────────────────────────────┘

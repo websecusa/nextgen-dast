@@ -1,0 +1,77 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Branding</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+<p class="muted">Two surfaces, two themes. The web app is for daily use by
+your team; the PDF is for the deliverable handed to clients. Each has its
+own colors, fonts, severity palette, and logo.</p>
+
+<section class="grid" style="margin-top:1em">
+  <div class="card">
+    <h2>Web app theme</h2>
+    <p>Live UI palette. Quick toggle: <strong>dark</strong> or
+       <strong>custom</strong>.
+       Currently: <span class="badge">{{ web.mode }}</span></p>
+    <p class="muted small">Severity colors used here: text-only labels, no
+       colored backgrounds (accessibility).</p>
+    <p style="font-size:.95em">
+      <span style="color: {{ web.sev_critical }}; font-weight:700; margin-right:.5em">CRITICAL</span>
+      <span style="color: {{ web.sev_high }};     font-weight:700; margin-right:.5em">HIGH</span>
+      <span style="color: {{ web.sev_medium }};   font-weight:700; margin-right:.5em">MEDIUM</span>
+      <span style="color: {{ web.sev_low }};      font-weight:700; margin-right:.5em">LOW</span>
+      <span style="color: {{ web.sev_info }};     font-weight:700">INFO</span>
+    </p>
+    <p><a href="{{ base }}/admin/branding/web">Edit web theme →</a></p>
+  </div>
+
+  <div class="card">
+    <h2>PDF report theme</h2>
+    <p>Cover page, headings, severity colors, and logos in the deliverable PDF.</p>
+    <p style="font-size:.95em">
+      <span style="color: {{ pdf.sev_critical }}; font-weight:700; margin-right:.5em">CRITICAL</span>
+      <span style="color: {{ pdf.sev_high }};     font-weight:700; margin-right:.5em">HIGH</span>
+      <span style="color: {{ pdf.sev_medium }};   font-weight:700; margin-right:.5em">MEDIUM</span>
+      <span style="color: {{ pdf.sev_low }};      font-weight:700; margin-right:.5em">LOW</span>
+      <span style="color: {{ pdf.sev_info }};     font-weight:700">INFO</span>
+    </p>
+    <p><a href="{{ base }}/admin/branding/pdf">Edit PDF theme →</a></p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Shared (used by both)</h2>
+  <p class="muted small">Fields marked <span style="color:#c0392b">*</span>
+     are required. All other fields are optional &mdash; leave them blank
+     to suppress the corresponding piece of chrome (e.g. clear the
+     classification field to remove the banner from the app and PDF).</p>
+  <form method="post" action="{{ base }}/admin/branding/shared">
+    <label>Company name <span style="color:#c0392b">*</span>
+      <input name="company_name" value="{{ brand.company_name or '' }}" required>
+    </label>
+    <label>Tagline <span class="muted small">(optional)</span>
+      <input name="tagline" value="{{ brand.tagline or '' }}">
+    </label>
+    <label>Classification banner text <span class="muted small">(optional &mdash; leave blank to hide the banner)</span>
+      <input name="classification" value="{{ brand.classification or '' }}" placeholder="e.g. CONFIDENTIAL">
+    </label>
+    <label>Contact email <span class="muted small">(optional)</span>
+      <input type="email" name="contact_email" value="{{ brand.contact_email or '' }}">
+    </label>
+    <label>Header text <span class="muted small">(optional &mdash; shown in app + PDF running header)</span>
+      <input name="header_text" value="{{ brand.header_text or '' }}">
+    </label>
+    <label>Footer text <span class="muted small">(optional)</span>
+      <input name="footer_text" value="{{ brand.footer_text or '' }}">
+    </label>
+    <label>Disclaimer <span class="muted small">(optional &mdash; printed in PDF + app footer)</span>
+      <textarea name="disclaimer" rows="3">{{ brand.disclaimer or '' }}</textarea>
+    </label>
+    <button type="submit">Save shared</button>
+  </form>
+</section>
+{% endblock %}

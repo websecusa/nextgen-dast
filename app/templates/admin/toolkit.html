@@ -1,0 +1,67 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Toolkit — validation probes</h1>
+<p class="muted">
+  Each probe takes an unvalidated finding and produces a <em>confirmed</em>
+  or <em>rejected</em> verdict with concrete evidence. Probes are
+  standalone CLI tools — a pentester can pull any probe out of the
+  container and run it directly. The orchestrator + LLM consolidation
+  phase will wire these in automatically (next pass).
+</p>
+
+{% if not probes %}
+<section class="card">
+  <p class="err">No probes installed. Mount your <code>toolkit/</code>
+  directory at <code>/app/toolkit</code> in <code>docker-compose.yml</code>.</p>
+</section>
+{% else %}
+<table>
+  <thead><tr>
+    <th>Name</th><th>Safety class</th><th>Validates</th>
+    <th>Typical / max requests</th><th>Summary</th>
+  </tr></thead>
+  <tbody>
+  {% for p in probes %}
+  <tr>
+    <td><code>{{ p.name }}</code> <small class="muted">v{{ p.version }}</small></td>
+    <td>
+      <span class="badge {% if p.safety_class == 'read-only' %}finished{% elif p.safety_class == 'destructive' %}red{% endif %}">{{ p.safety_class }}</span>
+    </td>
+    <td><small>{{ (p.validates or [])|join(", ") }}</small></td>
+    <td>{{ p.request_budget_typical }} / {{ p.request_budget_max }}</td>
+    <td>{{ p.summary }}</td>
+  </tr>
+  <tr>
+    <td colspan="5" class="muted small" style="padding-left:1.5em">
+      <strong>CLI args:</strong>
+      <ul style="margin:.2em 0 0">
+        {% for arg, desc in (p.args or {}).items() %}
+          <li><code>{{ arg }}</code> — {{ desc }}</li>
+        {% endfor %}
+      </ul>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<section class="card" style="margin-top:1.5em">
+  <h2>Standalone use (any pentester, any target)</h2>
+  <pre>docker compose exec nextgen-dast python /app/toolkit/probes/sqli_boolean.py \
+  --url 'https://target.example.com/products?id=1' \
+  --param id \
+  --cookie 'session=abc123' \
+  --scope target.example.com \
+  --max-requests 12</pre>
+  <p class="muted small">
+    All probes accept <code>--stdin</code> for orchestrator-driven JSON
+    input, and <code>--dry-run</code> to print what they would do without
+    sending requests.
+  </p>
+</section>
+{% endif %}
+{% endblock %}

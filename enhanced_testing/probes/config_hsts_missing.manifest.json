@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_hsts_missing",
+  "version": "1.0",
+  "summary": "Re-runs the HSTS-missing probe.",
+  "validates": [
+    "CWE-319",
+    "CWE-523"
+  ],
+  "matches_titles": [
+    "config_hsts_missing",
+    "missing hsts",
+    "strict-transport-security"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "testssl",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target origin URL (must be https://)"
+  }
+}

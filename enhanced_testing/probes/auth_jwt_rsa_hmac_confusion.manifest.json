@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_jwt_rsa_hmac_confusion",
+  "version": "1.0",
+  "summary": "Re-runs the RS256/HS256 JWT key-confusion attack: fetches the server's public key, HMAC-signs a forged token with it, and checks whether the verifier accepts the result.",
+  "validates": [
+    "CWE-347",
+    "CWE-345",
+    "CWE-287"
+  ],
+  "matches_titles": [
+    "auth_jwt_rsa_hmac_confusion",
+    "jwt key confusion",
+    "jwt algorithm confusion",
+    "rsa to hmac"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL (probe sweeps common public-key + whoami paths)"
+  }
+}

@@ -1,0 +1,343 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Overview dashboard. Layout (top → bottom):
+    1. Page heading + greeting
+    2. KPI strip (overall score, open findings + 7d delta, severity dots,
+       targets / assessments / last-scan totals)
+    3. Findings trend (30-day stacked-area sparkline, drawn inline as SVG
+       so we don't ship a charting library)
+    4. Two-column row: Target Security (top targets by score) + Unresolved
+       findings by age (severity matrix)
+    5. Recent activity table
+
+  All data is gathered server-side in server._dashboard_data().
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>
+  Welcome back{% if user %}, {{ user.username }}{% endif %}
+</h1>
+
+{# ---- KPI strip ---------------------------------------------------- #}
+<div class="kpi-strip">
+  {% if kpi.risk_score is not none %}
+  <div class="kpi">
+    <span class="v">{{ kpi.risk_score }}</span><span class="lbl">/100 risk</span>
+  </div>
+  {% endif %}
+  <div class="kpi">
+    <span class="v">{{ kpi.open }}</span><span class="lbl">findings</span>
+    {% if kpi.delta_7d != 0 %}
+      {% set up = kpi.delta_7d > 0 %}
+      <span class="delta {{ 'up' if up else 'down' }}">
+        {{ '↑' if up else '↓' }} {{ kpi.delta_7d|abs }}% 7d
+      </span>
+    {% endif %}
+  </div>
+  <div class="kpi">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      {% if kpi.sev[sev] %}
+        <span class="sev-dot sev-{{ sev }}"
+              title="{{ sev|capitalize }}: {{ kpi.sev[sev] }}"></span>{{ kpi.sev[sev] }}
+      {% endif %}
+    {% endfor %}
+    {% if kpi.open == 0 %}<span class="muted">no open findings</span>{% endif %}
+  </div>
+  <div class="kpi">
+    <span class="v">{{ kpi.targets }}</span><span class="lbl">targets</span>
+  </div>
+  <div class="kpi">
+    <span class="v">{{ kpi.assessments }}</span><span class="lbl">assessments</span>
+  </div>
+  {% if kpi.last_scan %}
+  <div class="kpi" title="Most recent finished assessment">
+    <span class="lbl">Last:</span>
+    <span>{{ kpi.last_scan.strftime('%Y-%m-%d') if kpi.last_scan.strftime else kpi.last_scan }}</span>
+  </div>
+  {% endif %}
+</div>
+
+{# ---- Findings trend (30-day SVG stacked area) -------------------- #}
+{# We render as a stacked area inline so the dashboard has zero JS
+   dependencies. The SVG path is computed in Jinja from the trend
+   data; height is fixed at 200px and the X-axis is the 30-day window. #}
+<section>
+  <div class="card-header">
+    <div>
+      <h2>Findings trend (last 30 days)</h2>
+      <div class="muted small">
+        Stacked by severity. Triaged + info-severity excluded.
+        {% if trend.filter %}
+          Filtered to <code>{{ trend.filter }}</code>.
+        {% endif %}
+      </div>
+    </div>
+    {# True typeahead. Browsers render <datalist> as an open-on-focus
+       drop-down (the full list shows the moment the input is focused),
+       which isn't what we want. Custom popup driven by trend-typeahead.js:
+       suggestions appear only after the user starts typing and only
+       show prefix/substring matches. Hidden by default; populated from
+       trend.filter_targets. #}
+    <form method="get" action="" class="trend-filter typeahead"
+          data-targets='{{ trend.filter_targets | tojson }}'>
+      <input type="search" name="trend"
+             class="typeahead-input"
+             value="{{ trend.filter or '' }}"
+             placeholder="Filter by target or app id…"
+             autocomplete="off"
+             spellcheck="false">
+      <ul class="typeahead-suggest" role="listbox" hidden></ul>
+      <button type="submit" class="ghost typeahead-apply">Apply</button>
+      {% if trend.filter %}
+        <a href="?" class="muted small">clear</a>
+      {% endif %}
+    </form>
+  </div>
+
+  {# All chart geometry (band polygons, max, width, height) is
+     computed in server._dashboard_data and passed in via trend.bands.
+     The template just renders. #}
+  {% if trend.filter and not trend.filter_matched %}
+    <p class="muted small" style="margin: 1.4em 0 .4em">
+      Filter <code>{{ trend.filter }}</code> matched no targets.
+    </p>
+  {% elif trend.max_total == 0 %}
+    <p class="muted small" style="margin: 1.4em 0 .4em">
+      No findings in the last 30 days{% if trend.filter %} for that filter{% endif %}.
+    </p>
+  {% else %}
+  {# Chart layout:
+       Y-axis labels (left)  | SVG bands + crosshair  | Y-axis labels (right)
+                             | X-axis dates (below)   |
+     The Y-axis numbers live in HTML divs flanking the SVG (instead of
+     inside it) because preserveAspectRatio="none" stretches SVG text
+     unevenly and the count labels became unreadable smears. Same goes
+     for the X-axis date labels. The bands themselves still get the
+     "fill the chart width" stretch via the SVG. #}
+  <div class="trend-grid"
+       data-days='{{ trend.days | tojson }}'
+       data-series='{{ trend.series | tojson }}'>
+    <div class="trend-yaxis">
+      {% for v in trend.y_ticks %}<span>{{ v }}</span>{% endfor %}
+    </div>
+
+    <div class="trend-svg-wrap">
+      <svg viewBox="0 0 {{ trend.w }} {{ trend.h }}"
+           preserveAspectRatio="none"
+           class="trend-svg">
+        {# Horizontal grid lines lined up with trend.y_ticks. #}
+        {% for v in trend.y_ticks %}
+          {% set gy = (loop.index0 / (trend.y_ticks|length - 1)) * trend.h %}
+          <line x1="0" x2="{{ trend.w }}" y1="{{ gy }}" y2="{{ gy }}"
+                stroke="rgba(255,255,255,.05)" stroke-width="1"
+                vector-effect="non-scaling-stroke"/>
+        {% endfor %}
+        {% for band in trend.bands %}
+          <polygon
+            fill="var(--sev-{{ band.sev }})"
+            fill-opacity="0.35"
+            stroke="var(--sev-{{ band.sev }})"
+            stroke-width="1.5"
+            stroke-opacity="0.9"
+            vector-effect="non-scaling-stroke"
+            points="{{ band.points }}"/>
+        {% endfor %}
+      </svg>
+      {# Crosshair + tooltip for hover. Both hidden until the cursor
+         enters the SVG; populated by trend-tooltip.js. #}
+      <div class="trend-crosshair" hidden></div>
+      <div class="trend-tooltip" hidden role="tooltip"></div>
+      <div class="trend-xaxis">
+        <span>{{ trend.days[0][5:] }}</span>
+        <span>{{ trend.days[trend.days|length // 2][5:] }}</span>
+        <span>{{ trend.days[-1][5:] }}</span>
+      </div>
+    </div>
+
+    <div class="trend-yaxis trend-yaxis-right">
+      {% for v in trend.y_ticks %}<span>{{ v }}</span>{% endfor %}
+    </div>
+  </div>
+  {# Legend sits ~1/8" (12px) below the X-axis dates so it doesn't
+     visually fuse with the date row. .4em was too tight. #}
+  <div style="display:flex; gap:1em; flex-wrap:wrap; font-size:.82em; margin-top:1.15em">
+    {# Info severity is omitted from the chart on purpose, so it's not
+       in the legend either. The KPI strip and the age matrices still
+       surface info totals separately. #}
+    {% for sev in ['critical','high','medium','low'] %}
+      <span><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{# ---- Two-column row: targets + age matrix ------------------------ #}
+<div class="grid">
+  <section>
+    <div class="card-header">
+      <h2>Target security</h2>
+      <a href="{{ base }}/assessments" class="muted small">View all →</a>
+    </div>
+    {% if targets %}
+      <div style="display:flex; flex-direction:column; gap:.7em">
+      {% for t in targets %}
+        <a href="{{ base }}/assessment/{{ t.id }}"
+           style="display:flex; align-items:center; justify-content:space-between;
+                  padding:.7em .9em; background:var(--panel-2);
+                  border:1px solid var(--border); border-radius:10px;
+                  color:var(--text); text-decoration:none">
+          <div style="min-width:0; flex:1; padding-right:1em">
+            <div style="font-weight:600; color:var(--text)">{{ t.fqdn }}</div>
+            <div class="muted small" style="margin-top:.15em">
+              {% if t.application_id %}<code>{{ t.application_id }}</code> · {% endif %}
+              {{ t.total_findings or 0 }} findings
+              {% if t.finished_at %} · {{ t.finished_at.strftime('%Y-%m-%d') if t.finished_at.strftime else t.finished_at }}{% endif %}
+            </div>
+          </div>
+          <div style="text-align:right">
+            {% if t.risk_score is not none %}
+              {% set sev = 'critical' if t.risk_score >= 80 else ('high' if t.risk_score >= 60 else ('medium' if t.risk_score >= 40 else ('low' if t.risk_score >= 20 else 'info'))) %}
+              <span class="sev sev-{{ sev }}"
+                    style="font-size:1.2em">{{ t.risk_score }}</span>
+              <div class="muted small">/ 100</div>
+            {% else %}
+              <span class="muted">—</span>
+            {% endif %}
+          </div>
+        </a>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">
+        No assessments yet.
+        <a href="{{ base }}/assess">Run your first assessment →</a>
+      </p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="card-header">
+      <h2>Unresolved findings by age</h2>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Age</th>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+          <tr>
+            <td>{{ label }}</td>
+            {% for sev in ['critical','high','medium','low','info'] %}
+              <td>
+                {% if ages[label][sev] %}
+                  <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
+                {% else %}<span class="muted">—</span>{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
+{# Resolved counterpart to the Unresolved-by-age card. Counts findings
+   marked as fixed or accepted_risk, bucketed by the original
+   finding's created_at (the schema doesn't track when an analyst
+   changed status, so age-since-resolution is not available). #}
+<section>
+  <div class="card-header">
+    <h2>Resolved findings by age</h2>
+    <div class="muted small">
+      Fixed + archived (accepted_risk). Bucketed by the original finding's age.
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Age</th>
+        {% for sev in ['critical','high','medium','low','info'] %}
+          <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for label in ['>30 days', '>60 days', '>90 days'] %}
+        <tr>
+          <td>{{ label }}</td>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <td>
+              {% if resolved_ages[label][sev] %}
+                <span class="sev sev-{{ sev }}">{{ resolved_ages[label][sev] }}</span>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{# ---- Recent activity ----------------------------------------------- #}
+<section>
+  <div class="card-header">
+    <h2>Recent assessments</h2>
+    <a href="{{ base }}/assessments" class="muted small">All assessments →</a>
+  </div>
+  {% if recent %}
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Target</th><th>App</th><th>Profile</th>
+      <th>Status</th>
+      <th title="Open findings, post-triage. Excludes false-positive, resolved, archived.">Open</th>
+      <th>Risk</th><th>When</th>
+    </tr></thead>
+    <tbody>
+    {% for a in recent %}
+      <tr>
+        <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
+        <td><code>{{ a.fqdn }}</code></td>
+        <td>
+          {% if a.application_id %}
+            <code>{{ a.application_id }}</code>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td><span class="badge">{{ a.profile }}</span></td>
+        <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
+        <td>{{ a.open_findings if a.open_findings is defined else (a.total_findings or 0) }}</td>
+        <td>
+          {% if a.risk_score is not none %}
+            {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
+            <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if a.finished_at %}
+            {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}
+          {% else %}
+            {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at.strftime else a.created_at }}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">
+    No assessments yet.
+    <a href="{{ base }}/assess">Start your first assessment →</a>
+  </p>
+  {% endif %}
+</section>
+
+{# Custom typeahead + chart hover tooltip. Both are no-frameworks vanilla
+   JS; cache-busted alongside style.css via the same query string. #}
+<script src="{{ base }}/static/dashboard-trend.js?b=20260428a"></script>
+{% endblock %}

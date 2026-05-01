@@ -1,0 +1,164 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Assess a target</h1>
+<p class="muted">Enter an FQDN, optionally with a port (e.g.
+<code>app.example.com:8443</code>). We'll run the per-profile tool set
+against the schemes you select, capture every probe, and hand the results
+to the LLM tier you choose for a consolidated report. For non-standard
+ports, check only the scheme that actually listens on that port.</p>
+
+<section class="card">
+  <form method="post" action="{{ base }}/assess">
+    <label>FQDN
+      <input name="fqdn" required
+             placeholder="example.com  /  app.example.com  /  app.example.com:8443"
+             autofocus>
+    </label>
+    {# Optional application identifier — free-form text. Lets the caller
+       tag this assessment against their internal CMDB / Service Now /
+       app catalog ID so finished assessments can be cross-referenced
+       back to the application of record. Indexed in the DB; surfaced
+       on the assessment detail page and on the API responses. #}
+    <label>Application ID <small class="muted">(optional)</small>
+      <input name="application_id" maxlength="128"
+             placeholder="e.g. APP-1234 or your internal catalog ID">
+    </label>
+    <div style="display:flex; gap:1.5em">
+      <label class="check"><input type="checkbox" name="scan_http" checked> http://</label>
+      <label class="check"><input type="checkbox" name="scan_https" checked> https://</label>
+    </div>
+
+    <label>Profile
+      <select name="profile">
+        <option value="quick">quick — testssl + nuclei (curated tags). ~5 min.</option>
+        <option value="standard" selected>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
+        <option value="thorough">thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
+        <option value="premium">premium — everything thorough does + sqlmap + dalfox + the in-house high-fidelity probe pass (auth bypasses, IDOR, info disclosure, CORS, default creds…). Slowest tier; catches what traditional scanners miss.</option>
+      </select>
+    </label>
+
+    <label>LLM tier
+      <select name="llm_tier">
+        {# Default selection is `none`. Pulling in the LLM is opt-in so a
+           caller never accrues LLM cost (or sends scan output off-box)
+           without explicitly choosing a tier. #}
+        <option value="none" selected>none — scanners only, no LLM</option>
+        <option value="basic">basic — roll-up + executive summary (~$5–10 / scan)</option>
+        <option value="advanced">advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
+      </select>
+    </label>
+
+    <label>LLM endpoint
+      <select name="llm_endpoint_id">
+        <option value="">— default —</option>
+        {% for e in endpoints %}
+          <option value="{{ e.id }}">{{ e.name }} ({{ e.model }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>User-Agent
+      <select name="user_agent_id">
+        <option value="">— default —</option>
+        {% for u in user_agents %}
+          <option value="{{ u.id }}" {% if u.is_default %}selected{% endif %}>{{ u.label }}</option>
+        {% endfor %}
+      </select>
+      <small class="muted">Sent by every HTTP scanner. Manage on <a href="{{ base }}/user-agents">/user-agents</a>.</small>
+    </label>
+
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:.8em 1em">
+      <legend style="padding:0 .4em; color: var(--muted)">Credentialed scan (optional)</legend>
+      <p class="muted" style="margin-top:0">Leave blank for an unauthenticated scan. SSO / Okta FastPass / DUO targets:
+      use <a href="{{ base }}/auth">capture-then-replay</a> instead — paste-in form creds can't drive MFA.</p>
+      <label>Username <input name="creds_username"></label>
+      <label>Password <input name="creds_password" type="password"></label>
+      <label>Login URL (form POST target)
+        <input name="login_url" placeholder="https://app.example.com/login">
+      </label>
+    </fieldset>
+
+    {# Auto-dedupe toggle. When checked, the orchestrator's finalize step
+       deletes every other completed assessment for the same FQDN once
+       this scan finishes — so only the most recent run survives. In-flight
+       scans are never touched. #}
+    <label class="check" style="margin-top:.6em">
+      <input type="checkbox" name="keep_only_latest">
+      Keep only latest
+      <small class="muted">
+        — when this scan finishes, automatically delete prior completed
+        assessments for the same FQDN. In-flight scans are never touched.
+      </small>
+    </label>
+
+    {# Schedule fieldset. Hidden by default; revealed when the operator
+       picks "Run on a schedule" below. The same /assess endpoint handles
+       both branches based on schedule_mode; nothing else changes. #}
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:.8em 1em; margin-top:.8em">
+      <legend style="padding:0 .4em; color: var(--muted)">When to run</legend>
+      <div style="display:flex; gap:1.5em; align-items:center">
+        <label class="check"><input type="radio" name="schedule_mode" value="now" checked
+                                    onchange="document.getElementById('sched-fields').style.display='none'"> Run now</label>
+        <label class="check"><input type="radio" name="schedule_mode" value="schedule"
+                                    onchange="document.getElementById('sched-fields').style.display=''"> Run on a schedule</label>
+      </div>
+      <div id="sched-fields" style="display:none; margin-top:.6em">
+        <label>Schedule name <small class="muted">(shown on /schedules)</small>
+          <input name="schedule_name" placeholder="nightly app.example.com">
+        </label>
+        <label>Cron expression <small class="muted">(5-field, UTC)</small>
+          <input name="cron_expr" placeholder="0 2 * * *  (every day at 02:00 UTC)">
+        </label>
+        <div style="display:flex; gap:1em; flex-wrap:wrap">
+          <label>Start after <small class="muted">(optional, UTC)</small>
+            <input name="start_after" type="datetime-local">
+          </label>
+          <label>End before <small class="muted">(optional, UTC)</small>
+            <input name="end_before" type="datetime-local">
+          </label>
+        </div>
+        <label class="check">
+          <input type="checkbox" name="skip_if_running" checked>
+          Skip if a same-FQDN scan is still running
+          <small class="muted">— prevents stacking when a scan outruns its cadence.</small>
+        </label>
+        <p class="muted" style="margin:.4em 0 0">
+          See <a href="https://crontab.guru/" target="_blank" rel="noopener">crontab.guru</a>
+          for cron syntax. Manage existing schedules at
+          <a href="{{ base }}/schedules">/schedules</a>.
+        </p>
+      </div>
+    </fieldset>
+
+    <button type="submit">Start assessment</button>
+  </form>
+</section>
+
+<section>
+  <h2>Recent assessments</h2>
+  {% if recent %}
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Target</th><th>Profile</th><th>Status</th>
+      <th>Findings</th><th>Started</th>
+    </tr></thead>
+    <tbody>
+    {% for r in recent %}
+      <tr>
+        <td><a href="{{ base }}/assessment/{{ r.id }}">#{{ r.id }}</a></td>
+        <td><code>{{ r.fqdn }}</code></td>
+        <td><span class="badge">{{ r.profile }}</span></td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.total_findings or 0 }}</td>
+        <td>{{ r.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No assessments yet.</p>{% endif %}
+</section>
+{% endblock %}

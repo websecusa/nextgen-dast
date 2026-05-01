@@ -1,0 +1,113 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Users</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+<section>
+  <table>
+    <thead><tr>
+      <th>Username</th><th>Role</th><th>Status</th>
+      <th>Last login</th><th>Created</th><th>Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td><code>{{ u.username }}</code>{% if u.id == user.id %} <span class="muted">(you)</span>{% endif %}</td>
+        <td>
+          <form method="post" action="{{ base }}/admin/users/{{ u.id }}/role" style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="role" onchange="this.form.submit()" {% if u.id == user.id %}disabled{% endif %}>
+              <option value="readonly" {% if u.role == 'readonly' %}selected{% endif %}>readonly</option>
+              <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>admin</option>
+            </select>
+          </form>
+        </td>
+        <td>
+          {% if u.disabled %}<span class="badge red">disabled</span>{% else %}<span class="badge finished">enabled</span>{% endif %}
+          {% if u.id != user.id %}
+            <form method="post" action="{{ base }}/admin/users/{{ u.id }}/disabled" style="display:inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="disabled" value="{% if u.disabled %}{% else %}1{% endif %}">
+              <button type="submit">{% if u.disabled %}Enable{% else %}Disable{% endif %}</button>
+            </form>
+          {% endif %}
+        </td>
+        <td>{{ u.last_login or "—" }}</td>
+        <td>{{ u.created_at }}</td>
+        <td style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
+          {# Inline password reset. Blank-generates-random was removed
+             in 2.1.1 so a stray click can no longer rotate a credential
+             without the admin typing the new value. Use scripts/reset.py
+             on the host if you want a generated password that also
+             rewrites the on-disk secrets file. #}
+          <form method="post" action="{{ base }}/admin/users/{{ u.id }}/password"
+                style="display:flex; gap:.3em"
+                onsubmit="return confirm('Set new password for {{ u.username }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input name="password" type="text" placeholder="New password (≥ 8 chars)"
+                   minlength="8" required autocomplete="new-password" size="22">
+            <button type="submit">Set</button>
+          </form>
+          {% if u.id != user.id %}
+          <form method="post" action="{{ base }}/admin/users/{{ u.id }}/delete"
+                onsubmit="return confirm('Delete user {{ u.username }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="warn">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Create user</h2>
+  <form method="post" action="{{ base }}/admin/users">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username (2–64 chars, letters/digits/_.-)
+      <input name="username" required pattern="[A-Za-z0-9_.\-]{2,64}">
+    </label>
+    <label>Role
+      <select name="role">
+        <option value="readonly" selected>readonly — can view, can't run scans</option>
+        <option value="admin">admin — full read/write</option>
+      </select>
+    </label>
+    <label>Password (leave blank to auto-generate)
+      <input name="password" type="text" autocomplete="off">
+      <small class="muted">If blank, a random 16-char password is generated and shown above after submit. (Only the create flow accepts blank — existing-user resets must be typed.)</small>
+    </label>
+    <button type="submit">Create</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Change my password</h2>
+  <form method="post" action="{{ base }}/me/password">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Current password
+      <input name="current_password" type="password" required>
+    </label>
+    <label>New password (≥ 8 chars)
+      <input name="new_password" type="password" minlength="8" required>
+    </label>
+    <button type="submit">Update password</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Auth audit log</h2>
+  <p class="muted">Recent login attempts, password changes, and account
+  state mutations are appended to
+  <code>/data/logs/auth_events.jsonl</code> on the host (one JSON object
+  per line). Tail it with
+  <code>docker compose --env-file .env_&lt;suffix&gt; exec nextgen-dast
+  tail -F /data/logs/auth_events.jsonl</code>.</p>
+</section>
+{% endblock %}

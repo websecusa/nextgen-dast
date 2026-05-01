@@ -1,0 +1,219 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  AT A GLANCE side panel for the workspace's right column. Renders
+  status / metadata at the top and a button stack ("Challenge",
+  "Mark false positive", "Resolve", "Archive", "Reopen") that wraps
+  the existing per-finding routes.
+
+  Fragment-rendered: included by assessment_detail.html for the
+  initially-selected row, and re-rendered standalone by
+  GET /finding/<id>/aside when the operator clicks a different row.
+#}
+{% if not f %}
+  <div class="empty">No finding selected.</div>
+{% else %}
+<div class="aside-section">At a glance</div>
+<div class="aside-row">
+  <span class="lbl">Severity</span>
+  <span class="val sev sev-{{ f.severity }}">{{ f.severity|upper }}</span>
+</div>
+<div class="aside-row">
+  <span class="lbl">Status</span>
+  <span class="val">
+    {% if f.status == 'false_positive' %}
+      <span class="badge warn">false positive</span>
+    {% elif f.status == 'fixed' %}
+      <span class="badge done">resolved</span>
+    {% elif f.status == 'accepted_risk' %}
+      <span class="badge">archived</span>
+    {% else %}
+      <span class="badge">{{ f.status }}</span>
+    {% endif %}
+  </span>
+</div>
+<div class="aside-row">
+  <span class="lbl">Validation</span>
+  <span class="val">
+    {% if f.validation_status == 'validated' %}
+      <span class="badge done">✓ validated</span>
+    {% elif f.validation_status == 'false_positive' %}
+      <span class="badge warn">refuted</span>
+    {% else %}
+      <span class="badge">{{ f.validation_status or 'unvalidated' }}</span>
+    {% endif %}
+  </span>
+</div>
+{% if f.owasp_category %}
+<div class="aside-row">
+  <span class="lbl">OWASP</span>
+  <span class="val">{{ f.owasp_category }}</span>
+</div>
+{% endif %}
+{% if f.cwe %}
+<div class="aside-row">
+  <span class="lbl">CWE</span>
+  <span class="val">CWE-{{ f.cwe }}</span>
+</div>
+{% endif %}
+{% if f.cvss %}
+<div class="aside-row">
+  <span class="lbl">CVSS</span>
+  <span class="val">{{ f.cvss }}</span>
+</div>
+{% endif %}
+<div class="aside-row">
+  <span class="lbl">Source tool</span>
+  <span class="val">{{ f.source_tool }}</span>
+</div>
+{% if f.created_at %}
+<div class="aside-row">
+  <span class="lbl">First seen</span>
+  <span class="val">{{ f.created_at.strftime('%Y-%m-%d %H:%M') if f.created_at.strftime else f.created_at }}</span>
+</div>
+{% endif %}
+{% if f.validation_run_at %}
+<div class="aside-row">
+  <span class="lbl">Last validated</span>
+  <span class="val">{{ f.validation_run_at.strftime('%Y-%m-%d %H:%M') if f.validation_run_at.strftime else f.validation_run_at }}</span>
+</div>
+{% endif %}
+{% if f.seen_count and f.seen_count > 1 %}
+<div class="aside-row">
+  <span class="lbl">Seen count</span>
+  <span class="val">×{{ f.seen_count }}</span>
+</div>
+{% endif %}
+
+<div class="aside-section">Actions</div>
+{# All write actions require admin. Forms render but the button is
+   disabled for read-only viewers; the global middleware would reject
+   the POST anyway -- this just removes the affordance. #}
+{# Font Awesome "scale-balanced" (solid) — twin-pan balance scale,
+   evoking the act of weighing or challenging a claim. Inline SVG using
+   fill=currentColor so it inherits the button's text color, same
+   pattern as the other action-btn icons (Archive folder, Export
+   share-02). Source: https://fontawesome.com/icons/scale-balanced #}
+{% set scale_balanced_svg %}
+<svg class="icon" viewBox="0 0 640 512" fill="currentColor"
+     aria-hidden="true">
+  <path d="M384 32l128 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L398.4 96c-5.2 25.8-22.9 47.1-46.4 57.3L352 448l160 0c17.7 0 32 14.3 32 32s-14.3 32-32 32l-192 0-192 0c-17.7 0-32-14.3-32-32s14.3-32 32-32l160 0 0-294.7c-23.5-10.3-41.2-31.6-46.4-57.3L128 96c-17.7 0-32-14.3-32-32s14.3-32 32-32l128 0c14.6-19.4 37.8-32 64-32s49.4 12.6 64 32zm55.6 288l144.9 0L512 195.8 439.6 320zM512 416c-62.9 0-115.2-34-126-78.9c-2.6-11 1-22.3 6.7-32.1l95.2-163.2c5-8.6 14.2-13.8 24.1-13.8s19.1 5.3 24.1 13.8l95.2 163.2c5.7 9.8 9.3 21.1 6.7 32.1C627.2 382 574.9 416 512 416zM126.8 195.8L54.4 320l144.9 0L126.8 195.8zM.9 337.1c-2.6-11 1-22.3 6.7-32.1l95.2-163.2c5-8.6 14.2-13.8 24.1-13.8s19.1 5.3 24.1 13.8l95.2 163.2c5.7 9.8 9.3 21.1 6.7 32.1C242 382 189.7 416 126.8 416S11.7 382 .9 337.1z"/>
+</svg>
+{% endset %}
+{# 'Challenge' uses the same .action-btn styling as the other buttons
+   so the text color, weight, and border match — earlier versions
+   added a `.primary` modifier which gave it a light-accent background
+   with near-black text and stood out inconsistently from the rest of
+   the action stack.
+
+   Submit is intercepted by runChallengeAside() (defined in
+   assessment_detail.html). It POSTs to /challenge_inline (JSON sibling
+   of /challenge), then re-fetches /finding/<id>/aside so this fragment
+   re-renders with the updated validation_status. There is no confirm
+   dialog and the page does not navigate — analysts asked for a single-
+   click flow with the verdict shown next to the button.
+
+   The result badge below reads off f.validation_status. It only
+   appears once a probe has actually run (validation_run_at is set);
+   on first load before any challenge it stays hidden so the button is
+   visually clean. #}
+{% if probe %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
+      onsubmit="return runChallengeAside(event, {{ f.id }})">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled title="Read-only account"{% endif %}>
+    {{ scale_balanced_svg }}
+    Challenge
+    {% if f.validation_run_at %}
+      {% if f.validation_status == 'validated' %}
+        <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
+      {% elif f.validation_status == 'false_positive' %}
+        <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
+      {% elif f.validation_status == 'errored' %}
+        <span class="badge error" style="margin-left:auto">⚠ Errored</span>
+      {% elif f.validation_status == 'inconclusive' %}
+        <span class="badge" style="margin-left:auto">— Inconclusive</span>
+      {% endif %}
+    {% endif %}
+  </button>
+</form>
+{% else %}
+<button class="action-btn" disabled
+        title="No toolkit probe is mapped to this finding's signature.">
+  {{ scale_balanced_svg }}
+  Challenge
+</button>
+{% endif %}
+
+{% if f.status == 'false_positive' %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/reopen">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>↻ Re-open</button>
+</form>
+{% else %}
+<form method="post" action="{{ base }}/finding/{{ f.id }}/false_positive">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>✗ Mark false positive</button>
+</form>
+
+<form method="post" action="{{ base }}/finding/{{ f.id }}/status"
+      style="display:contents">
+  <input type="hidden" name="status" value="fixed">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>✓ Resolve (mark fixed)</button>
+</form>
+
+<form method="post" action="{{ base }}/finding/{{ f.id }}/status"
+      style="display:contents">
+  <input type="hidden" name="status" value="accepted_risk">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled{% endif %}>
+    {# Untitled UI "folder" — tabbed-folder outline. Uses the
+       universal .icon size + currentColor so it picks up the button's
+       text color and matches the other action icons. #}
+    <svg class="icon" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true">
+      <path d="M22 19V9.4c0-1.12 0-1.68-.218-2.108a2 2 0 0 0-.874-.874C20.48 6.2 19.92 6.2 18.8 6.2h-5.4l-.572-1.144c-.317-.633-.476-.95-.713-1.182a2 2 0 0 0-.717-.443C10.99 3.32 10.636 3.32 9.927 3.32H5.2c-1.12 0-1.68 0-2.108.218a2 2 0 0 0-.874.874C2 4.84 2 5.4 2 6.52V19c0 1.12 0 1.68.218 2.108a2 2 0 0 0 .874.874C3.52 22.2 4.08 22.2 5.2 22.2h13.6c1.12 0 1.68 0 2.108-.218a2 2 0 0 0 .874-.874C22 20.68 22 20.12 22 19Z"/>
+    </svg>
+    Archive (accepted risk)
+  </button>
+</form>
+{% endif %}
+
+<a href="{{ base }}/finding/{{ f.id }}/export?format=jira" target="_blank"
+   class="action-btn" style="text-decoration:none">
+  {# Untitled UI "share-02" — open container with an upward-pointing
+     arrow rising out of it. Matches the icon set the rest of the
+     buttons reference. #}
+  <svg class="icon" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round"
+       aria-hidden="true">
+    <path d="M21 12v6.2c0 1.12 0 1.68-.218 2.108a2 2 0 0 1-.874.874C19.48 21.4 18.92 21.4 17.8 21.4H6.2c-1.12 0-1.68 0-2.108-.218a2 2 0 0 1-.874-.874C3 19.88 3 19.32 3 18.2V12"/>
+    <path d="M16 6l-4-4-4 4"/>
+    <path d="M12 2v13"/>
+  </svg>
+  Export as Jira / MD
+</a>
+
+<div class="aside-section">Found in</div>
+<div class="aside-row">
+  <span class="lbl">Assessment</span>
+  <span class="val"><a href="{{ base }}/assessment/{{ f.assessment_id }}">#{{ f.assessment_id }}</a></span>
+</div>
+{% if f.source_scan_id %}
+<div class="aside-row">
+  <span class="lbl">Scan ID</span>
+  <span class="val"><code style="font-size:.78em">{{ f.source_scan_id }}</code></span>
+</div>
+{% endif %}
+{% if f.evidence_url %}
+<div class="aside-row">
+  <span class="lbl">URL</span>
+  <span class="val"><code style="font-size:.78em">{{ f.evidence_url|truncate(60) }}</code></span>
+</div>
+{% endif %}
+{% endif %}

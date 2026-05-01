@@ -1,0 +1,793 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<p><a href="{{ base }}/assessment/{{ f.assessment_id }}">← Assessment #{{ f.assessment_id }}</a></p>
+{# Severity is rendered above the title, larger and color-coded so it
+   reads first. Color comes from the per-severity CSS variables already
+   defined in the dark theme; size override is inline because <h1>
+   defaults override the .sev font-size set in style.css. #}
+<div class="sev sev-{{ f.severity }}"
+     style="font-size:1.6em; line-height:1; margin-bottom:.15em;
+            letter-spacing:.06em">{{ f.severity }}</div>
+<h1 style="font-size:1.15em; font-weight:700; margin-top:0">{{ f.title }}</h1>
+<p class="muted">
+  {{ f.source_tool }}
+  {% if f.owasp_category %}· <strong>{{ f.owasp_category }}</strong>{% endif %}
+  {% if f.cwe %}· CWE-{{ f.cwe }}{% endif %}
+  {% if f.cvss %}· CVSS {{ f.cvss }}{% endif %}
+  {% if e and e.suggested_priority %}
+    · <span class="badge">Priority {{ e.suggested_priority|upper }}</span>
+  {% endif %}
+  {% if e and e.source %}
+    · <span class="badge"
+            title="static = catalog · llm = generated · manual = admin-edited">
+        {{ e.source }}{% if e.is_locked %} · locked{% endif %}
+      </span>
+  {% endif %}
+</p>
+
+{% if f.evidence_url %}
+<section class="card">
+  <h2>Evidence</h2>
+  <p><code>{{ f.evidence_method or "GET" }} {{ f.evidence_url }}</code></p>
+  {% include '_finding_reproduce.html' %}
+</section>
+{% endif %}
+
+{# ----------------------------------------------------------------------
+   Validation workflow card. Always renders so the analyst can see the
+   current state and act on it. The Challenge button only renders when a
+   toolkit probe is mapped to this finding's signature.
+   ---------------------------------------------------------------------- #}
+<section class="card">
+  <h2>Validation</h2>
+  <p class="muted" style="margin-top:0">
+    {% set vs = f.validation_status or 'unvalidated' %}
+    Current status:
+    <span class="badge"
+      title="{% if vs == 'validated' %}Confirmed by a high-fidelity probe.
+{% elif vs == 'false_positive' %}Suppressed — analyst override or refuted by a probe.
+{% elif vs == 'inconclusive' %}A probe ran but couldn't decide either way.
+{% elif vs == 'errored' %}The validation probe failed to run.
+{% else %}No validation has been attempted yet.{% endif %}">{{ vs }}</span>
+    {% if f.validation_probe %}
+      via <code>{{ f.validation_probe }}</code>
+    {% endif %}
+    {% if f.validation_run_at %}
+      &middot; last run {{ f.validation_run_at }}
+    {% endif %}
+    {% if f.status == 'false_positive' %}
+      &middot; <span class="badge warn">excluded from score / report</span>
+    {% endif %}
+  </p>
+
+  {# Stack the action forms (Challenge + Reopen / False positive) on their
+     own rows so each one renders flush left. The earlier shared-flex-row
+     parent left the Challenge form competing for cross-axis alignment
+     with the global `form { flex-direction: column; align-items: ... }`
+     rule, which centred the button instead of leaving it left-aligned. #}
+  <div style="display:flex; flex-direction:column; gap:.7em; margin-top:.6em;
+              align-items:flex-start">
+    {# Challenge form — only when a toolkit probe is matched. The
+       inline `flex-direction: row` here is load-bearing: the global
+       stylesheet sets `form { flex-direction: column }`, and an
+       inline display:flex without an explicit direction inherits
+       that column layout, which combined with align-items:center
+       reads as a centered button instead of a flush-left one. #}
+    {% if probe %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
+            style="display:flex; flex-direction:row; gap:.5em;
+                   align-items:center; flex-wrap:wrap;
+                   justify-content:flex-start; width:100%">
+        <button type="submit" {% if not is_admin %}disabled{% endif %}>
+          Challenge with <code>{{ probe.name }}</code>
+        </button>
+        <span class="muted small">
+          Probe budget: ~{{ probe.request_budget_typical or '?' }} requests,
+          max {{ probe.request_budget_max or '?' }}.
+          {% if probe.safety_class == 'read-only' %}
+            Read-only (GET / HEAD / OPTIONS only).
+          {% elif probe.safety_class == 'destructive' %}
+            <strong>Destructive</strong> — issues writes; use only against test environments.
+          {% else %}
+            Sends a small number of POST requests with non-mutating
+            payloads (e.g. login attempts) — no data changes server-side.
+          {% endif %}
+        </span>
+        <details style="width:100%; margin-top:.4em">
+          <summary class="muted" style="cursor:pointer">Authentication for the probe (optional override)</summary>
+          <p class="muted small" style="margin:.3em 0">
+            By default the probe re-runs the assessment's stored login
+            credentials in-memory and uses the resulting session cookie to
+            establish an authenticated baseline (the cookie value is
+            redacted in the saved evidence — only the cookie *names* are
+            recorded). Paste a cookie below to override that, e.g. when
+            login is MFA-protected and you've captured a session manually.
+          </p>
+          <input type="text" name="cookie" maxlength="2000"
+                 placeholder="optional: PHPSESSID=abc; XSRF-TOKEN=…"
+                 style="width:100%; font-family:ui-monospace,Menlo,monospace">
+        </details>
+      </form>
+    {% else %}
+      <button type="button" disabled
+              title="No toolkit probe is mapped to this finding's signature.
+Add one in /app/toolkit/probes/ and update its manifest's matches_titles
+or matches_tools array.">
+        Challenge (no probe available)
+      </button>
+    {% endif %}
+
+    {# False-positive / Reopen — analyst override, always available. #}
+    {% if f.status == 'false_positive' %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/reopen"
+            style="display:inline"
+            onsubmit="return confirm('Re-open this finding? It will start counting toward the score again.')">
+        <button type="submit" {% if not is_admin %}disabled{% endif %}>
+          Re-open finding
+        </button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ base }}/finding/{{ f.id }}/false_positive"
+            style="display:inline; align-items:center; gap:.4em"
+            onsubmit="return confirm('Mark this finding as a false positive? It will be excluded from scores and reports until you re-open it.')">
+        <input type="text" name="reason" maxlength="200"
+               placeholder="optional reason (kept in audit log)"
+               style="width:18em; padding:.2em .4em">
+        <button type="submit" class="warn"
+                {% if not is_admin %}disabled{% endif %}>
+          Mark as false positive
+        </button>
+      </form>
+    {% endif %}
+  </div>
+
+  {% if not is_admin %}
+    <p class="muted small" style="margin-top:.4em">
+      Read-only account — ask an admin to challenge or override.
+    </p>
+  {% endif %}
+
+  {# Evidence: human-readable summary if the probe wrote one, plus the
+     full JSON for debugging / audit. #}
+  {% if validation %}
+    {% if validation.summary %}
+      <p style="margin-top:1em"><strong>Last run summary:</strong>
+        {{ validation.summary }}</p>
+    {% endif %}
+    {% if validation.kind == 'analyst-override' %}
+      <p style="margin-top:1em">
+        <strong>Analyst override</strong>
+        {% if validation.user %}by <code>{{ validation.user }}</code>{% endif %}
+        {% if validation.set_at %}at {{ validation.set_at }}{% endif %}
+        {% if validation.reason %}<br>Reason: <em>{{ validation.reason }}</em>{% endif %}
+      </p>
+    {% endif %}
+    <details style="margin-top:.6em">
+      <summary class="muted" style="cursor:pointer">Full validation evidence</summary>
+      <pre style="white-space:pre-wrap; background:#0f1419; padding:.8em; border-radius:6px; max-height:400px; overflow:auto">{{ validation | tojson(indent=2) }}</pre>
+    </details>
+  {% endif %}
+</section>
+
+{% if e %}
+  {% if e.description_long %}
+  <section class="card">
+    <h2>What this means</h2>
+    <p style="white-space:pre-wrap">{{ e.description_long }}</p>
+  </section>
+  {% endif %}
+
+  {% if e.impact %}
+  <section class="card">
+    <h2>Impact</h2>
+    <p style="white-space:pre-wrap">{{ e.impact }}</p>
+  </section>
+  {% endif %}
+
+  {% if e.remediation_long or e.steps %}
+  <section class="card">
+    <h2>Remediation</h2>
+    {% if e.remediation_long %}
+      <p style="white-space:pre-wrap">{{ e.remediation_long }}</p>
+    {% endif %}
+    {% if e.steps %}
+      <ol>
+      {% for step in e.steps %}
+        <li>{{ step }}</li>
+      {% endfor %}
+      </ol>
+    {% endif %}
+    {% if e.code_example %}
+      <h3 class="muted">Example</h3>
+      <pre style="background:#0f1419; padding:.8em; border-radius:6px; overflow:auto"><code>{{ e.code_example }}</code></pre>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if e.references %}
+  <section class="card">
+    <h2>References</h2>
+    <ul>
+    {% for r in e.references %}
+      <li><a href="{{ r }}" target="_blank" rel="noopener">{{ r }}</a></li>
+    {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if e.user_story %}
+  <section class="card">
+    <h2>User story</h2>
+    <blockquote style="border-left:3px solid var(--accent); padding-left:1em; margin:0">
+      {{ e.user_story }}
+    </blockquote>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>Open as a ticket</h2>
+    <p class="muted">
+      The body below is generated from the fields above. Click a button to copy
+      it to your clipboard, then paste into your tracker.
+    </p>
+    <p>
+      <button type="button" onclick="copyExport('jira')">Copy Jira / Markdown</button>
+      <button type="button" onclick="copyExport('servicenow')">Copy ServiceNow (plain)</button>
+      <a href="{{ base }}/finding/{{ f.id }}/export?format=csv"
+         class="button">Download CSV row</a>
+      <span id="copy-status" class="muted" style="margin-left:.6em"></span>
+    </p>
+    <details>
+      <summary class="muted" style="cursor:pointer">Preview body</summary>
+      <pre style="white-space:pre-wrap; background:#0f1419; padding:.8em; border-radius:6px">{{ e.bug_report_md }}</pre>
+    </details>
+  </section>
+
+  {% if is_admin %}
+  {# The edit-guidance form is heavy and rarely needed mid-triage, so
+     it's collapsed behind a <details> click-to-reveal. Admins still
+     get to it in one click; everyone else (and admins who are just
+     reading the finding) doesn't have to scroll past the form. #}
+  <section class="card">
+    <details>
+      <summary style="cursor:pointer; list-style:none">
+        <span style="display:inline-flex; align-items:center; gap:.4em">
+          <strong>Edit guidance</strong>
+          <small class="muted">(admin — click to expand)</small>
+        </span>
+      </summary>
+    <p class="muted" style="margin-top:.8em">
+      Edits apply to the <em>type</em> of finding (signature
+      <code>{{ f.source_tool }}</code> / <code>{{ f.title|truncate(80) }}</code>),
+      so every other matching finding will pick up the same content.
+      Saving locks the entry: future automatic enrichment will not overwrite it.
+    </p>
+    <form method="post" action="{{ base }}/admin/finding/{{ f.id }}/enrichment">
+      <p>
+        <label>OWASP category<br>
+          <input type="text" name="owasp_category"
+                 value="{{ e.owasp_category or '' }}" style="width:100%">
+        </label>
+      </p>
+      <p>
+        <label>CWE (just the number)<br>
+          <input type="text" name="cwe" value="{{ e.cwe or '' }}" style="width:100%">
+        </label>
+      </p>
+      <p>
+        <label>Suggested priority<br>
+          <select name="suggested_priority">
+            {% for p in ['', 'p0', 'p1', 'p2', 'p3', 'p4'] %}
+              <option value="{{ p }}" {% if e.suggested_priority == p %}selected{% endif %}>{{ p or '—' }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </p>
+      <p>
+        <label>Description<br>
+          <textarea name="description_long" rows="4" style="width:100%">{{ e.description_long or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Impact<br>
+          <textarea name="impact" rows="3" style="width:100%">{{ e.impact or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Remediation overview<br>
+          <textarea name="remediation_long" rows="3" style="width:100%">{{ e.remediation_long or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Steps (one per line)<br>
+          <textarea name="remediation_steps" rows="6" style="width:100%">{{ e.steps|join('\n') }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Code/config example<br>
+          <textarea name="code_example" rows="6" style="width:100%; font-family:ui-monospace,Menlo,monospace">{{ e.code_example or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>References (one URL per line)<br>
+          <textarea name="references" rows="4" style="width:100%">{{ e.references|join('\n') }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>User story<br>
+          <textarea name="user_story" rows="2" style="width:100%">{{ e.user_story or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Internal notes (not exported)<br>
+          <textarea name="notes" rows="2" style="width:100%">{{ e.notes or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <button type="submit">Save manual override</button>
+        {% if e.is_locked %}
+        &nbsp;·&nbsp;
+        <button type="submit" formaction="{{ base }}/admin/finding/{{ f.id }}/enrichment/unlock"
+                onclick="return confirm('Unlock will let future automatic enrichment overwrite this content. Continue?')"
+                class="warn">Unlock for re-enrichment</button>
+        {% endif %}
+      </p>
+    </form>
+    </details>
+  </section>
+  {% endif %}
+
+{% else %}
+  <section class="card">
+    <h2>No enrichment yet</h2>
+    <p class="muted">
+      This finding has not been enriched. Run the assessment again with an
+      LLM endpoint configured, or add a manual entry below.
+    </p>
+    {% if is_admin %}
+    <form method="post" action="{{ base }}/admin/finding/{{ f.id }}/enrichment">
+      <p>
+        <label>Description<br>
+          <textarea name="description_long" rows="4" style="width:100%"></textarea>
+        </label>
+      </p>
+      <p>
+        <label>Remediation steps (one per line)<br>
+          <textarea name="remediation_steps" rows="6" style="width:100%"></textarea>
+        </label>
+      </p>
+      <button type="submit">Create manual entry</button>
+    </form>
+    {% endif %}
+  </section>
+{% endif %}
+
+<script>
+async function copyExport(fmt) {
+  const status = document.getElementById('copy-status');
+  status.textContent = 'fetching…';
+  try {
+    const r = await fetch('{{ base }}/finding/{{ f.id }}/export?format=' + fmt);
+    const text = await r.text();
+    await navigator.clipboard.writeText(text);
+    status.textContent = 'copied ' + fmt + ' body to clipboard';
+  } catch (e) {
+    status.textContent = 'failed: ' + e;
+  }
+}
+
+// Reproduce-&-verify modal helpers. Same logic as in assessment_detail.html;
+// duplicated here because the standalone /finding/<id> page is reached
+// directly (via "Open full detail →") and does not inherit the workspace
+// scripts. The dialog and <template> carriers come from _finding_reproduce.html.
+const BASE = "{{ base }}";
+
+function openIO(kind) {
+  const modal = document.getElementById('io-modal');
+  const tpl   = document.getElementById('io-data-' + kind);
+  if (!modal || !tpl) return;
+  document.getElementById('io-modal-title').textContent =
+    kind === 'request' ? 'Scan request' : 'Scan response';
+  const body = document.getElementById('io-modal-body');
+  body.textContent = tpl.content.textContent;
+  body.hidden = false;
+  document.getElementById('io-validate-body').hidden = true;
+  document.getElementById('io-copy-btn').hidden = false;
+  if (typeof modal.showModal === 'function') modal.showModal();
+  else modal.setAttribute('open', '');
+}
+
+function copyIO() {
+  const t = document.getElementById('io-modal-body').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+}
+
+async function runChallenge(fid, probeName, safetyClass,
+                            budgetTypical, budgetMax) {
+  // Mirror of the workspace runChallenge — see assessment_detail.html
+  // for the rationale. Lives here too because the standalone /finding/
+  // <id> page reaches its own scripts (no parent workspace context).
+  const budget = budgetTypical
+    ? ('~' + budgetTypical + ' requests' +
+       (budgetMax ? ', max ' + budgetMax : ''))
+    : 'a few requests';
+  const msg = "Run probe " + probeName +
+              " (" + safetyClass + " class) against this finding?\n\n" +
+              "Budget: " + budget + ".\n" +
+              (safetyClass === "probe"
+                ? "The probe will send POST requests with non-mutating "
+                + "payloads (e.g. login attempts). No data changes "
+                + "server-side."
+                : "");
+  if (!confirm(msg)) return;
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = "Challenging finding #" + fid + " with " + probeName + "…";
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/challenge_inline', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = "Challenge result · finding #" + fid;
+    validateEl.innerHTML = renderValidateBody(data);
+  } catch (err) {
+    validateEl.innerHTML =
+      '<p class="warn">Challenge request failed: ' +
+      escapeHTML(String(err)) + '</p>';
+  }
+}
+
+async function runValidate(fid) {
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = 'Validating finding #' + fid + '…';
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/validate', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = 'Validation result · finding #' + fid;
+    validateEl.innerHTML = renderValidateBody(data);
+  } catch (err) {
+    validateEl.innerHTML = '<p class="warn">Validation request failed: ' +
+                            escapeHTML(String(err)) + '</p>';
+  }
+}
+
+function renderValidateBody(d) {
+  if (!d) return '<p class="warn">empty response</p>';
+  if (d.error === 'no_probe' || d.error === 'not_safe' ||
+      d.error === 'no_url') {
+    return '<p class="warn"><strong>Cannot validate:</strong> ' +
+           escapeHTML(d.message || d.error) + '</p>';
+  }
+  let badge, badgeColor;
+  if (d.validated === true)        { badge = '✓ Confirmed';      badgeColor = 'var(--sev-high, #c0392b)'; }
+  else if (d.validated === false)  { badge = '✗ Not reproduced'; badgeColor = 'var(--sev-info, #5d8aa8)'; }
+  else if (!d.ok || d.error)       { badge = '⚠ Errored';        badgeColor = 'var(--sev-medium, #e67e22)'; }
+  else                              { badge = '— Inconclusive';   badgeColor = 'var(--muted, #888)'; }
+  const conf = (d.confidence != null)
+    ? ' · confidence ' + (Math.round((d.confidence || 0) * 100)) + '%'
+    : '';
+  let html = '';
+  html += '<p style="margin:0 0 .6em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em;';
+  html +=   ' border-radius:4px; background:' + badgeColor + ';';
+  html +=   ' color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+  html +=   ' <span class="muted small">via probe ' +
+               '<code>' + escapeHTML(d.probe || '?') + '</code>' + conf + '</span>';
+  html += '</p>';
+  if (d.summary) html += '<p style="white-space:pre-wrap">' + escapeHTML(d.summary) + '</p>';
+  if (d.error) html += '<p class="warn"><strong>Probe error:</strong> ' + escapeHTML(d.error) + '</p>';
+  const hits = (d.evidence && d.evidence.hits) || [];
+  if (hits.length) {
+    html += '<h4 style="margin:.8em 0 .3em">What was matched</h4>';
+    html += '<ul style="margin:.2em 0 .6em 1.1em; padding:0">';
+    for (const h of hits) {
+      html += '<li><strong>' + escapeHTML(h.label || 'match') + '</strong>';
+      if (h.severity) html += ' <span class="badge">' + escapeHTML(h.severity) + '</span>';
+      if (h.where) html += ' <span class="muted small">in ' + escapeHTML(h.where) + '</span>';
+      if (h.match) html += '<pre class="log" style="margin:.2em 0; max-height:8em">' + escapeHTML(h.match) + '</pre>';
+      html += '</li>';
+    }
+    html += '</ul>';
+  }
+  if (d.audit && d.audit.length) {
+    html += '<h4 style="margin:.8em 0 .3em">Probe requests (' + d.audit.length + ')</h4>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:.9em">';
+    html += '<thead><tr style="text-align:left">';
+    html +=   '<th style="padding:.2em .4em">#</th>';
+    html +=   '<th style="padding:.2em .4em">Method</th>';
+    html +=   '<th style="padding:.2em .4em">URL</th>';
+    html +=   '<th style="padding:.2em .4em">Status</th>';
+    html +=   '<th style="padding:.2em .4em">Size</th>';
+    html += '</tr></thead><tbody>';
+    d.audit.forEach((e, i) => {
+      html += '<tr style="border-top:1px solid var(--border, #333)">';
+      html += '<td style="padding:.25em .4em">' + (i + 1) + '</td>';
+      html += '<td style="padding:.25em .4em"><code>' + escapeHTML(e.method || '') + '</code></td>';
+      html += '<td style="padding:.25em .4em"><code>' + escapeHTML(e.url || '') + '</code></td>';
+      html += '<td style="padding:.25em .4em">' + escapeHTML(String(e.status ?? '')) + '</td>';
+      html += '<td style="padding:.25em .4em">' + escapeHTML(String(e.size ?? '')) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  if (d.remediation) {
+    html += '<h4 style="margin:.8em 0 .3em">Remediation</h4>';
+    html += '<p style="white-space:pre-wrap">' + escapeHTML(d.remediation) + '</p>';
+  }
+  html += '<p class="muted small" style="margin-top:.8em">' +
+          'Verdict saved as <code>' + escapeHTML(d.status || '?') + '</code> on this finding.</p>';
+  return html;
+}
+
+function escapeHTML(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function runTest(fid) {
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = 'Testing finding #' + fid + '…';
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Sending request…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/test', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = 'Live test · finding #' + fid;
+    validateEl.innerHTML = renderTestBody(data);
+  } catch (err) {
+    validateEl.innerHTML = '<p class="warn">Test request failed: ' +
+                            escapeHTML(String(err)) + '</p>';
+  }
+}
+
+function renderTestBody(d) {
+  if (!d) return '<p class="warn">empty response</p>';
+  if (!d.ok) {
+    return '<p class="warn"><strong>Cannot test:</strong> ' +
+           escapeHTML(d.message || d.error || 'unknown error') + '</p>';
+  }
+  if (d.kind === 'tls')      return renderTlsTestBody(d);
+  if (d.kind === 'tls_info') return renderTlsInfoBody(d);
+  if (d.kind === 'nuclei')   return renderNucleiTestBody(d);
+  const s = Number(d.status || 0);
+  let statusColor = 'var(--muted, #888)';
+  if (s >= 200 && s < 300)      statusColor = 'var(--sev-low, #2ecc71)';
+  else if (s >= 300 && s < 400) statusColor = 'var(--sev-info, #5d8aa8)';
+  else if (s >= 400 && s < 500) statusColor = 'var(--sev-medium, #e67e22)';
+  else if (s >= 500)            statusColor = 'var(--sev-high, #c0392b)';
+  let html = '';
+  html += '<p style="margin:0 0 .4em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:' + statusColor + '; color:#fff; font-weight:600">HTTP ' + escapeHTML(String(d.status)) + '</span>';
+  html +=   ' <code style="margin-left:.5em">' + escapeHTML(d.method) + ' ' + escapeHTML(d.url) + '</code>';
+  html +=   ' <span class="muted small" style="margin-left:.5em">' + escapeHTML(String(d.elapsed_ms)) + ' ms · ' + escapeHTML(formatBytes(d.body_size)) + (d.body_truncated ? ' (truncated)' : '') + '</span>';
+  html += '</p>';
+  if (d.indicator) {
+    html += '<p class="muted small" style="margin:.2em 0 .8em"><strong>Look for:</strong> ' + escapeHTML(d.indicator) + '</p>';
+  }
+  if (d.headers && d.headers.length) {
+    html += '<h4 style="margin:.4em 0 .3em">Response headers</h4>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:.88em; margin-bottom:.6em"><tbody>';
+    const BANNER_HEADERS = /^(server|x-powered-by|x-frame-options|strict-transport-security|content-security-policy|set-cookie|location)$/i;
+    for (const [k, v] of d.headers) {
+      const isBanner = BANNER_HEADERS.test(k);
+      html += '<tr style="border-top:1px solid var(--border, #333)">';
+      html += '<td style="padding:.2em .5em; vertical-align:top; width:18em; color:' + (isBanner ? 'var(--accent, #7af)' : 'var(--muted, #888)') + '"><code>' + escapeHTML(k) + '</code></td>';
+      html += '<td style="padding:.2em .5em; word-break:break-all"><code>' + escapeHTML(v) + '</code></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  }
+  html += '<h4 style="margin:.6em 0 .3em">Response body' + (d.body_truncated ? ' <span class="muted small">(first 256 KB)</span>' : '') + '</h4>';
+  let safeBody = escapeHTML(d.body || '');
+  safeBody = highlightTerms(safeBody, d.highlights || []);
+  html += '<pre class="log" style="margin:0; padding:.8em; max-height:30em; overflow:auto; white-space:pre-wrap; word-break:break-word">' + safeBody + '</pre>';
+  html += '<p class="muted small" style="margin-top:.6em">No state was modified — request sent with no auth cookie, GET/HEAD only, scope locked to the assessment FQDN.</p>';
+  return html;
+}
+
+function formatBytes(n) {
+  n = Number(n || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function renderTlsInfoBody(d) {
+  let html = '';
+  html += '<p style="margin:0 0 .4em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:var(--accent, #5d8aa8); color:#fff; font-weight:600">TLS handshake</span>';
+  html +=   ' <span class="muted small">' + escapeHTML(String(d.elapsed_ms)) + ' ms · target <code>' + escapeHTML(d.host) + ':' + escapeHTML(String(d.port)) + '</code></span>';
+  html += '</p>';
+  html += '<table style="width:100%; border-collapse:collapse; font-size:.9em; margin:.4em 0 .6em"><tbody>';
+  const rows = [
+    ['Protocol',            d.protocol],
+    ['Cipher',              d.cipher],
+    ['Verification',        d.verification],
+    ['Subject',             d.cert && d.cert.subject],
+    ['Issuer',              d.cert && d.cert.issuer],
+    ['Subject Alt. Name',   d.cert && d.cert.san],
+    ['Not Before',          d.cert && d.cert.not_before],
+    ['Not After',           d.cert && d.cert.not_after],
+    ['Public Key',          d.cert && d.cert.public_key_algorithm],
+    ['Signature Algorithm', d.cert && d.cert.signature_algorithm],
+    ['Serial',              d.cert && d.cert.serial],
+    ['Cert chain length',   d.chain_count],
+  ];
+  for (const [label, value] of rows) {
+    if (!value && value !== 0) continue;
+    html += '<tr style="border-top:1px solid var(--border, #333)">';
+    html += '<td style="padding:.25em .55em; vertical-align:top; width:14em; color:var(--muted, #888)">' + escapeHTML(label) + '</td>';
+    html += '<td style="padding:.25em .55em; word-break:break-all"><code>' + escapeHTML(String(value)) + '</code></td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+  html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; overflow:auto; white-space:pre-wrap; word-break:break-all">' + escapeHTML(d.command || '') + '</pre>';
+  if (d.x509_text_excerpt) {
+    html += '<details style="margin-top:.8em"><summary class="muted" style="cursor:pointer">Raw <code>openssl x509 -text</code> output</summary>';
+    html += '<pre class="log" style="margin:.4em 0; padding:.6em; max-height:25em; overflow:auto; white-space:pre-wrap; word-break:break-word">' + escapeHTML(d.x509_text_excerpt) + '</pre>';
+    html += '</details>';
+  }
+  html += '<p class="muted small" style="margin-top:.6em">TLS handshake only — no application-layer request was sent. TLS verification is disabled to handle self-signed test certs the same way the original DAST tools do.</p>';
+  return html;
+}
+
+function renderTlsTestBody(d) {
+  let badge, badgeColor;
+  if (d.verdict === 'reproduced')          { badge = '✓ Reproduced';      badgeColor = 'var(--sev-high, #c0392b)'; }
+  else if (d.verdict === 'not_reproduced') { badge = '✗ Not reproduced';  badgeColor = 'var(--sev-low, #2ecc71)'; }
+  else                                      { badge = '— Inconclusive';   badgeColor = 'var(--muted, #888)'; }
+  let html = '';
+  html += '<p style="margin:0 0 .4em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:' + badgeColor + '; color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+  html +=   ' <span class="muted small">testssl.sh ' + escapeHTML(d.flag || '') + ' (' + escapeHTML(d.flag_label || '') + ') · ' + escapeHTML(String(d.elapsed_ms)) + ' ms · target <code>' + escapeHTML(d.host) + ':' + escapeHTML(String(d.port)) + '</code></span>';
+  html += '</p>';
+  html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+  html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; overflow:auto; white-space:pre-wrap; word-break:break-all">' + escapeHTML(d.command || '') + '</pre>';
+  if (d.matched_rows && d.matched_rows.length) {
+    html += '<h4 style="margin:.8em 0 .3em">testssl.sh result rows</h4>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:.88em">';
+    html += '<thead><tr style="text-align:left"><th style="padding:.25em .5em">Check ID</th><th style="padding:.25em .5em">Severity</th><th style="padding:.25em .5em">Finding</th><th style="padding:.25em .5em">CWE</th></tr></thead><tbody>';
+    for (const r of d.matched_rows) {
+      const sev = (r.severity || '').toUpperCase();
+      let sevColor = 'var(--muted, #888)';
+      if (sev === 'CRITICAL')     sevColor = '#c0392b';
+      else if (sev === 'HIGH')    sevColor = '#e67e22';
+      else if (sev === 'MEDIUM')  sevColor = '#f1c40f';
+      else if (sev === 'LOW')     sevColor = '#3498db';
+      else if (sev === 'OK' || sev === 'INFO') sevColor = '#2ecc71';
+      const isMatch = (r.id || '') === (d.testssl_id || '');
+      html += '<tr style="border-top:1px solid var(--border, #333); ' + (isMatch ? 'background:rgba(255,245,157,0.08)' : '') + '">';
+      html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.id || '') + '</code></td>';
+      html += '<td style="padding:.3em .5em"><span style="color:' + sevColor + '; font-weight:600">' + escapeHTML(r.severity || '') + '</span></td>';
+      html += '<td style="padding:.3em .5em">' + escapeHTML(r.finding || '') + '</td>';
+      html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.cwe || '') + '</code></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<p class="muted small" style="margin-top:.4em">Highlighted row is the original check id (<code>' + escapeHTML(d.testssl_id || '') + '</code>) from this finding.</p>';
+  } else {
+    html += '<p class="warn" style="margin-top:.6em">testssl.sh produced no rows for this run. Exit code: <code>' + escapeHTML(String(d.exit_code)) + '</code>.</p>';
+  }
+  if (d.stdout_excerpt && d.stdout_excerpt.trim()) {
+    html += '<details style="margin-top:.8em"><summary class="muted" style="cursor:pointer">Raw testssl.sh output</summary>';
+    html += '<pre class="log" style="margin:.4em 0; padding:.6em; max-height:25em; overflow:auto; white-space:pre-wrap; word-break:break-word">' + escapeHTML(d.stdout_excerpt) + '</pre>';
+    html += '</details>';
+  }
+  html += '<p class="muted small" style="margin-top:.6em">No payloads or destructive ciphers were sent — testssl.sh runs in read-only mode against the configured target.</p>';
+  return html;
+}
+
+// Nuclei test result renderer — mirrors renderTlsTestBody's layout so the
+// modal feels uniform across kinds, but the table columns are nuclei-
+// shaped: template id, severity, matcher name, what was matched, and any
+// extracted values the template captured.
+function renderNucleiTestBody(d) {
+  let badge, badgeColor;
+  if (d.verdict === 'reproduced')          { badge = '✓ Reproduced';      badgeColor = 'var(--sev-high, #c0392b)'; }
+  else if (d.verdict === 'not_reproduced') { badge = '✗ Not reproduced';  badgeColor = 'var(--sev-low, #2ecc71)'; }
+  else                                      { badge = '— Inconclusive';   badgeColor = 'var(--muted, #888)'; }
+  let html = '';
+  html += '<p style="margin:0 0 .4em">';
+  html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:' + badgeColor + '; color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+  html +=   ' <span class="muted small">nuclei <code>-id ' + escapeHTML(d.template_id || '') + '</code> · ' + escapeHTML(String(d.elapsed_ms)) + ' ms · target <code>' + escapeHTML(d.host) + ':' + escapeHTML(String(d.port)) + '</code></span>';
+  html += '</p>';
+  html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+  html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; overflow:auto; white-space:pre-wrap; word-break:break-all">' + escapeHTML(d.command || '') + '</pre>';
+  if (d.matched_rows && d.matched_rows.length) {
+    html += '<h4 style="margin:.8em 0 .3em">nuclei matched events</h4>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:.88em">';
+    html += '<thead><tr style="text-align:left"><th style="padding:.25em .5em">Template</th><th style="padding:.25em .5em">Severity</th><th style="padding:.25em .5em">Matcher</th><th style="padding:.25em .5em">Finding</th><th style="padding:.25em .5em">Matched at</th></tr></thead><tbody>';
+    for (const r of d.matched_rows) {
+      const sev = (r.severity || '').toUpperCase();
+      let sevColor = 'var(--muted, #888)';
+      if (sev === 'CRITICAL')     sevColor = '#c0392b';
+      else if (sev === 'HIGH')    sevColor = '#e67e22';
+      else if (sev === 'MEDIUM')  sevColor = '#f1c40f';
+      else if (sev === 'LOW')     sevColor = '#3498db';
+      else if (sev === 'INFO')    sevColor = '#2ecc71';
+      // Highlight the row whose matcher matches the original finding's matcher.
+      const isMatch = (r.matcher_name || '') && (r.matcher_name || '') === (d.matcher_name || '');
+      html += '<tr style="border-top:1px solid var(--border, #333); ' + (isMatch ? 'background:rgba(255,245,157,0.08)' : '') + '">';
+      html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.id || '') + '</code></td>';
+      html += '<td style="padding:.3em .5em"><span style="color:' + sevColor + '; font-weight:600">' + escapeHTML(r.severity || '') + '</span></td>';
+      html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.matcher_name || '') + '</code></td>';
+      html += '<td style="padding:.3em .5em">' + escapeHTML(r.finding || '') + '</td>';
+      html += '<td style="padding:.3em .5em; word-break:break-all"><code>' + escapeHTML(r.matched_at || '') + '</code></td>';
+      html += '</tr>';
+      // If this template extracted values (regex-extractor or
+      // dsl-extractor templates), surface them on a sub-row so the
+      // analyst sees what nuclei pulled out.
+      if (r.extracted_results && r.extracted_results.length) {
+        html += '<tr><td colspan="5" style="padding:.1em .5em .35em 1.5em" class="muted small">extracted: <code>'
+              + escapeHTML(r.extracted_results.join(', ')) + '</code></td></tr>';
+      }
+    }
+    html += '</tbody></table>';
+    if (d.matcher_name) {
+      html += '<p class="muted small" style="margin-top:.4em">Highlighted row is the original matcher (<code>' + escapeHTML(d.matcher_name) + '</code>) from this finding.</p>';
+    }
+  } else {
+    html += '<p class="warn" style="margin-top:.6em">nuclei produced no matched events for template <code>' + escapeHTML(d.template_id || '') + '</code>. Exit code: <code>' + escapeHTML(String(d.exit_code)) + '</code> — the matcher likely no longer fires.</p>';
+  }
+  if (d.stderr_excerpt && d.stderr_excerpt.trim()) {
+    html += '<details style="margin-top:.8em"><summary class="muted" style="cursor:pointer">nuclei stderr</summary>';
+    html += '<pre class="log" style="margin:.4em 0; padding:.6em; max-height:18em; overflow:auto; white-space:pre-wrap; word-break:break-word">' + escapeHTML(d.stderr_excerpt) + '</pre>';
+    html += '</details>';
+  }
+  html += '<p class="muted small" style="margin-top:.6em">Single-template, single-target nuclei run — no broader scan was triggered.</p>';
+  return html;
+}
+
+function highlightTerms(escapedHtml, terms) {
+  if (!terms || !terms.length) return escapedHtml;
+  let out = escapedHtml;
+  const seen = new Set();
+  for (const raw of terms) {
+    if (!raw) continue;
+    const t = escapeHTML(raw);
+    if (seen.has(t)) continue;
+    seen.add(t);
+    const safeRe = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      out = out.replace(new RegExp(safeRe, 'gi'),
+        (m) => '<mark style="background:#fff59d; color:#000">' + m + '</mark>');
+    } catch (_) { /* invalid regex — skip */ }
+  }
+  return out;
+}
+</script>
+{% endblock %}

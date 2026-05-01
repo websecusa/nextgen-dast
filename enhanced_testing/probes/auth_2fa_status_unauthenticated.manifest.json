@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_2fa_status_unauthenticated",
+  "version": "1.0",
+  "summary": "Re-runs the unauthenticated 2FA status probe.",
+  "validates": [
+    "CWE-862",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "auth_2fa_status_unauthenticated",
+    "2fa leak",
+    "two-factor enumeration"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional 2FA status path (repeatable)"
+  }
+}

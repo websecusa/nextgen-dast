@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "csrf_validation",
+  "version": "1.1",
+  "summary": "Confirms (or refutes) a wapiti CSRF finding via cross-session token swap. Wapiti's stock check produces frequent false positives because it reuses one session; this probe runs the textbook server-side CSRF tests (no token / garbage token / cross-session token) and reports a high-confidence verdict.",
+  "validates": [
+    "CWE-352"
+  ],
+  "matches_titles": [
+    "cross site request forgery",
+    "cross-site request forgery",
+    "csrf"
+  ],
+  "matches_tools": ["wapiti", "nikto"],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Form-POST endpoint to test (typically the form action — required)",
+    "--login-page-url": "URL of the page that renders the form (defaults to --url)",
+    "--token-field": "Name of the CSRF token field (auto-detected from the form when omitted)",
+    "--credentials": "Optional username:password to send with the test POSTs. Use bogus values; the token check happens before credential validation in correctly-built apps, so the response still reveals enforcement.",
+    "--method": "HTTP method for the test POSTs (default POST)"
+  }
+}

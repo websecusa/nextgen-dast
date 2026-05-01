@@ -1,0 +1,1076 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Per-assessment workspace. Three-column layout:
+
+    [findings list]   [selected finding's detail]   [AT A GLANCE + actions]
+
+  The list supports filter (severity), sort (severity / recency / tool),
+  status tabs (Open / Closed / All), and free-text title search. All four
+  go through the same querystring on a normal page navigation -- no SPA
+  state. Clicking a list row, however, does NOT reload the page: a tiny
+  fetch() pulls the detail+aside HTML for the chosen finding from the
+  server and swaps it into the middle and right columns. Browser
+  history is updated via location.hash so a refresh / back-button keeps
+  the same selection.
+
+  Bulk-action toolbar appears at the bottom of the list when one or
+  more rows are checkboxed. POSTs to /assessment/<aid>/findings/bulk
+  with action in (resolve | archive | delete) and reloads on success.
+
+  The status banner, severity rollup, validation card, PDF report card
+  and underlying-scans block from the previous version live in the
+  Overview tab so the deliverable surfaces (PDF, scan IDs) stay one
+  click away without crowding the workspace.
+#}
+{% extends "base.html" %}
+{% block content %}
+
+<div class="fw-header">
+  <div class="title">
+    <h1>{{ a.application_id or a.fqdn }}</h1>
+    <div class="subtitle">
+      <code>{{ a.fqdn }}</code>
+      <span>·</span>
+      <span class="badge">{{ a.profile }}</span>
+      <span class="badge {{ a.status }}" id="status">{{ a.status }}</span>
+      {% if a.application_id %}<span class="badge">App: {{ a.application_id }}</span>{% endif %}
+      {% if a.finished_at %}
+        <span>·</span>
+        <span>Last assessment {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}</span>
+      {% endif %}
+      <span class="muted small" id="step">{{ a.current_step or "" }}</span>
+    </div>
+  </div>
+  <div class="actions">
+    {% if is_admin and a.status not in ('running','queued','deleting') %}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/report"
+            style="display:inline">
+        <button type="submit" class="ghost">
+          {% if reports %}Regenerate PDF{% else %}Generate PDF{% endif %}
+        </button>
+      </form>
+      {# Bulk-Challenge button. Spawns scripts.challenge_runner against
+         this assessment, running every matched probe class (including
+         payload-injecting probes like xss_reflect / sqli_boolean) so
+         the analyst can re-validate findings without clicking each
+         row. Read-only probes ALSO ran automatically at the end of
+         the scan, so this button is most useful when the analyst
+         wants to include the unsafe-class probes too, or to re-run
+         after triage. Progress shows in the same `current_step`
+         field the status badge already polls. #}
+      <form method="post" action="{{ base }}/assessment/{{ a.id }}/challenge_all"
+            style="display:inline"
+            onsubmit="return confirm('Run every matched toolkit probe against the {{ counts.open }} open finding(s) on this assessment? Some probes (xss_reflect, sqli_boolean, …) inject payloads — only run against systems you are authorized to test. Progress will appear in the status field.')">
+        <button type="submit" class="ghost">Challenge all findings</button>
+      </form>
+      {# Delete uses a styled <dialog> rather than window.confirm() so the
+         confirmation reads as part of the app, matches the rest of the
+         chrome (border, accent color, Cancel/Confirm buttons), and is
+         less prone to being dismissed accidentally by a stray Enter. #}
+      <form id="delete-assessment-form" method="post"
+            action="{{ base }}/assessment/{{ a.id }}/delete"
+            style="display:inline">
+        <button type="button" class="warn"
+                onclick="document.getElementById('delete-assessment-modal').showModal()">
+          Delete assessment
+        </button>
+      </form>
+
+      <dialog id="delete-assessment-modal"
+              style="max-width:min(90vw, 540px); padding:0;
+                     background:var(--panel); color:var(--text);
+                     border:2px solid var(--sev-high, #c0392b);
+                     border-radius:10px;
+                     box-shadow:0 0 0 1px rgba(0,0,0,0.55),
+                                0 18px 48px rgba(0,0,0,0.55)">
+        <style>#delete-assessment-modal::backdrop { background: rgba(0,0,0,0.55); }</style>
+        <div style="padding:1em 1.2em; border-bottom:2px solid var(--sev-high, #c0392b);
+                    background:rgba(192,57,43,0.08)">
+          <strong style="font-size:1.05em">Delete assessment #{{ a.id }}?</strong>
+        </div>
+        <div style="padding:1em 1.2em; line-height:1.5">
+          <p style="margin:0 0 .8em">
+            This will permanently delete assessment
+            <strong>#{{ a.id }}</strong> for
+            <code>{{ a.fqdn }}</code>, along with:
+          </p>
+          <ul style="margin:0 0 .8em 1.2em; padding:0; color:var(--text-soft)">
+            <li>all scan output files on disk</li>
+            <li>all {{ counts.all }} finding(s) attached to it</li>
+            <li>any generated PDF reports</li>
+            <li>orchestrator logs</li>
+          </ul>
+          <p style="margin:0; color:var(--sev-high, #c0392b); font-weight:600">
+            This action cannot be undone.
+          </p>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:.5em;
+                    padding:.8em 1.2em; border-top:1px solid var(--border);
+                    background:rgba(255,255,255,0.02)">
+          <button type="button" class="ghost"
+                  onclick="document.getElementById('delete-assessment-modal').close()">
+            Cancel
+          </button>
+          <button type="button" class="warn"
+                  onclick="document.getElementById('delete-assessment-form').submit()">
+            Yes, delete this assessment
+          </button>
+        </div>
+      </dialog>
+    {% endif %}
+    <a href="{{ base }}/assess" class="button">Re-scan / new target</a>
+  </div>
+</div>
+
+{# ---- Severity rollup strip (KPI-style) -----------------------------
+   Risk score is recomputed live from the CURRENT state of the
+   findings, not the stale a.risk_score the LLM wrote at consolidation
+   time. Triaged findings (false_positive, resolved/fixed, archived/
+   accepted_risk) are excluded from both the severity rollup and the
+   risk number. Triage outcomes are surfaced as separate KPI tiles so
+   the analyst sees the work that's been done without it skewing the
+   actionable view. #}
+<div class="kpi-strip" style="margin-bottom:1em">
+  <div class="kpi"
+       title="Live risk score derived from current open findings. Excludes false positives, resolved, and archived. 0 = clean, 100 = critical.">
+    <span class="v">{{ live_risk }}</span><span class="lbl">/100 risk</span>
+  </div>
+  <div class="kpi"><span class="v">{{ findings|length }}</span><span class="lbl">findings</span></div>
+  <div class="kpi">
+    {% for sev in ['critical','high','medium','low','info'] %}
+      {% if sev_counts[sev] %}
+        <span class="sev-dot sev-{{ sev }}"
+              title="{{ sev|capitalize }}: {{ sev_counts[sev] }}"></span>{{ sev_counts[sev] }}&nbsp;
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% if fp_count %}
+  <div class="kpi" title="Suppressed by analyst override or refuted by a probe — excluded from risk score and PDF report.">
+    <span class="v">{{ fp_count }}</span><span class="lbl">false positive</span>
+  </div>
+  {% endif %}
+  {% if resolved_count %}
+  <div class="kpi" title="Marked Resolve in the workspace (status = fixed) — excluded from risk score.">
+    <span class="v">{{ resolved_count }}</span><span class="lbl">resolved</span>
+  </div>
+  {% endif %}
+  {% if archived_count %}
+  <div class="kpi" title="Marked Archive (status = accepted_risk) — risk explicitly accepted, excluded from score.">
+    <span class="v">{{ archived_count }}</span><span class="lbl">archived</span>
+  </div>
+  {% endif %}
+  {# "Hide info-severity findings" toggle. Persists on the assessment
+     row (via POST /assessment/<id>/filter_info) so it affects both
+     this on-screen view AND the next generated PDF report. The
+     checkbox auto-submits on change so it's a one-click toggle.
+     Disabled for read-only viewers (the form would be rejected by
+     the global middleware anyway). #}
+  <div class="kpi" style="margin-left:auto">
+    <form method="post" action="{{ base }}/assessment/{{ a.id }}/filter_info"
+          style="display:flex; align-items:center; gap:.5em; margin:0">
+      <label class="check" style="display:flex; align-items:center; gap:.4em;
+                                  margin:0; font-size:.85em; color:var(--text-soft)">
+        <input type="checkbox" name="enabled" value="1"
+               {% if filter_info %}checked{% endif %}
+               {% if not is_admin %}disabled{% endif %}
+               onchange="this.form.submit()"
+               style="accent-color:var(--accent)">
+        Hide info-severity (page + PDF)
+      </label>
+      {% if filter_info and info_hidden %}
+        <span class="muted small">{{ info_hidden }} hidden</span>
+      {% endif %}
+    </form>
+  </div>
+  {% if reports %}
+  <div class="kpi">
+    {% for r in reports %}
+      <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">
+        Download PDF ({{ (r.size_bytes / 1024) | round(1) }} KB)
+      </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{# ---- Three-column workspace --------------------------------------- #}
+<div class="fw">
+
+  {# ----- LEFT: filterable, selectable findings list ---------------- #}
+  <div class="fw-list">
+    <form method="get" action="" class="fw-list-toolbar"
+          style="display:flex; flex-direction:column; align-items:stretch; gap:.5em">
+      <div class="tabs">
+        <a href="?status=open{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'open' %}active{% endif %}">Open ({{ counts.open }})</a>
+        <a href="?status=closed{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'closed' %}active{% endif %}">Closed ({{ counts.closed }})</a>
+        <a href="?status=all{% if filter_sev %}&sev={{ filter_sev }}{% endif %}{% if sort %}&sort={{ sort }}{% endif %}"
+           class="{% if filter_status == 'all' %}active{% endif %}">All ({{ counts.all }})</a>
+      </div>
+      <div style="display:flex; gap:.4em; align-items:center; flex-wrap:wrap">
+        {# Severity dropdown also exposes "False positives" and
+           "Resolved" as pseudo-severities. Picking either overrides the
+           Open/Closed/All tab filter on the server (see assessment_detail
+           handler) so the analyst sees every suppressed/resolved finding
+           regardless of the tab they were on. Counts come from the
+           unfiltered rollup so they stay accurate across selections.
+           "Resolved" gives analysts a path back to findings they marked
+           fixed, which the Open tab and rollup otherwise hide. #}
+        <select name="sev" onchange="this.form.submit()">
+          <option value="">All severities</option>
+          {% for sev in ['critical','high','medium','low','info'] %}
+            <option value="{{ sev }}" {% if filter_sev == sev %}selected{% endif %}>{{ sev|capitalize }}</option>
+          {% endfor %}
+          <option disabled>──────────</option>
+          <option value="false_positive" {% if filter_sev == 'false_positive' %}selected{% endif %}>
+            False positives{% if fp_count %} ({{ fp_count }}){% endif %}
+          </option>
+          <option value="resolved" {% if filter_sev == 'resolved' %}selected{% endif %}>
+            Resolved{% if resolved_count %} ({{ resolved_count }}){% endif %}
+          </option>
+          <option value="fixed" {% if filter_sev == 'fixed' %}selected{% endif %}>
+            Fixed{% if resolved_count %} ({{ resolved_count }}){% endif %}
+          </option>
+          <option value="accepted_risk" {% if filter_sev == 'accepted_risk' %}selected{% endif %}>
+            Archive (accepted risk){% if archived_count %} ({{ archived_count }}){% endif %}
+          </option>
+        </select>
+        <select name="sort" onchange="this.form.submit()">
+          <option value="severity" {% if sort == 'severity' %}selected{% endif %}>By severity</option>
+          <option value="newest"   {% if sort == 'newest' %}selected{% endif %}>Newest first</option>
+          <option value="tool"     {% if sort == 'tool' %}selected{% endif %}>By tool</option>
+        </select>
+        <input type="search" name="q" value="{{ q or '' }}"
+               placeholder="Search title…">
+        <input type="hidden" name="status" value="{{ filter_status }}">
+      </div>
+    </form>
+
+    {# Select-all bar. The header checkbox toggles every row currently
+       visible in the list (i.e. obeying the filter/search), and goes
+       indeterminate when only some rows are checked. Row count on the
+       right doubles as a "showing N" indicator. #}
+    <div class="fw-list-selectall"
+         style="display:flex; align-items:center; justify-content:space-between;
+                gap:.5em; padding:.5em .9em; border-bottom:1px solid var(--border);
+                background:var(--panel-2)">
+      <label class="check" style="display:flex; align-items:center; gap:.55em;
+                                  font-size:.82em; color:var(--text-soft);
+                                  cursor:pointer; margin:0">
+        <input type="checkbox" id="fw-select-all"
+               onclick="toggleSelectAll(this)"
+               style="cursor:pointer; accent-color:var(--accent)">
+        Select all visible
+      </label>
+      <span class="muted small">{{ findings|length }} shown</span>
+    </div>
+
+    <div class="fw-list-items">
+      {% if findings %}
+        {% for f in findings %}
+          {% set is_fp = f.status == 'false_positive' %}
+          {# A <div>, not a <label>: a label dispatches a synthetic click
+             on its wrapped input whenever any descendant is clicked, which
+             would tick the checkbox every time the user just meant to open
+             the row. The checkbox below is reachable on its own. #}
+          <div class="fw-item {% if is_fp %}is-fp{% endif %}"
+               data-id="{{ f.id }}"
+               onclick="loadFinding({{ f.id }}, this, event)">
+            <input type="checkbox" value="{{ f.id }}"
+                   onclick="event.stopPropagation(); refreshBulkBar()">
+            <div class="fi-body">
+              <div class="fi-title">{{ f.title }}</div>
+              <div class="fi-meta">
+                <span class="sev sev-{{ f.severity }}">{{ f.severity }}</span>
+                <span>·</span>
+                <span>{{ f.source_tool }}</span>
+                {% if f.created_at %}
+                  <span>·</span>
+                  <span>{{ f.created_at.strftime('%m/%d %H:%M') if f.created_at.strftime else f.created_at }}</span>
+                {% endif %}
+                {% if f.seen_count and f.seen_count > 1 %}
+                  <span>·</span>
+                  <span>×{{ f.seen_count }}</span>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted small" style="padding:1.4em">
+          No findings match the current filter.
+        </p>
+      {% endif %}
+    </div>
+
+    {# Bulk-action bar appears once at least one row is checked. #}
+    <div class="fw-bulk-bar" hidden id="fw-bulk-bar">
+      <span class="count"><span id="bulk-count">0</span> selected</span>
+      <button type="button" class="ghost" onclick="bulkAction('resolve')">Resolve</button>
+      <button type="button" class="ghost" onclick="bulkAction('archive')">Archive</button>
+      <button type="button" class="warn" onclick="bulkAction('delete')">Delete</button>
+    </div>
+  </div>
+
+  {# ----- MIDDLE: selected finding's detail ------------------------- #}
+  <div class="fw-detail" id="fw-detail">
+    {% include 'finding_panel.html' %}
+  </div>
+
+  {# ----- RIGHT: AT A GLANCE + actions ------------------------------ #}
+  <div class="fw-aside" id="fw-aside">
+    {% include '_finding_aside.html' %}
+  </div>
+
+</div>
+
+<script>
+  // Workspace state. The selected finding's id flows through location.hash
+  // so a refresh / share-link keeps the same row open.
+  const BASE = "{{ base }}";
+
+  // Right-rail Challenge button handler. Intercepts the form submit
+  // so the page does not navigate, fires /challenge_inline against the
+  // matched probe, then re-fetches the aside fragment so the
+  // validation badges (the "FP – Excluded" / "✓ Confirmed" pill next
+  // to the button, plus the at-a-glance Status / Validation rows)
+  // reflect the new state. No confirm dialog — analysts wanted a
+  // single-click flow.
+  //
+  // Returning false from onsubmit prevents the default POST.
+  async function runChallengeAside(event, fid) {
+    event.preventDefault();
+    const form = event.target.closest("form");
+    if (!form) return false;
+    const btn = form.querySelector("button[type=submit]");
+    // Snapshot the original button HTML so we can restore it if the
+    // request errors before we re-fetch the aside.
+    const originalHTML = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      // Replace any existing badge with a transient "Running…" label
+      // so the analyst sees that the click registered.
+      const existingBadge = btn.querySelector(".badge");
+      if (existingBadge) existingBadge.remove();
+      const running = document.createElement("span");
+      running.className = "badge running";
+      running.style.marginLeft = "auto";
+      running.textContent = "Running…";
+      btn.appendChild(running);
+    }
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_inline", {
+        method: "POST", credentials: "same-origin",
+      });
+      let data = {};
+      try { data = await r.json(); } catch (_) { /* non-JSON error */ }
+      if (!r.ok) {
+        // 403 (forbidden), 409 (no_probe / not_safe / no_url). Restore
+        // the button and surface the server's message inline.
+        if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+        let errSpan = form.querySelector(".challenge-inline-msg");
+        if (!errSpan) {
+          errSpan = document.createElement("div");
+          errSpan.className = "challenge-inline-msg warn";
+          errSpan.style.cssText =
+            "font-size:.85em; margin-top:.3em; color:var(--yellow, #e0a000)";
+          form.appendChild(errSpan);
+        }
+        errSpan.textContent = data.message || data.error || "Challenge failed.";
+        return false;
+      }
+      // Refresh the aside so the at-a-glance rows AND the result
+      // badge next to the Challenge button render from the freshly
+      // updated finding row.
+      const aside = await fetch(BASE + "/finding/" + fid + "/aside",
+                                { credentials: "same-origin" })
+                          .then(r => r.text());
+      document.getElementById("fw-aside").innerHTML = aside;
+    } catch (err) {
+      console.error("runChallengeAside failed", err);
+      if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+    }
+    return false;
+  }
+
+  function loadFinding(id, item, ev) {
+    if (ev) {
+      // Suppress accidental click-into-select on the row's checkbox
+      // (the checkbox handler already stops propagation, but defend
+      // here too in case markup changes).
+      const t = ev.target;
+      if (t && t.tagName === "INPUT") return;
+    }
+    document.querySelectorAll(".fw-item.active").forEach(el => el.classList.remove("active"));
+    if (item) item.classList.add("active");
+    history.replaceState(null, "", "#finding-" + id);
+
+    // Load the detail panel and the right-rail aside in parallel — they
+    // each render a small fragment. On error we leave the previous
+    // selection visible so a transient network blip is not destructive.
+    Promise.all([
+      fetch(BASE + "/finding/" + id + "/panel").then(r => r.text()),
+      fetch(BASE + "/finding/" + id + "/aside").then(r => r.text()),
+    ]).then(([detail, aside]) => {
+      document.getElementById("fw-detail").innerHTML = detail;
+      document.getElementById("fw-aside").innerHTML = aside;
+    }).catch(err => console.error("loadFinding failed", err));
+  }
+
+  function refreshBulkBar() {
+    const all     = document.querySelectorAll(".fw-item input[type=checkbox]");
+    const checked = document.querySelectorAll(".fw-item input[type=checkbox]:checked");
+    document.getElementById("bulk-count").textContent = checked.length;
+    document.getElementById("fw-bulk-bar").hidden = checked.length === 0;
+    // Reflect the row-level state into the header's select-all box:
+    //   none checked  -> empty
+    //   some checked  -> indeterminate (browser-rendered "─" tick)
+    //   all  checked  -> ticked
+    const sel = document.getElementById("fw-select-all");
+    if (!sel) return;
+    if (checked.length === 0) {
+      sel.checked = false; sel.indeterminate = false;
+    } else if (checked.length === all.length) {
+      sel.checked = true; sel.indeterminate = false;
+    } else {
+      sel.checked = false; sel.indeterminate = true;
+    }
+  }
+
+  // Header select-all checkbox: tick / untick every visible row in
+  // one click. We dispatch on the header's checked state AFTER the
+  // browser flips it, so the user's intent (check vs uncheck) drives
+  // every row in lockstep.
+  function toggleSelectAll(headerEl) {
+    const want = headerEl.checked;
+    document.querySelectorAll(".fw-item input[type=checkbox]")
+            .forEach(cb => { cb.checked = want; });
+    refreshBulkBar();
+  }
+
+  function bulkAction(action) {
+    const ids = Array.from(document.querySelectorAll(".fw-item input[type=checkbox]:checked"))
+                     .map(cb => cb.value);
+    if (ids.length === 0) return;
+    const verb = action === "delete" ? "delete" : action;
+    if (!confirm(verb.charAt(0).toUpperCase() + verb.slice(1) + " " +
+                 ids.length + " finding(s)?" +
+                 (action === "delete" ? "\n\nDelete is permanent." : ""))) return;
+    const fd = new FormData();
+    fd.append("action", action);
+    ids.forEach(id => fd.append("finding_ids", id));
+    fetch(BASE + "/assessment/{{ a.id }}/findings/bulk",
+          { method: "POST", body: fd, credentials: "same-origin" })
+      .then(r => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        location.reload();
+      })
+      .catch(err => alert("Bulk action failed: " + err));
+  }
+
+  // Reproduce-&-verify modal. The dialog and its <template> data carriers
+  // live inside the panel fragment (see _finding_reproduce.html), so we
+  // re-resolve them on every click — they are recreated each panel swap.
+  // Defined at the parent level because <script> tags inside a fragment
+  // inserted via innerHTML do not execute.
+  function openIO(kind) {
+    const modal = document.getElementById("io-modal");
+    const tpl   = document.getElementById("io-data-" + kind);
+    if (!modal || !tpl) return;
+    document.getElementById("io-modal-title").textContent =
+      kind === "request" ? "Scan request" : "Scan response";
+    // <template>.content is an inert DocumentFragment whose textContent
+    // returns the original raw bytes (any HTML escaping Jinja did is
+    // un-escaped by the parser when the template element was built).
+    const body = document.getElementById("io-modal-body");
+    body.textContent = tpl.content.textContent;
+    body.hidden = false;
+    document.getElementById("io-validate-body").hidden = true;
+    document.getElementById("io-copy-btn").hidden = false;
+    if (typeof modal.showModal === "function") modal.showModal();
+    else modal.setAttribute("open", "");
+  }
+
+  function copyIO() {
+    const t = document.getElementById("io-modal-body").textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+  }
+
+  // Inline finding challenger. POSTs to /finding/<id>/challenge_inline
+  // (admin-only on the server) and renders the verdict in the same
+  // modal Validate uses. The Challenge button surfaces this for
+  // probe-class probes (single POST, non-mutating) — read-only probes
+  // use Validate instead. Destructive probes still need the standalone
+  // /finding/<id> page so the analyst sees the budget / scope first.
+  async function runChallenge(fid, probeName, safetyClass,
+                              budgetTypical, budgetMax) {
+    const budget = budgetTypical
+      ? ('~' + budgetTypical + ' requests' +
+         (budgetMax ? ', max ' + budgetMax : ''))
+      : 'a few requests';
+    const msg = "Run probe " + probeName +
+                " (" + safetyClass + " class) against this finding?\n\n" +
+                "Budget: " + budget + ".\n" +
+                (safetyClass === "probe"
+                  ? "The probe will send POST requests with non-mutating "
+                  + "payloads (e.g. login attempts). No data changes "
+                  + "server-side."
+                  : "");
+    if (!confirm(msg)) return;
+    const modal = document.getElementById("io-modal");
+    const titleEl = document.getElementById("io-modal-title");
+    const validateEl = document.getElementById("io-validate-body");
+    const ioBody = document.getElementById("io-modal-body");
+    if (!modal || !validateEl) return;
+    titleEl.textContent = "Challenging finding #" + fid + " with " + probeName + "…";
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    document.getElementById("io-copy-btn").hidden = true;
+    validateEl.innerHTML = '<p class="muted">Running probe…</p>';
+    if (typeof modal.showModal === "function") modal.showModal();
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_inline", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Challenge result · finding #" + fid;
+      validateEl.innerHTML = renderValidateBody(data);
+    } catch (err) {
+      validateEl.innerHTML =
+        '<p class="warn">Challenge request failed: ' +
+        escapeHTML(String(err)) + '</p>';
+    }
+  }
+
+  // Inline finding validator. POSTs to /finding/<id>/validate (read-only
+  // probes only — the server enforces this) and renders the verdict
+  // inside the existing modal. The modal swaps from raw-text mode to a
+  // structured layout (badge, summary, hits, request audit) so an
+  // analyst can read the result at a glance.
+  async function runValidate(fid) {
+    const modal = document.getElementById("io-modal");
+    const titleEl = document.getElementById("io-modal-title");
+    const validateEl = document.getElementById("io-validate-body");
+    const ioBody = document.getElementById("io-modal-body");
+    if (!modal || !validateEl) return;
+
+    titleEl.textContent = "Validating finding #" + fid + "…";
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    document.getElementById("io-copy-btn").hidden = true;
+    validateEl.innerHTML =
+      '<p class="muted">Running probe…</p>';
+    if (typeof modal.showModal === "function") modal.showModal();
+
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/validate", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Validation result · finding #" + fid;
+      validateEl.innerHTML = renderValidateBody(data);
+    } catch (err) {
+      validateEl.innerHTML =
+        '<p class="warn">Validation request failed: ' +
+        escapeHTML(String(err)) + '</p>';
+    }
+  }
+
+  // Build the verdict HTML. Kept in JS (not templated) because the
+  // verdict shape is small and a single-source renderer makes it
+  // easier to keep both the workspace and standalone pages in sync.
+  function renderValidateBody(d) {
+    if (!d) return '<p class="warn">empty response</p>';
+    if (d.error === "no_probe" || d.error === "not_safe" ||
+        d.error === "no_url") {
+      return '<p class="warn"><strong>Cannot validate:</strong> ' +
+             escapeHTML(d.message || d.error) + '</p>';
+    }
+    let badge, badgeColor;
+    if (d.validated === true)        { badge = "✓ Confirmed";       badgeColor = "var(--sev-high, #c0392b)"; }
+    else if (d.validated === false)  { badge = "✗ Not reproduced";  badgeColor = "var(--sev-info, #5d8aa8)"; }
+    else if (!d.ok || d.error)       { badge = "⚠ Errored";         badgeColor = "var(--sev-medium, #e67e22)"; }
+    else                              { badge = "— Inconclusive";   badgeColor = "var(--muted, #888)"; }
+
+    const conf = (d.confidence != null)
+      ? ' · confidence ' + (Math.round((d.confidence || 0) * 100)) + '%'
+      : '';
+    let html = '';
+    html += '<p style="margin:0 0 .6em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em;';
+    html +=   ' border-radius:4px; background:' + badgeColor + ';';
+    html +=   ' color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+    html +=   ' <span class="muted small">via probe ' +
+                 '<code>' + escapeHTML(d.probe || "?") + '</code>' + conf + '</span>';
+    html += '</p>';
+    if (d.summary) {
+      html += '<p style="white-space:pre-wrap">' +
+              escapeHTML(d.summary) + '</p>';
+    }
+    if (d.error) {
+      html += '<p class="warn"><strong>Probe error:</strong> ' +
+              escapeHTML(d.error) + '</p>';
+    }
+    // Hits — what the probe actually matched. Highlight the matched text.
+    const hits = (d.evidence && d.evidence.hits) || [];
+    if (hits.length) {
+      html += '<h4 style="margin:.8em 0 .3em">What was matched</h4>';
+      html += '<ul style="margin:.2em 0 .6em 1.1em; padding:0">';
+      for (const h of hits) {
+        html += '<li><strong>' + escapeHTML(h.label || "match") +
+                '</strong>';
+        if (h.severity) html += ' <span class="badge">' + escapeHTML(h.severity) + '</span>';
+        if (h.where) html += ' <span class="muted small">in ' + escapeHTML(h.where) + '</span>';
+        if (h.match) {
+          html += '<pre class="log" style="margin:.2em 0; max-height:8em">' +
+                   escapeHTML(h.match) + '</pre>';
+        }
+        html += '</li>';
+      }
+      html += '</ul>';
+    }
+    // Audit log — show the requests the probe sent and what status they got.
+    if (d.audit && d.audit.length) {
+      html += '<h4 style="margin:.8em 0 .3em">Probe requests (' +
+              d.audit.length + ')</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:.9em">';
+      html += '<thead><tr style="text-align:left">';
+      html +=   '<th style="padding:.2em .4em">#</th>';
+      html +=   '<th style="padding:.2em .4em">Method</th>';
+      html +=   '<th style="padding:.2em .4em">URL</th>';
+      html +=   '<th style="padding:.2em .4em">Status</th>';
+      html +=   '<th style="padding:.2em .4em">Size</th>';
+      html += '</tr></thead><tbody>';
+      d.audit.forEach((e, i) => {
+        html += '<tr style="border-top:1px solid var(--border, #333)">';
+        html += '<td style="padding:.25em .4em">' + (i + 1) + '</td>';
+        html += '<td style="padding:.25em .4em"><code>' +
+                escapeHTML(e.method || "") + '</code></td>';
+        html += '<td style="padding:.25em .4em"><code>' +
+                escapeHTML(e.url || "") + '</code></td>';
+        html += '<td style="padding:.25em .4em">' +
+                escapeHTML(String(e.status ?? "")) + '</td>';
+        html += '<td style="padding:.25em .4em">' +
+                escapeHTML(String(e.size ?? "")) + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    if (d.remediation) {
+      html += '<h4 style="margin:.8em 0 .3em">Remediation</h4>';
+      html += '<p style="white-space:pre-wrap">' +
+              escapeHTML(d.remediation) + '</p>';
+    }
+    html += '<p class="muted small" style="margin-top:.8em">' +
+            'Verdict saved as <code>' + escapeHTML(d.status || "?") +
+            '</code> on this finding.</p>';
+    return html;
+  }
+
+  function escapeHTML(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // Inline "Test" — sends the finding's reproduction request once,
+  // server-side, and shows the live response in the modal. Server gates
+  // are: GET/HEAD only, host inside assessment scope, no private IPs,
+  // per-user 30/min rate limit. Highlights any indicator strings the
+  // server told us to mark up.
+  async function runTest(fid) {
+    const modal = document.getElementById("io-modal");
+    const titleEl = document.getElementById("io-modal-title");
+    const validateEl = document.getElementById("io-validate-body");
+    const ioBody = document.getElementById("io-modal-body");
+    if (!modal || !validateEl) return;
+    titleEl.textContent = "Testing finding #" + fid + "…";
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    document.getElementById("io-copy-btn").hidden = true;
+    validateEl.innerHTML = '<p class="muted">Sending request…</p>';
+    if (typeof modal.showModal === "function") modal.showModal();
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/test", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Live test · finding #" + fid;
+      validateEl.innerHTML = renderTestBody(data);
+    } catch (err) {
+      validateEl.innerHTML = '<p class="warn">Test request failed: ' +
+                              escapeHTML(String(err)) + '</p>';
+    }
+  }
+
+  // Build the live-test result HTML. Mirrors renderValidateBody in
+  // shape (badge, summary, body) but renders the raw response status,
+  // headers and body instead of a probe verdict, and marks indicator
+  // strings inside the body with <mark>.
+  function renderTestBody(d) {
+    if (!d) return '<p class="warn">empty response</p>';
+    if (!d.ok) {
+      return '<p class="warn"><strong>Cannot test:</strong> ' +
+             escapeHTML(d.message || d.error || "unknown error") + '</p>';
+    }
+    if (d.kind === "tls")      return renderTlsTestBody(d);
+    if (d.kind === "tls_info") return renderTlsInfoBody(d);
+    if (d.kind === "nuclei")   return renderNucleiTestBody(d);
+    const s = Number(d.status || 0);
+    let statusColor = "var(--muted, #888)";
+    if (s >= 200 && s < 300)      statusColor = "var(--sev-low, #2ecc71)";
+    else if (s >= 300 && s < 400) statusColor = "var(--sev-info, #5d8aa8)";
+    else if (s >= 400 && s < 500) statusColor = "var(--sev-medium, #e67e22)";
+    else if (s >= 500)            statusColor = "var(--sev-high, #c0392b)";
+
+    let html = '';
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; ';
+    html +=   ' border-radius:4px; background:' + statusColor + '; ';
+    html +=   ' color:#fff; font-weight:600">HTTP ' +
+                escapeHTML(String(d.status)) + '</span>';
+    html +=   ' <code style="margin-left:.5em">' +
+                escapeHTML(d.method) + ' ' + escapeHTML(d.url) + '</code>';
+    html +=   ' <span class="muted small" style="margin-left:.5em">' +
+                escapeHTML(String(d.elapsed_ms)) + ' ms · ' +
+                escapeHTML(formatBytes(d.body_size)) +
+                (d.body_truncated ? ' (truncated)' : '') +
+              '</span>';
+    html += '</p>';
+    if (d.indicator) {
+      html += '<p class="muted small" style="margin:.2em 0 .8em">';
+      html +=   '<strong>Look for:</strong> ' + escapeHTML(d.indicator);
+      html += '</p>';
+    }
+    // Headers table
+    if (d.headers && d.headers.length) {
+      html += '<h4 style="margin:.4em 0 .3em">Response headers</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; ';
+      html +=        ' font-size:.88em; margin-bottom:.6em">';
+      html += '<tbody>';
+      const BANNER_HEADERS = /^(server|x-powered-by|x-frame-options|strict-transport-security|content-security-policy|set-cookie|location)$/i;
+      for (const [k, v] of d.headers) {
+        const isBanner = BANNER_HEADERS.test(k);
+        html += '<tr style="border-top:1px solid var(--border, #333)">';
+        html += '<td style="padding:.2em .5em; vertical-align:top; ';
+        html +=    ' width:18em; color:' +
+                   (isBanner ? "var(--accent, #7af)" : "var(--muted, #888)") +
+                   '"><code>' + escapeHTML(k) + '</code></td>';
+        html += '<td style="padding:.2em .5em; word-break:break-all"><code>' +
+                  escapeHTML(v) + '</code></td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+    }
+    // Body with highlights
+    html += '<h4 style="margin:.6em 0 .3em">Response body' +
+            (d.body_truncated ? ' <span class="muted small">(first 256 KB)</span>' : '') +
+            '</h4>';
+    let safeBody = escapeHTML(d.body || "");
+    safeBody = highlightTerms(safeBody, d.highlights || []);
+    html += '<pre class="log" style="margin:0; padding:.8em; max-height:30em; ';
+    html +=          ' overflow:auto; white-space:pre-wrap; word-break:break-word">' +
+              safeBody + '</pre>';
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'No state was modified — request sent with no auth cookie, ' +
+            'GET/HEAD only, scope locked to the assessment FQDN.</p>';
+    return html;
+  }
+
+  function formatBytes(n) {
+    n = Number(n || 0);
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  // Cert-info renderer. Shown when the Test button fires against a
+  // cert/SSL-flavoured finding (Nikto wildcard cert notice etc.).
+  // Surfaces the structured fields openssl x509 -text returns plus
+  // the handshake's negotiated protocol + cipher.
+  function renderTlsInfoBody(d) {
+    let html = '';
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; ';
+    html +=         'border-radius:4px; background:var(--accent, #5d8aa8); ';
+    html +=         'color:#fff; font-weight:600">TLS handshake</span>';
+    html +=   ' <span class="muted small">' +
+                escapeHTML(String(d.elapsed_ms)) + ' ms · target ' +
+                '<code>' + escapeHTML(d.host) + ':' +
+                escapeHTML(String(d.port)) + '</code></span>';
+    html += '</p>';
+    html += '<table style="width:100%; border-collapse:collapse; ';
+    html +=        'font-size:.9em; margin:.4em 0 .6em">';
+    html += '<tbody>';
+    const rows = [
+      ["Protocol",            d.protocol],
+      ["Cipher",              d.cipher],
+      ["Verification",        d.verification],
+      ["Subject",             d.cert && d.cert.subject],
+      ["Issuer",              d.cert && d.cert.issuer],
+      ["Subject Alt. Name",   d.cert && d.cert.san],
+      ["Not Before",          d.cert && d.cert.not_before],
+      ["Not After",           d.cert && d.cert.not_after],
+      ["Public Key",          d.cert && d.cert.public_key_algorithm],
+      ["Signature Algorithm", d.cert && d.cert.signature_algorithm],
+      ["Serial",              d.cert && d.cert.serial],
+      ["Cert chain length",   d.chain_count],
+    ];
+    for (const [label, value] of rows) {
+      if (!value && value !== 0) continue;
+      html += '<tr style="border-top:1px solid var(--border, #333)">';
+      html += '<td style="padding:.25em .55em; vertical-align:top; ';
+      html +=    'width:14em; color:var(--muted, #888)">' +
+                  escapeHTML(label) + '</td>';
+      html += '<td style="padding:.25em .55em; word-break:break-all">' +
+                '<code>' + escapeHTML(String(value)) + '</code></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+    html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; ';
+    html +=        'overflow:auto; white-space:pre-wrap; word-break:break-all">' +
+                   escapeHTML(d.command || "") + '</pre>';
+    if (d.x509_text_excerpt) {
+      html += '<details style="margin-top:.8em"><summary class="muted" ' +
+              'style="cursor:pointer">Raw <code>openssl x509 -text</code> output</summary>';
+      html += '<pre class="log" style="margin:.4em 0; padding:.6em; ' +
+              'max-height:25em; overflow:auto; white-space:pre-wrap; ' +
+              'word-break:break-word">' + escapeHTML(d.x509_text_excerpt) +
+              '</pre>';
+      html += '</details>';
+    }
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'TLS handshake only — no application-layer request was sent. ' +
+            'TLS verification is disabled to handle self-signed test certs ' +
+            'the same way the original DAST tools do.</p>';
+    return html;
+  }
+
+  // TLS test renderer. Driven by the JSON the /test endpoint returns
+  // when source_tool==testssl: command, flag, matched testssl.sh rows,
+  // verdict, stdout excerpt. The verdict heuristic is server-side; the
+  // analyst still reads the rows and makes the final call.
+  function renderTlsTestBody(d) {
+    let badge, badgeColor;
+    if (d.verdict === "reproduced")          { badge = "✓ Reproduced";       badgeColor = "var(--sev-high, #c0392b)"; }
+    else if (d.verdict === "not_reproduced") { badge = "✗ Not reproduced";   badgeColor = "var(--sev-low, #2ecc71)"; }
+    else                                     { badge = "— Inconclusive";    badgeColor = "var(--muted, #888)"; }
+
+    let html = '';
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; ';
+    html +=         'border-radius:4px; background:' + badgeColor + '; ';
+    html +=         'color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+    html +=   ' <span class="muted small">testssl.sh ' +
+                escapeHTML(d.flag || "") + ' (' + escapeHTML(d.flag_label || "") +
+                ') · ' + escapeHTML(String(d.elapsed_ms)) + ' ms · target ' +
+                '<code>' + escapeHTML(d.host) + ':' +
+                escapeHTML(String(d.port)) + '</code></span>';
+    html += '</p>';
+
+    html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+    html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; ';
+    html +=        'overflow:auto; white-space:pre-wrap; word-break:break-all">' +
+                   escapeHTML(d.command || "") + '</pre>';
+
+    if (d.matched_rows && d.matched_rows.length) {
+      html += '<h4 style="margin:.8em 0 .3em">testssl.sh result rows</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:.88em">';
+      html += '<thead><tr style="text-align:left">';
+      html +=   '<th style="padding:.25em .5em">Check ID</th>';
+      html +=   '<th style="padding:.25em .5em">Severity</th>';
+      html +=   '<th style="padding:.25em .5em">Finding</th>';
+      html +=   '<th style="padding:.25em .5em">CWE</th>';
+      html += '</tr></thead><tbody>';
+      for (const r of d.matched_rows) {
+        const sev = (r.severity || "").toUpperCase();
+        let sevColor = "var(--muted, #888)";
+        if (sev === "CRITICAL")     sevColor = "#c0392b";
+        else if (sev === "HIGH")    sevColor = "#e67e22";
+        else if (sev === "MEDIUM")  sevColor = "#f1c40f";
+        else if (sev === "LOW")     sevColor = "#3498db";
+        else if (sev === "OK" || sev === "INFO") sevColor = "#2ecc71";
+        const isMatch = (r.id || "") === (d.testssl_id || "");
+        html += '<tr style="border-top:1px solid var(--border, #333); ' +
+                  (isMatch ? 'background:rgba(255,245,157,0.08)' : '') + '">';
+        html += '<td style="padding:.3em .5em"><code>' +
+                  escapeHTML(r.id || "") + '</code></td>';
+        html += '<td style="padding:.3em .5em"><span style="color:' + sevColor +
+                  '; font-weight:600">' + escapeHTML(r.severity || "") + '</span></td>';
+        html += '<td style="padding:.3em .5em">' + escapeHTML(r.finding || "") + '</td>';
+        html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.cwe || "") + '</code></td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      html += '<p class="muted small" style="margin-top:.4em">' +
+              'Highlighted row is the original check id (<code>' +
+              escapeHTML(d.testssl_id || "") + '</code>) from this finding.</p>';
+    } else {
+      html += '<p class="warn" style="margin-top:.6em">' +
+              'testssl.sh produced no rows for this run. Exit code: <code>' +
+              escapeHTML(String(d.exit_code)) + '</code>.</p>';
+    }
+
+    if (d.stdout_excerpt && d.stdout_excerpt.trim()) {
+      html += '<details style="margin-top:.8em"><summary class="muted" ' +
+              'style="cursor:pointer">Raw testssl.sh output</summary>';
+      html += '<pre class="log" style="margin:.4em 0; padding:.6em; ' +
+              'max-height:25em; overflow:auto; white-space:pre-wrap; ' +
+              'word-break:break-word">' + escapeHTML(d.stdout_excerpt) + '</pre>';
+      html += '</details>';
+    }
+
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'No payloads or destructive ciphers were sent — testssl.sh runs in ' +
+            'read-only mode against the configured target.</p>';
+    return html;
+  }
+
+  // Nuclei test result renderer — same layout as renderTlsTestBody but
+  // with nuclei-shaped columns (template id, matcher name, matched-at,
+  // and any extracted-results values).
+  function renderNucleiTestBody(d) {
+    let badge, badgeColor;
+    if (d.verdict === "reproduced")          { badge = "✓ Reproduced";      badgeColor = "var(--sev-high, #c0392b)"; }
+    else if (d.verdict === "not_reproduced") { badge = "✗ Not reproduced";  badgeColor = "var(--sev-low, #2ecc71)"; }
+    else                                      { badge = "— Inconclusive";   badgeColor = "var(--muted, #888)"; }
+    let html = "";
+    html += '<p style="margin:0 0 .4em">';
+    html +=   '<span style="display:inline-block; padding:.15em .55em; border-radius:4px; background:' +
+              badgeColor + '; color:#fff; font-weight:600">' + escapeHTML(badge) + '</span>';
+    html +=   ' <span class="muted small">nuclei <code>-id ' +
+              escapeHTML(d.template_id || "") + '</code> · ' +
+              escapeHTML(String(d.elapsed_ms)) + ' ms · target <code>' +
+              escapeHTML(d.host) + ':' + escapeHTML(String(d.port)) + '</code></span>';
+    html += '</p>';
+    html += '<h4 style="margin:.6em 0 .3em">Command run</h4>';
+    html += '<pre class="log" style="margin:0; padding:.6em; max-height:7em; ' +
+            'overflow:auto; white-space:pre-wrap; word-break:break-all">' +
+            escapeHTML(d.command || "") + '</pre>';
+    if (d.matched_rows && d.matched_rows.length) {
+      html += '<h4 style="margin:.8em 0 .3em">nuclei matched events</h4>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:.88em">';
+      html += '<thead><tr style="text-align:left">' +
+              '<th style="padding:.25em .5em">Template</th>' +
+              '<th style="padding:.25em .5em">Severity</th>' +
+              '<th style="padding:.25em .5em">Matcher</th>' +
+              '<th style="padding:.25em .5em">Finding</th>' +
+              '<th style="padding:.25em .5em">Matched at</th>' +
+              '</tr></thead><tbody>';
+      for (const r of d.matched_rows) {
+        const sev = (r.severity || "").toUpperCase();
+        let sevColor = "var(--muted, #888)";
+        if (sev === "CRITICAL")     sevColor = "#c0392b";
+        else if (sev === "HIGH")    sevColor = "#e67e22";
+        else if (sev === "MEDIUM")  sevColor = "#f1c40f";
+        else if (sev === "LOW")     sevColor = "#3498db";
+        else if (sev === "INFO")    sevColor = "#2ecc71";
+        const isMatch = (r.matcher_name || "") &&
+                        (r.matcher_name || "") === (d.matcher_name || "");
+        html += '<tr style="border-top:1px solid var(--border, #333); ' +
+                  (isMatch ? 'background:rgba(255,245,157,0.08)' : '') + '">';
+        html += '<td style="padding:.3em .5em"><code>' + escapeHTML(r.id || "") + '</code></td>';
+        html += '<td style="padding:.3em .5em"><span style="color:' + sevColor +
+                '; font-weight:600">' + escapeHTML(r.severity || "") + '</span></td>';
+        html += '<td style="padding:.3em .5em"><code>' +
+                escapeHTML(r.matcher_name || "") + '</code></td>';
+        html += '<td style="padding:.3em .5em">' + escapeHTML(r.finding || "") + '</td>';
+        html += '<td style="padding:.3em .5em; word-break:break-all"><code>' +
+                escapeHTML(r.matched_at || "") + '</code></td>';
+        html += '</tr>';
+        if (r.extracted_results && r.extracted_results.length) {
+          html += '<tr><td colspan="5" style="padding:.1em .5em .35em 1.5em" ' +
+                  'class="muted small">extracted: <code>' +
+                  escapeHTML(r.extracted_results.join(", ")) + '</code></td></tr>';
+        }
+      }
+      html += '</tbody></table>';
+      if (d.matcher_name) {
+        html += '<p class="muted small" style="margin-top:.4em">' +
+                'Highlighted row is the original matcher (<code>' +
+                escapeHTML(d.matcher_name) + '</code>) from this finding.</p>';
+      }
+    } else {
+      html += '<p class="warn" style="margin-top:.6em">' +
+              'nuclei produced no matched events for template <code>' +
+              escapeHTML(d.template_id || "") +
+              '</code>. Exit code: <code>' +
+              escapeHTML(String(d.exit_code)) +
+              '</code> — the matcher likely no longer fires.</p>';
+    }
+    if (d.stderr_excerpt && d.stderr_excerpt.trim()) {
+      html += '<details style="margin-top:.8em"><summary class="muted" ' +
+              'style="cursor:pointer">nuclei stderr</summary>';
+      html += '<pre class="log" style="margin:.4em 0; padding:.6em; ' +
+              'max-height:18em; overflow:auto; white-space:pre-wrap; ' +
+              'word-break:break-word">' + escapeHTML(d.stderr_excerpt) + '</pre>';
+      html += '</details>';
+    }
+    html += '<p class="muted small" style="margin-top:.6em">' +
+            'Single-template, single-target nuclei run — no broader scan was triggered.</p>';
+    return html;
+  }
+
+  // Wrap matches in <mark>. Input is already HTML-escaped so we work
+  // on the escaped string and search for escaped versions of each term.
+  function highlightTerms(escapedHtml, terms) {
+    if (!terms || !terms.length) return escapedHtml;
+    let out = escapedHtml;
+    const seen = new Set();
+    for (const raw of terms) {
+      if (!raw) continue;
+      const t = escapeHTML(raw);
+      if (seen.has(t)) continue;
+      seen.add(t);
+      const safeRe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      try {
+        out = out.replace(new RegExp(safeRe, "gi"),
+          (m) => '<mark style="background:#fff59d; color:#000">' + m + '</mark>');
+      } catch (_) { /* invalid regex — skip */ }
+    }
+    return out;
+  }
+
+  // Restore selection from location.hash on first paint, or auto-select
+  // the first row if there's no hash. Lets a fresh visit immediately
+  // show something useful instead of an empty middle column.
+  document.addEventListener("DOMContentLoaded", () => {
+    const m = location.hash.match(/^#finding-(\d+)$/);
+    let target = null;
+    if (m) {
+      target = document.querySelector(`.fw-item[data-id="${m[1]}"]`);
+    }
+    if (!target) {
+      target = document.querySelector(".fw-item");
+    }
+    if (target) loadFinding(target.dataset.id, target);
+  });
+</script>
+
+{% if a.status not in ('done','error','cancelled') %}
+<script>
+  // While the assessment is still running, poll the status endpoint and
+  // reload the page once it transitions to a terminal state. This keeps
+  // the workspace in sync with newly-arrived findings without forcing
+  // the operator to refresh manually.
+  async function pollStatus() {
+    try {
+      const r = await fetch(BASE + "/assessment/{{ a.id }}/status");
+      const j = await r.json();
+      const stEl = document.getElementById("status");
+      if (stEl) { stEl.textContent = j.status; stEl.className = "badge " + j.status; }
+      const stepEl = document.getElementById("step");
+      if (stepEl) stepEl.textContent = j.current_step || "";
+      if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
+        window.location.reload();
+      }
+    } catch (e) {}
+  }
+  setInterval(pollStatus, 4000);
+</script>
+{% endif %}
+{% endblock %}

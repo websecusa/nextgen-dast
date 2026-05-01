@@ -1,0 +1,167 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  App shell. Single page chrome that every other template extends.
+
+  Layout: left vertical sidebar (brand, primary CTA, grouped nav, user
+  pill at the bottom) + main content column. The sidebar is sticky so
+  it stays visible while long pages scroll.
+
+  Active-link highlighting compares request.url.path against the entry
+  href; wins for prefix matches so /assessment/<id> still highlights
+  the Assessments item.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}{{ brand.company_name or "nextgen-dast" }}{% endblock %}</title>
+  {# Cache-bust the stylesheet so browsers don't serve a stale theme
+     after a CSS-only redeploy. The query-string value is a build
+     counter (not the docker tag); bump it when style.css meaningfully
+     changes. Has no effect on the served file -- StaticFiles ignores
+     the query string. #}
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260430c">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --accent:   {{ web.primary }};
+      --accent-2: {{ web.accent }};
+      --green:    {{ web.accent }};
+      --sev-critical: {{ web.sev_critical }};
+      --sev-high:     {{ web.sev_high }};
+      --sev-medium:   {{ web.sev_medium }};
+      --sev-low:      {{ web.sev_low }};
+      --sev-info:     {{ web.sev_info }};
+    }
+    body { font-family: {{ web.font|safe }}; }
+    /* Baseline sizing rules for icons + sidebar logo. These are
+       intentionally duplicated from style.css so the page never reads
+       as fully unstyled when the external stylesheet is blocked,
+       stale-cached, or otherwise late-loading. The rest of the look
+       (colors, layout, typography) still depends on style.css; this
+       block exists purely so an unsized inline <svg> can never expand
+       to its 300x150 default and shove the layout off-screen. */
+    .icon { width:16px !important; height:16px !important;
+            flex:0 0 16px; display:inline-block; vertical-align:middle; }
+    aside.sidebar .brand {
+        display:flex; flex-direction:column; align-items:center;
+        gap:.35em; text-align:center; }
+    aside.sidebar .brand img {
+        height:auto !important; max-height:56px !important;
+        width:auto !important; max-width:100% !important;
+        object-fit:contain; flex-shrink:0; display:block; }
+  </style>
+</head>
+<body>
+{% if brand and brand.classification %}
+<div class="classification-banner"
+     style="background: {{ brand.classification_color or '#e87060' }}">
+  {{ brand.classification }}
+</div>
+{% endif %}
+
+{# ----- helper macros --------------------------------------------------- #}
+{# Active-link helper: highlight the nav item whose href matches the
+   current path. Exact match for the dashboard ("/"); prefix match for
+   the rest so /assessment/123 still lights up "Assessments". #}
+{% macro nav_class(target) -%}
+  {% set p = request.url.path -%}
+  {% if base and p.startswith(base) %}{% set p = p[base|length:] or '/' %}{% endif -%}
+  {% if (target == '/' and p == '/') or (target != '/' and p.startswith(target)) -%}
+    active
+  {%- endif %}
+{%- endmacro %}
+
+{# Inline SVG icons. Stroke-only so they pick up the current text color. #}
+{% macro icon(name) -%}
+{% if name == 'home' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 12 4l9 8"/><path d="M5 10v10h14V10"/></svg>
+{% elif name == 'play' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+{% elif name == 'list' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+{% elif name == 'shield' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v6c0 4.5-3.5 8-8 8s-8-3.5-8-8V7z"/></svg>
+{% elif name == 'flow' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M14 6l4 4M4 12h10M14 12l4 4M4 18h10"/></svg>
+{% elif name == 'scan' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V4h3M21 7V4h-3M3 17v3h3M21 17v3h-3M7 12h10"/></svg>
+{% elif name == 'lock' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0v4"/></svg>
+{% elif name == 'sparkles' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg>
+{% elif name == 'browser' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg>
+{% elif name == 'cog' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1A2 2 0 1 1 4.3 17l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1A2 2 0 1 1 7 4.3l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1A2 2 0 1 1 19.7 7l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+{% elif name == 'key' %}<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="4"/><path d="M12 12h10M18 12v3M22 12v3"/></svg>
+{% endif %}
+{%- endmacro %}
+
+<div class="app">
+  <aside class="sidebar">
+    {# Sidebar logo. The dedicated web logo (web_header_logo_filename) wins
+       when set; we fall back to the legacy PDF header logo so a single
+       uploaded image still works for users who haven't migrated. #}
+    <a href="{{ base }}/" class="brand">
+      {# Inline style on the <img> so a wide / tall uploaded logo cannot
+         overflow the sidebar even if the external stylesheet is blocked
+         or stale. The stylesheet rule (style.css :: aside.sidebar .brand img)
+         still wins when it loads — these inline values are a hard floor. #}
+      {% if brand and brand.web_header_logo_filename %}
+        <img src="{{ base }}/branding/logo/web_header" alt="" width="22" height="22"
+             style="max-height:56px; max-width:100%; width:auto; height:auto;
+                    object-fit:contain; flex-shrink:0; display:block">
+      {% elif brand and brand.header_logo_filename %}
+        <img src="{{ base }}/branding/logo/header" alt="" width="22" height="22"
+             style="max-height:56px; max-width:100%; width:auto; height:auto;
+                    object-fit:contain; flex-shrink:0; display:block">
+      {% endif %}
+      <span>{{ brand.company_name or "nextgen-dast" }}</span>
+    </a>
+
+    <a href="{{ base }}/assess" class="cta">
+      {{ icon('play') }} New assessment
+    </a>
+
+    <div class="nav-section">Platform</div>
+    <nav>
+      <a href="{{ base }}/"            class="{{ nav_class('/') }}">{{ icon('home') }}<span>Overview</span></a>
+      <a href="{{ base }}/assessments" class="{{ nav_class('/assessment') }}">{{ icon('shield') }}<span>Assessments</span></a>
+      <a href="{{ base }}/schedules"   class="{{ nav_class('/schedule') }}">{{ icon('list') }}<span>Schedules</span></a>
+      <a href="{{ base }}/scan"        class="{{ nav_class('/scan') }}">{{ icon('scan') }}<span>Scans</span></a>
+      <a href="{{ base }}/flows"       class="{{ nav_class('/flow') }}">{{ icon('flow') }}<span>Flows</span></a>
+      <a href="{{ base }}/proxy"       class="{{ nav_class('/proxy') }}">{{ icon('browser') }}<span>Proxy</span></a>
+    </nav>
+
+    <div class="nav-section">Configuration</div>
+    <nav>
+      <a href="{{ base }}/auth"        class="{{ nav_class('/auth') }}">{{ icon('lock') }}<span>Auth</span></a>
+      <a href="{{ base }}/llm"         class="{{ nav_class('/llm') }}">{{ icon('sparkles') }}<span>LLM</span></a>
+      <a href="{{ base }}/user-agents" class="{{ nav_class('/user-agents') }}">{{ icon('list') }}<span>User-Agents</span></a>
+    </nav>
+
+    {% if is_admin %}
+    <div class="nav-section">Admin</div>
+    <nav>
+      <a href="{{ base }}/admin"             class="{{ nav_class('/admin') }}">{{ icon('cog') }}<span>Settings</span></a>
+      <a href="{{ base }}/admin/api-tokens"  class="{{ nav_class('/admin/api-tokens') }}">{{ icon('key') }}<span>API tokens</span></a>
+    </nav>
+    {% endif %}
+
+    <div class="sidebar-footer">
+      {% if user %}
+        <div class="user-pill">
+          <div class="avatar">{{ user.username[0]|upper }}</div>
+          <div>
+            <div class="username">{{ user.username }}</div>
+            <div class="role">{{ user.role }}</div>
+          </div>
+        </div>
+        <form class="signout" method="post" action="{{ base }}/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Sign out</button>
+        </form>
+      {% endif %}
+      <div class="build-tag">nextgen-dast 2.1.1</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

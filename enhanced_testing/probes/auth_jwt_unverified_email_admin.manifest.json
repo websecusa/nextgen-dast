@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_jwt_unverified_email_admin",
+  "version": "1.0",
+  "summary": "Re-runs the alg=none-with-admin-email probe — concrete admin account takeover via unverified JWT.",
+  "validates": [
+    "CWE-347",
+    "CWE-287",
+    "CWE-345"
+  ],
+  "matches_titles": [
+    "auth_jwt_unverified_email_admin",
+    "jwt forgery",
+    "alg none admin"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--admin-email": "Additional admin email to forge (repeatable)",
+    "--whoami-path": "Additional whoami path (repeatable)"
+  }
+}

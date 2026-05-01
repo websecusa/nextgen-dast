@@ -1,0 +1,627 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ brand.company_name or 'nextgen-dast' }} — Penetration Test Report — {{ a.fqdn }}</title>
+<style>
+  /* ---- Page rules ----------------------------------------------------- */
+  @page {
+    size: letter;
+    margin: 0.9in 0.75in 1in 0.75in;
+    @top-left {
+      content: "{{ brand.classification or 'CONFIDENTIAL' }}";
+      font-family: 'Liberation Sans', sans-serif;
+      font-size: 8pt;
+      letter-spacing: 0.08em;
+      color: {{ brand.classification_color or '#bb3333' }};
+      font-weight: 700;
+    }
+    @top-right {
+      content: "{{ brand.company_name or 'nextgen-dast' }} — {{ a.fqdn }}";
+      font-family: 'Liberation Sans', sans-serif;
+      font-size: 8pt;
+      color: #555;
+    }
+    @bottom-center {
+      content: "Page " counter(page) " of " counter(pages);
+      font-family: 'Liberation Sans', sans-serif;
+      font-size: 8pt;
+      color: #777;
+    }
+    @bottom-left {
+      content: "{{ brand.footer_text or '' }}";
+      font-family: 'Liberation Sans', sans-serif;
+      font-size: 8pt;
+      color: #777;
+    }
+    @bottom-right {
+      content: "Report {{ report_id }}";
+      font-family: 'Liberation Sans', sans-serif;
+      font-size: 8pt;
+      color: #777;
+    }
+  }
+  @page cover {
+    margin: 0;
+    @top-left { content: ""; }
+    @top-right { content: ""; }
+    @bottom-center { content: ""; }
+    @bottom-left { content: ""; }
+    @bottom-right { content: ""; }
+  }
+  @page toc-page {
+    @top-left { content: "{{ brand.classification or 'CONFIDENTIAL' }}"; color: {{ brand.classification_color or '#bb3333' }}; font-weight:700; font-size:8pt; letter-spacing:.08em; }
+  }
+
+  /* ---- Base type ------------------------------------------------------ */
+  html, body { font-family: {{ pdf.font|safe }};
+               font-size: 10pt; color: {{ pdf.body }}; line-height: 1.45; }
+  h1 { color: {{ pdf.header }}; font-size: 22pt;
+       margin: 0 0 .3em; page-break-after: avoid; }
+  h2 { color: {{ pdf.header }}; font-size: 15pt;
+       border-bottom: 2px solid {{ pdf.header }};
+       padding-bottom: .2em; margin-top: 1.6em; margin-bottom: .8em;
+       page-break-after: avoid; }
+  h3 { font-size: 12pt; color: {{ pdf.header }}; margin-top: 1em; margin-bottom: .3em; }
+  p, ul, ol { margin: .4em 0; }
+  code, pre { font-family: 'DejaVu Sans Mono', monospace; font-size: 9pt; }
+  pre { background: #f3f5f8; border: 1px solid #dde2eb; border-radius: 4px;
+        padding: .6em .8em; white-space: pre-wrap; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; margin: .8em 0; }
+  th, td { border: 1px solid #dde2eb; padding: .4em .6em; text-align: left; vertical-align: top; }
+  th { background: #f3f5f8; font-weight: 700; font-size: 9pt; }
+  /* Print-friendly hyperlink color, decoupled from brand.primary_color
+     (which doubles as the cover-page background and may be set to a
+     pale or grey tone that makes link text hard to read). pdf.link
+     defaults to Wikipedia's #0645ad — a readable blue that stays
+     legible on a black-and-white printout — but admins can override
+     it from the PDF branding page. The underline keeps the link
+     recognizable as such regardless of color. */
+  a { color: {{ pdf.link }}; text-decoration: underline; }
+
+  /* ---- Cover ---------------------------------------------------------- */
+  .cover { page: cover; height: 100vh; padding: 0; margin: 0; position: relative;
+           background: {{ brand.primary_color or '#5fb3d7' }};
+           color: {{ pdf.cover_text }}; page-break-after: always; }
+  /* Flex column: brand at top, report title in the middle, meta at bottom.
+     No absolute positioning — keeps long FQDNs from overrunning the meta row. */
+  .cover .inner { padding: 1.2in 0.9in; min-height: calc(100vh - 2.4in);
+                  display: flex; flex-direction: column; position: relative; }
+  .cover .brand-block { /* natural-height top section */ }
+  .cover .title-block { margin-top: 1.2in; }
+  .cover .logo { max-height: 1.2in; max-width: 5in; margin-bottom: 1em; }
+  .cover h1 { color: {{ pdf.cover_text }}; font-size: 32pt; margin: .2em 0; border: 0; }
+  .cover .tagline { font-size: 14pt; opacity: .85; margin: .2em 0 0;
+                    font-style: italic; font-weight: 300; }
+  .cover .report-title { color: {{ pdf.cover_text }}; font-size: 24pt; border: 0;
+                         margin: 0 0 .3em; font-weight: 700; }
+  .cover .target { font-size: 16pt; opacity: .9; margin: 0;
+                   word-break: break-word; }
+  /* margin-top:auto pushes the meta block to the bottom of the flex column,
+     guaranteeing the divider sits below all the title content. The divider
+     is the cover_text color at 40% opacity so it always reads against the bg. */
+  .cover .meta { margin-top: auto; padding-top: 1em;
+                 border-top: 1px solid {{ pdf.cover_text_rule }}; }
+  .cover .meta dl { display: grid; grid-template-columns: max-content 1fr; gap: .3em 1.5em; }
+  .cover .meta dt { opacity: .7; font-size: 9pt; text-transform: uppercase; letter-spacing: .08em; }
+  .cover .meta dd { margin: 0; word-break: break-word; }
+  /* Classification badge has its own foreground — independent of the cover
+     text color — so a dark cover_text + dark classification background can't
+     accidentally produce a black-on-black badge. White is safe on any
+     classification color we'd reasonably ship (red/black/orange). */
+  .cover .classif { position: absolute; top: 0.6in; right: 0.9in;
+                    background: {{ brand.classification_color or '#bb3333' }};
+                    color: #fff;
+                    padding: .2em .8em; font-weight: 700; letter-spacing: .08em; }
+
+  /* Severity inline labels read in body color — severity is conveyed by
+     finding-card border-left and heat-map cells, not by the label text.
+     Heat-map cells override `color` inline (white on a colored cell), so
+     the body-color default here doesn't fight the visualization. */
+  .sev { display: inline; font-weight: 700; font-size: 8.5pt;
+         text-transform: uppercase; letter-spacing: .04em;
+         color: {{ pdf.body }}; }
+  .sev-critical, .sev-high, .sev-medium, .sev-low, .sev-info {
+         color: {{ pdf.body }}; }
+
+  /* On individual finding cards the severity is the lead signal — read
+     it before the title. Render it noticeably larger than the title and
+     in the per-severity palette so it pops without depending on the
+     left border alone. We scope these overrides to .finding so the
+     smaller inline .sev usage in the heat-map / executive summary
+     keeps its compact form. */
+  .finding .sev-label { display: block; font-size: 14pt;
+                        font-weight: 800; letter-spacing: .06em;
+                        text-transform: uppercase; line-height: 1;
+                        margin-bottom: .15em; }
+  .finding .sev-label.sev-critical { color: {{ pdf.sev_critical }}; }
+  .finding .sev-label.sev-high     { color: {{ pdf.sev_high }}; }
+  .finding .sev-label.sev-medium   { color: {{ pdf.sev_medium }}; }
+  .finding .sev-label.sev-low      { color: {{ pdf.sev_low }}; }
+  .finding .sev-label.sev-info     { color: {{ pdf.sev_info }}; }
+  /* Title sits below the severity, in body color, smaller than the
+     severity by design so the eye lands on the severity first. */
+  .finding .finding-title { font-size: 11pt; font-weight: 700;
+                            color: {{ pdf.body }}; }
+
+  /* ---- Modern scorecard ---------------------------------------------- */
+  /* `gap` between flex items + an explicit margin-left on the right
+     column give the prose room to breathe next to the grade tile.
+     Without this the body copy hugs the tile border and looks cramped
+     in print, especially on the Overall-grade row. */
+  .scorecard { display: flex; gap: 1.6em; align-items: stretch;
+               page-break-inside: avoid; margin: 1.2em 0 1.6em; }
+  .scorecard .grade-tile { flex: 0 0 2.4in; padding: 1em 1.2em;
+                            border-radius: 8pt; border: 2pt solid #dde2eb;
+                            text-align: center; }
+  .scorecard .grade-tile .label { color: #6c757d; font-size: 9pt;
+                                   text-transform: uppercase;
+                                   letter-spacing: .08em; margin-bottom: .2em; }
+  .scorecard .grade-tile .grade { font-size: 72pt; font-weight: 800;
+                                   line-height: 1; margin: 0; }
+  .scorecard .grade-tile .score { font-size: 11pt; color: #555;
+                                   margin-top: .4em; }
+  .scorecard .right { flex: 1; padding: .2em 0 .2em .6em; }
+  .scorecard .sev-row { display: flex; gap: .4em; margin-top: .3em; }
+  .scorecard .sev-row .pip { flex: 1; border: 1px solid #dde2eb;
+                              border-radius: 4pt; padding: .5em;
+                              text-align: center; }
+  .scorecard .sev-row .pip .n { font-size: 16pt; font-weight: 700; }
+  .scorecard .sev-row .pip .lbl { font-size: 7.5pt;
+                                   text-transform: uppercase;
+                                   letter-spacing: .06em; }
+
+  /* ---- Heat map ------------------------------------------------------- */
+  table.heatmap { border-collapse: separate; border-spacing: 2pt;
+                  width: 100%; }
+  table.heatmap th, table.heatmap td { border: 0; padding: .5em .6em; }
+  table.heatmap thead th { background: #f3f5f8; font-size: 8.5pt;
+                            text-transform: uppercase; letter-spacing: .06em;
+                            color: #6c757d; text-align: center; }
+  table.heatmap td.cat { text-align: left; font-size: 9pt;
+                          color: #1f2630; background: #f8f9fb;
+                          font-weight: 600; }
+  table.heatmap td.heat { text-align: center; font-weight: 600;
+                           font-size: 10pt; border-radius: 3pt; }
+  table.heatmap td.heat.zero { color: #c8cfd9; background: #f8f9fb; }
+
+  /* ---- Per-category grade row ---------------------------------------- */
+  .cat-grades { display: grid; grid-template-columns: repeat(5, 1fr);
+                 gap: .6em; margin: .8em 0 1.6em; page-break-inside: avoid; }
+  .cat-grades .ct { padding: .6em .8em; border-radius: 4pt;
+                     border: 1px solid #dde2eb; }
+  .cat-grades .ct .lbl { font-size: 7.5pt; color: #6c757d;
+                          text-transform: uppercase; letter-spacing: .04em;
+                          margin-bottom: .2em; }
+  .cat-grades .ct .row { display: flex; align-items: baseline;
+                          justify-content: space-between; }
+  .cat-grades .ct .g { font-size: 18pt; font-weight: 800; line-height: 1; }
+  .cat-grades .ct .num { font-size: 9pt; color: #555; }
+
+  /* ---- Severity rollup tiles ----------------------------------------- */
+  .rollup { display: flex; gap: .6em; margin: 1em 0 1.2em; }
+  .rollup .tile { flex: 1; padding: .8em; border: 1px solid #dde2eb;
+                  border-radius: 4px; text-align: center; }
+  .rollup .tile .n { font-size: 22pt; font-weight: 700; }
+
+  /* ---- Finding card --------------------------------------------------- */
+  .finding { border: 1px solid #dde2eb; border-radius: 6px; padding: 1em 1.2em;
+             margin-bottom: 1.4em; page-break-inside: avoid;
+             border-left: 4px solid #6c757d; }
+  .finding.sev-critical { border-left-color: #6b1f1f; }
+  .finding.sev-high     { border-left-color: #c0392b; }
+  .finding.sev-medium   { border-left-color: #d4a017; }
+  .finding.sev-low      { border-left-color: #5fb3d7; }
+  .finding.sev-info     { border-left-color: #6c757d; }
+  .finding h3 { margin: 0 0 .3em; }
+  .finding .meta-row { font-size: 9pt; color: #555; margin-bottom: .6em; }
+  .finding .meta-row .chip { display: inline-block; background: #f3f5f8;
+                              border: 1px solid #dde2eb; padding: 1pt 6pt;
+                              border-radius: 3pt; margin-right: .3em; }
+  .finding pre { font-size: 8.5pt; }
+
+  .muted { color: #6c757d; }
+  .small { font-size: 9pt; }
+  .nowrap { white-space: nowrap; }
+  .pagebreak { page-break-after: always; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- COVER PAGE                                                   -->
+<!-- ============================================================ -->
+<section class="cover">
+  <div class="classif">{{ brand.classification or 'CONFIDENTIAL' }}</div>
+  <div class="inner">
+    <div class="brand-block">
+      {% if brand.header_logo_filename %}
+        <img class="logo" src="branding/{{ brand.header_logo_filename }}" alt="">
+      {% endif %}
+      <h1>{{ brand.company_name or 'nextgen-dast' }}</h1>
+      {% if brand.tagline %}
+        <p class="tagline">{{ brand.tagline }}</p>
+      {% endif %}
+    </div>
+
+    <div class="title-block">
+      <h2 class="report-title">Penetration Test Report</h2>
+      <p class="target">{{ a.fqdn }}</p>
+    </div>
+
+    <div class="meta">
+      <dl>
+        <dt>Report ID</dt>     <dd>{{ report_id }}</dd>
+        <dt>Assessment</dt>    <dd>#{{ a.id }} — profile {{ a.profile }}</dd>
+        <dt>Started</dt>       <dd>{{ a.started_at or a.created_at }}</dd>
+        <dt>Finished</dt>      <dd>{{ a.finished_at or "in progress" }}</dd>
+        <dt>Generated</dt>     <dd>{{ now.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
+        <dt>Risk rating</dt>   <dd>{{ risk_label }} &mdash; overall grade {{ overall_score.grade }} ({{ overall_score.score }}/100)</dd>
+        {% if brand.contact_email %}
+        <dt>Contact</dt>       <dd>{{ brand.contact_email }}</dd>
+        {% endif %}
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- DOCUMENT CONTROL                                              -->
+<!-- ============================================================ -->
+<h2>1. Document control</h2>
+<table>
+  <tr><th>Document</th><td>Penetration test report — {{ a.fqdn }}</td></tr>
+  <tr><th>Classification</th><td>{{ brand.classification or "CONFIDENTIAL" }}</td></tr>
+  <tr><th>Report ID</th><td>{{ report_id }}</td></tr>
+  <tr><th>Generated</th><td>{{ now.strftime("%Y-%m-%d %H:%M UTC") }}</td></tr>
+  <tr><th>Prepared by</th><td>{{ brand.company_name or "nextgen-dast" }}{% if brand.contact_email %} &lt;{{ brand.contact_email }}&gt;{% endif %}</td></tr>
+  <tr><th>Distribution</th><td>Recipients listed in cover sheet only.</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<!-- EXECUTIVE SUMMARY                                             -->
+<!-- ============================================================ -->
+<h2>2. Executive summary</h2>
+
+<!-- Modern scorecard: big letter grade + severity pip row ------------- -->
+<div class="scorecard">
+  <div class="grade-tile" style="border-color: {{ overall_score.color }}">
+    <div class="label">Overall grade</div>
+    <div class="grade" style="color: {{ overall_score.color }}">{{ overall_score.grade }}</div>
+    <div class="score">{{ overall_score.score }} / 100</div>
+  </div>
+  <div class="right">
+    <p style="margin:0 0 .3em; font-size:9pt; color:#6c757d;
+              text-transform:uppercase; letter-spacing:.08em">
+      Findings by severity
+    </p>
+    <div class="sev-row">
+      {% for sev in ['critical','high','medium','low','info'] %}
+        <div class="pip">
+          <div class="n sev sev-{{ sev }}">{{ sev_counts[sev] }}</div>
+          <div class="lbl sev sev-{{ sev }}">{{ sev|capitalize }}</div>
+        </div>
+      {% endfor %}
+    </div>
+    <p style="margin: .8em 0 0; font-size: 9.5pt; color: #555">
+      Validated findings carry {{ '~2.1×' }} the demerit weight of unvalidated
+      ones &mdash; the toolkit's verdict is what drives this grade. Repeat
+      findings inside one OWASP category contribute with diminishing returns
+      (an outdated library with ten CVEs counts heavily once, not ten times),
+      and any single category caps at a fixed share of the overall demerit so
+      one bad bucket cannot dominate the grade.
+      {% if overall_score.coverage_bonus_applied %}
+      A coverage bonus of +{{ overall_score.get('coverage_bonus_points', 3) }}
+      was applied because {{ overall_score.coverage_a_count }} of 10 OWASP
+      categories grade A.
+      {% endif %}
+      {% if overall_score.validation_floor_applied %}
+      With no critical/high findings and no validated medium-severity issue,
+      the grade was floored at C to reflect that no exploitable risk was
+      confirmed.
+      {% endif %}
+      {% if overall_score.exploit_cap_applied %}
+      Exploitability gate: the letter grade was capped at
+      <strong>{{ overall_score.exploit_cap_applied }}</strong>
+      because {{ overall_score.exploit_cap_reason }}. The score number
+      reflects the demerit math; the letter reflects what the toolkit
+      could actually do.
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<!-- Per-OWASP-category mini-grades ----------------------------------- -->
+<h3>2.1 OWASP Top 10 grades</h3>
+<div class="cat-grades">
+  {% for cs in category_scores %}
+    <div class="ct" style="border-left:3pt solid {{ cs.color }}">
+      <div class="lbl">{{ cs.label }}</div>
+      <div class="row">
+        <span class="g" style="color: {{ cs.color }}">{{ cs.grade }}</span>
+        <span class="num">{{ cs.score }} / 100</span>
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+<!-- PQC compliance --------------------------------------------------- -->
+{% if pqc.has_data %}
+<h3>2.2 Post-quantum readiness</h3>
+<p class="muted" style="font-size:9pt; margin: 0 0 .8em">
+  Cryptographic agility against future "store-now-decrypt-later" attacks on
+  TLS sessions. Tested against the same target as the rest of the
+  engagement using <code>testssl.sh</code>. Methodology aligned with
+  IETF X25519+ML-KEM-768 hybrid key exchange.
+</p>
+<div class="scorecard">
+  <div class="grade-tile" style="border-color: {{ pqc.color }}">
+    <div class="label">PQC compliance</div>
+    <div class="grade" style="color: {{ pqc.color }}">{{ pqc.grade }}</div>
+    <div class="score">{{ pqc.score }} / 100</div>
+    {% if pqc.fully_pqc %}
+      <div style="margin-top:.5em; font-size:9pt; color:#2c8a4f; font-weight:700">
+        ✓ Fully quantum-safe — +{{ pqc.bonus }} bonus to overall grade
+      </div>
+    {% endif %}
+  </div>
+  <div class="right">
+    <table style="margin:0; font-size:9.5pt">
+      <thead>
+        <tr>
+          <th style="width:1.6em">&nbsp;</th>
+          <th>Check</th>
+          <th style="text-align:right; width:4em">Weight</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in pqc.checks %}
+        <tr>
+          <td style="text-align:center; font-weight:700; color: {% if c.ok %}#2c8a4f{% else %}#c0392b{% endif %}">
+            {% if c.ok %}✓{% else %}✗{% endif %}
+          </td>
+          <td>
+            <strong>{{ c.name }}</strong>
+            {% if c.detail %}<div class="muted" style="font-size:8.5pt; margin-top:.1em">{{ c.detail }}</div>{% endif %}
+          </td>
+          <td style="text-align:right; color:#6c757d; font-size:9pt">{{ c.weight }} pt</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<h3>2.2 Post-quantum readiness</h3>
+<p class="muted" style="font-size:9.5pt">
+  No <code>testssl</code> scan was included in this assessment, so PQC
+  compliance could not be measured. Re-run with HTTPS scanning enabled
+  to populate this section.
+</p>
+{% endif %}
+
+<!-- Heat map: OWASP × severity --------------------------------------- -->
+<h3>2.3 Heat map — OWASP × severity</h3>
+<p class="muted" style="font-size:9pt; margin: 0 0 .4em">
+  Cell intensity scales with the count in that bucket; cells with zero
+  findings are shown in muted neutral. Used to spot the shape of the
+  engagement at a glance.
+</p>
+<table class="heatmap">
+  <thead>
+    <tr>
+      <th style="text-align:left">Category</th>
+      {% for sev in ['critical','high','medium','low','info'] %}
+        <th class="sev sev-{{ sev }}">{{ sev|capitalize }}</th>
+      {% endfor %}
+      <th style="text-align:center">Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in heat_map %}
+    <tr>
+      <td class="cat">{{ r.label }}</td>
+      {% for c in r.cells %}
+        <td class="heat{% if c.n == 0 %} zero{% endif %}"
+            style="{% if c.n > 0 %}background-color: {{ c.bg }}; color: #fff;{% endif %}">
+          {{ c.n if c.n > 0 else '·' }}
+        </td>
+      {% endfor %}
+      <td style="text-align:center; font-weight:700">{{ r.total }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h3 style="margin-top:1.6em">2.3 Narrative</h3>
+
+{% if a.exec_summary %}
+  <p style="white-space:pre-wrap">{{ a.exec_summary }}</p>
+{% else %}
+  <p>This report documents the results of an authorized penetration test
+  performed against <strong>{{ a.fqdn }}</strong> using the
+  <strong>{{ a.profile }}</strong> assessment profile. Testing combined
+  active scanning ({% for sid in scan_ids %}{{ sid }}{{ ", " if not loop.last }}{% endfor %})
+  with proxy-captured request and response inspection.
+  {% if a.creds_username %}
+  Authenticated tests were performed using credentials supplied for the
+  <code>{{ a.creds_username }}</code> account.
+  {% else %}
+  No application credentials were supplied; results reflect the surface
+  exposed to an unauthenticated attacker.
+  {% endif %}
+  </p>
+  <p>The overall risk rating for this engagement is
+    <strong><span class="sev sev-{{ risk_label|lower }}">{{ risk_label }}</span></strong>,
+    derived from a severity-weighted finding count of {{ risk_score }}/100. The
+    overall posture grade ({{ overall_score.grade }} &mdash; {{ overall_score.score }}/100)
+    reflects the demerit math described in section 2 and is the headline number
+    on the executive scorecard; the rating above is a complementary view of
+    finding volume.
+  </p>
+{% endif %}
+
+<h3>2.1 Findings by severity</h3>
+<div class="rollup">
+  {% for sev in ['critical','high','medium','low','info'] %}
+  <div class="tile">
+    <div class="sev sev-{{ sev }}">{{ sev|capitalize }}</div>
+    <div class="n">{{ sev_counts[sev] }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if findings|selectattr("severity", "in", ["critical", "high"])|list %}
+<h3>2.2 Top issues</h3>
+<ol>
+  {% for f in findings if f.severity in ('critical','high') %}
+  <li>
+    <span class="sev sev-{{ f.severity }}">{{ f.severity }}</span>
+    <strong>{{ f.title }}</strong>
+    {% if f.evidence_url %} — <code>{{ f.evidence_url|truncate(80) }}</code>{% endif %}
+  </li>
+  {% if loop.index >= 8 %}{% break %}{% endif %}
+  {% endfor %}
+</ol>
+{% endif %}
+
+<div class="pagebreak"></div>
+
+<!-- ============================================================ -->
+<!-- SCOPE & METHODOLOGY                                           -->
+<!-- ============================================================ -->
+<h2>3. Scope &amp; methodology</h2>
+
+<h3>3.1 In scope</h3>
+<table>
+  <tr><th>Target</th><td><code>{{ a.fqdn }}</code></td></tr>
+  <tr><th>Schemes</th>
+    <td>
+      {% if a.scan_http %}<code>http://{{ a.fqdn }}</code>{% endif %}
+      {% if a.scan_http and a.scan_https %} &amp; {% endif %}
+      {% if a.scan_https %}<code>https://{{ a.fqdn }}</code>{% endif %}
+    </td>
+  </tr>
+  <tr><th>Profile</th><td>{{ a.profile }}</td></tr>
+  <tr><th>Authenticated</th>
+    <td>
+      {% if a.creds_username %}Yes — account <code>{{ a.creds_username }}</code>
+        {% if a.login_url %} via <code>{{ a.login_url }}</code>{% endif %}
+      {% else %}No (unauthenticated){% endif %}
+    </td>
+  </tr>
+  <tr><th>Window</th><td>{{ a.started_at or a.created_at }} — {{ a.finished_at or "ongoing" }}</td></tr>
+</table>
+
+<h3>3.2 Tools used</h3>
+<ul>
+  {% set tools_used = findings|map(attribute='source_tool')|unique|list %}
+  {% for t in tools_used %}<li><code>{{ t }}</code></li>{% endfor %}
+  <li>mitmproxy (per-scan request/response capture)</li>
+  {# The validation toolkit (probes under /app/toolkit/probes) drives the
+     Challenge / re-test workflow. The probes are short Python scripts
+     orchestrated from Bash and they speak HTTP via curl-equivalent
+     calls (urllib in-process, plus shell-out to curl for any out-of-
+     band checks). Listed individually so the report names everything
+     that touched the target. #}
+  <li>Python (validation toolkit — htaccess_bypass, info_disclosure, sqli_boolean, xss_reflect)</li>
+  <li>curl (validation toolkit HTTP fetch + audit reproductions)</li>
+  <li>bash (orchestration: scripts/run_scan.sh, scripts/orchestrator.py, scripts/challenge_runner.py)</li>
+</ul>
+
+<h3>3.3 Limitations</h3>
+<ul>
+  <li>Findings are a point-in-time snapshot of {{ a.fqdn }} during the window above.</li>
+  <li>Scanner-derived findings are subject to false positives and require analyst confirmation before remediation.</li>
+  <li>Internal-only services, source code review, and social engineering vectors are out of scope unless explicitly noted.</li>
+</ul>
+
+<div class="pagebreak"></div>
+
+<!-- ============================================================ -->
+<!-- FINDINGS                                                      -->
+<!-- ============================================================ -->
+<h2>4. Findings</h2>
+
+{% if not findings %}
+  <p class="muted">No findings produced by this assessment.</p>
+{% endif %}
+
+{% for f in findings %}
+<div class="finding sev-{{ f.severity }}">
+  {# Severity is the lead signal: render it on its own line above the
+     title, in the per-severity color, larger than the title text. #}
+  <span class="sev-label sev-{{ f.severity }}">{{ f.severity }}</span>
+  <h3 class="finding-title">
+    {{ f.title }}
+    {% if f.seen_count and f.seen_count > 1 %}
+      <span class="muted small">(seen {{ f.seen_count }}×)</span>
+    {% endif %}
+  </h3>
+  <div class="meta-row">
+    <span class="chip">{{ f.source_tool }}</span>
+    {% if f.owasp_category %}<span class="chip">{{ f.owasp_category }}</span>{% endif %}
+    {% if f.cwe %}<span class="chip">CWE-{{ f.cwe }}</span>{% endif %}
+    {% if f.cvss %}<span class="chip">CVSS {{ f.cvss }}</span>{% endif %}
+  </div>
+
+  {% if f.description %}
+    <p style="white-space:pre-wrap">{{ f.description }}</p>
+  {% endif %}
+
+  {% if f.evidence_url %}
+    <p class="small"><strong>Affected:</strong>
+      {% if f.evidence_method %}<code>{{ f.evidence_method }}</code>{% endif %}
+      <code>{{ f.evidence_url }}</code>
+    </p>
+  {% endif %}
+
+  {% if f.repro and (f.repro.curl or f.repro.hint) %}
+    <h4 style="margin:.6em 0 .3em; font-size:10pt">Reproduction</h4>
+    {% if f.repro.hint %}<p class="small">{{ f.repro.hint|safe }}</p>{% endif %}
+    {% if f.repro.curl %}<pre>{{ f.repro.curl }}</pre>{% endif %}
+  {% endif %}
+
+  {% if f.remediation %}
+    <h4 style="margin:.6em 0 .3em; font-size:10pt">Remediation</h4>
+    <p>{{ f.remediation }}</p>
+  {% endif %}
+
+  {% if f.repro and f.repro.references %}
+    <p class="small refs"
+       style="color:#1f2630; font-size:9pt; margin-top:.6em">
+      <strong style="color:#1f2630">References:</strong>
+      {% for label, url in f.repro.references %}
+        <a href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ label }}</a>{{ ", " if not loop.last }}
+      {% endfor %}
+    </p>
+  {% endif %}
+</div>
+{% endfor %}
+
+<div class="pagebreak"></div>
+
+<!-- ============================================================ -->
+<!-- APPENDIX                                                      -->
+<!-- ============================================================ -->
+<h2>Appendix A — Underlying scans</h2>
+<p>Each finding above is backed by raw output from the per-tool scan dirs
+listed below. Captured request/response files are stored on the engagement
+host for evidence.</p>
+<ul>
+  {% for sid in scan_ids %}
+    <li><code>/data/scans/{{ sid }}</code></li>
+  {% endfor %}
+</ul>
+
+{% if brand.disclaimer %}
+<h2>Disclaimer</h2>
+<p class="small">{{ brand.disclaimer }}</p>
+{% endif %}
+
+</body>
+</html>

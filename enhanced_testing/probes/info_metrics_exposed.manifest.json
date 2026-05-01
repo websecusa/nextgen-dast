@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_metrics_exposed",
+  "version": "1.0",
+  "summary": "Re-fetches the metrics path and confirms it is still serving Prometheus / OpenMetrics exposition (counts # HELP / # TYPE comment lines).",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_metrics_exposed",
+    "metrics exposed",
+    "prometheus metrics"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Metrics endpoint URL"
+  }
+}

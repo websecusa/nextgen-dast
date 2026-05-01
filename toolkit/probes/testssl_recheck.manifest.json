@@ -1,0 +1,63 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "testssl_recheck",
+  "version": "1.0",
+  "summary": "Re-runs testssl.sh narrowly against the same host:port and checks whether the original test id still reports HIGH/CRITICAL/MEDIUM. Validates cipher lists, cipher order, protocol availability, FS posture, BREACH/BEAST/LUCKY13/etc.",
+  "validates": [
+    "CWE-310",
+    "CWE-326",
+    "CWE-327",
+    "CWE-757",
+    "CWE-319",
+    "CWE-295"
+  ],
+  "matches_titles": [
+    "cipherlist_",
+    "cipher_order",
+    "cipher-tls",
+    "cipher_tls",
+    "tls1",
+    "tls1_1",
+    "tls1_2",
+    "tls1_3",
+    "sslv2",
+    "sslv3",
+    "breach",
+    "beast",
+    "lucky13",
+    "freak",
+    "drown",
+    "logjam",
+    "poodle",
+    "rc4",
+    "sweet32",
+    "heartbleed",
+    "ccs_injection",
+    "ticketbleed",
+    "robot",
+    "secure_renego",
+    "fallback_scsv",
+    "winshock",
+    "fs_",
+    "hsts",
+    "hpkp",
+    "overall_grade",
+    "cert_trust",
+    "cert_chain",
+    "cert_extensions",
+    "chain_of_trust",
+    "dh_",
+    "good_dh"
+  ],
+  "matches_tools": [
+    "testssl"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 1,
+  "args": {
+    "--url": "Target host[:port] or full URL (required). Probe re-targets host:port.",
+    "--testssl-id": "Optional explicit testssl test id (e.g. cipher_order-tls1). When omitted, the probe pulls it from the finding's raw_data via the orchestrator-passed config.",
+    "--narrow-timeout": "Subprocess timeout for the narrow testssl run (default 120s)."
+  }
+}

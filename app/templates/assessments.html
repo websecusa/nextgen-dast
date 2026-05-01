@@ -1,0 +1,53 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Assessments</h1>
+<p><a href="{{ base }}/assess">+ Start a new assessment</a></p>
+{% if request.query_params.get("msg") %}
+  <p class="muted"><code>{{ request.query_params.get("msg") }}</code></p>
+{% endif %}
+
+{% if assessments %}
+<table>
+  <thead><tr>
+    <th>ID</th><th>App</th><th>Target</th><th>Profile</th><th>LLM</th>
+    <th>Status</th>
+    <th title="Open findings, post-triage (excludes false-positive, resolved, archived).">Open</th>
+    <th title="Live risk score, 0-100. Excludes triaged findings.">Risk</th>
+    <th>Started</th><th>Finished</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for a in assessments %}
+    <tr>
+      <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
+      <td>{% if a.application_id %}<code>{{ a.application_id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td><code>{{ a.fqdn }}</code></td>
+      <td><span class="badge">{{ a.profile }}</span></td>
+      <td>{{ a.llm_tier }}</td>
+      <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
+      <td>{{ a.open_findings if a.open_findings is defined else (a.total_findings or 0) }}</td>
+      <td>
+        {% if a.risk_score is defined and a.risk_score is not none %}
+          {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
+          <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td>{{ a.created_at }}</td>
+      <td>{{ a.finished_at or "—" }}</td>
+      <td>
+        {% if a.status not in ('running', 'queued', 'deleting') %}
+          <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
+                onsubmit="return confirm('Delete assessment #{{ a.id }} ({{ a.fqdn }})?')">
+            <button type="submit" class="warn">Delete</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No assessments yet.</p>{% endif %}
+{% endblock %}

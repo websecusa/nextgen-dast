@@ -1,0 +1,115 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>PDF report branding</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+<p><a href="{{ base }}/admin/branding">← back to branding</a></p>
+
+<section class="card">
+  <h2>Live preview</h2>
+  <p class="muted small">Approximation — the actual PDF uses paged-media CSS that browsers can't render perfectly. Generate a PDF after saving to see the final output.</p>
+  <div style="border:1px solid var(--border); border-radius:6px; padding:1em; margin-top:.5em; background:#fff; color:#1f2630">
+    <h3 style="font-family: {{ pdf.font }}; color: {{ pdf.primary }}; margin:0 0 .3em; font-size:1.4em">
+      {{ brand.company_name or "nextgen-dast" }} — Penetration Test Report
+    </h3>
+    <p style="font-family: {{ pdf.font }}; margin:0 0 1em; color:#555; font-size:.9em">
+      Sample heading on white paper, primary color.
+    </p>
+    <table style="font-family: {{ pdf.font }}; width:100%; border-collapse:collapse">
+      <tr><td style="padding:.3em 0;width:6em"><strong style="color: {{ pdf.sev_critical }}">CRITICAL</strong></td><td>SSRF reachable from authenticated session</td></tr>
+      <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_high }}">HIGH</strong></td><td>SQL injection confirmed in <code>?id=</code></td></tr>
+      <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_medium }}">MEDIUM</strong></td><td>Missing CSRF token on profile update</td></tr>
+      <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_low }}">LOW</strong></td><td>Server-version banner exposed</td></tr>
+      <tr><td style="padding:.3em 0"><strong style="color: {{ pdf.sev_info }}">INFO</strong></td><td>phpinfo not exposed</td></tr>
+    </table>
+    <p style="font-family: {{ pdf.font }}; margin:1em 0 0; font-size:.9em; color:#1f2630">
+      Sample hyperlink: <a href="#preview-link" style="color: {{ pdf.link }}; text-decoration: underline">https://example.com/finding/CVE-2024-12345</a>
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Logos</h2>
+  <div class="grid" style="grid-template-columns:1fr 1fr; gap:1em">
+    {% for kind, label in [("pdf_header", "Cover / running-header logo"), ("pdf_footer", "Footer logo")] %}
+    <div>
+      <h3 style="margin-bottom:.4em">{{ label }}</h3>
+      {% set fn = (brand.header_logo_filename if kind == "pdf_header" else brand.footer_logo_filename) %}
+      {% if fn %}
+        <p><img src="{{ base }}/branding/logo/{{ kind }}" alt=""
+                style="max-height:60px; max-width:100%; width:auto; height:auto;
+                       object-fit:contain; background:#fff; padding:.4em;
+                       border-radius:4px"></p>
+        <form method="post" action="{{ base }}/admin/branding/logo/{{ kind }}/delete"
+              onsubmit="return confirm('Remove {{ label }}?')">
+          <button type="submit" class="warn">Remove</button>
+        </form>
+      {% else %}<p class="muted">— not set —</p>{% endif %}
+      <form method="post" action="{{ base }}/admin/branding/logo/{{ kind }}"
+            enctype="multipart/form-data" style="margin-top:.6em">
+        <input type="file" name="file" accept="image/png,image/jpeg" required>
+        <button type="submit">Upload</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Theme</h2>
+  <form method="post" action="{{ base }}/admin/branding/pdf">
+    <label>Font family (paper-friendly stack — Liberation Sans / DejaVu / generic)
+      <input name="pdf_font_family" value="{{ brand.pdf_font_family or '' }}"
+             placeholder="'Liberation Sans', 'DejaVu Sans', sans-serif">
+    </label>
+
+    <h3 style="margin-top:1em">Severity colors</h3>
+    <p class="muted small">Used for the severity word and for the heat-map cells in the executive summary.</p>
+    <div class="grid" style="grid-template-columns: repeat(5, 1fr); gap:.6em">
+      <label>Critical <input type="color" name="pdf_sev_critical" value="{{ brand.pdf_sev_critical or pdf.sev_critical }}" style="height:2.4em;padding:0"></label>
+      <label>High     <input type="color" name="pdf_sev_high"     value="{{ brand.pdf_sev_high     or pdf.sev_high }}"     style="height:2.4em;padding:0"></label>
+      <label>Medium   <input type="color" name="pdf_sev_medium"   value="{{ brand.pdf_sev_medium   or pdf.sev_medium }}"   style="height:2.4em;padding:0"></label>
+      <label>Low      <input type="color" name="pdf_sev_low"      value="{{ brand.pdf_sev_low      or pdf.sev_low }}"      style="height:2.4em;padding:0"></label>
+      <label>Info     <input type="color" name="pdf_sev_info"     value="{{ brand.pdf_sev_info     or pdf.sev_info }}"     style="height:2.4em;padding:0"></label>
+    </div>
+
+    <h3 style="margin-top:1em">Brand accents</h3>
+    <div class="grid" style="grid-template-columns: 1fr 1fr 1fr; gap:.6em">
+      <label>Primary (cover bg, headings) <input type="color" name="primary_color" value="{{ brand.primary_color or pdf.primary }}" style="height:2.4em;padding:0"></label>
+      <label>Accent <input type="color" name="accent_color" value="{{ brand.accent_color or pdf.accent }}" style="height:2.4em;padding:0"></label>
+      <label>Classification banner <input type="color" name="classification_color" value="{{ brand.classification_color or pdf.classification_color }}" style="height:2.4em;padding:0"></label>
+    </div>
+
+    <h3 style="margin-top:1em">Cover page text</h3>
+    <p class="muted" style="margin:.2em 0 .6em">
+      Foreground color for the cover. Pair with the cover background
+      (Primary, above) — pick a contrasting value or your title text will
+      disappear into the page.
+    </p>
+    <div class="grid" style="grid-template-columns: 1fr 1fr 1fr; gap:.6em">
+      <label>Cover text <input type="color" name="pdf_cover_text_color" value="{{ brand.pdf_cover_text_color or pdf.cover_text }}" style="height:2.4em;padding:0"></label>
+    </div>
+
+    <h3 style="margin-top:1em">Body text</h3>
+    <p class="muted" style="margin:.2em 0 .6em">
+      Header color drives every <code>h1</code> / <code>h2</code> / <code>h3</code> and the
+      rule under each <code>h2</code>. Body color drives paragraph text and the inline
+      severity labels in finding sections (severity is conveyed by border-left
+      and heat-map cells, not by label color, so labels read like normal text).
+    </p>
+    <div class="grid" style="grid-template-columns: 1fr 1fr 1fr; gap:.6em">
+      <label>Header text <input type="color" name="pdf_header_color" value="{{ brand.pdf_header_color or pdf.header }}" style="height:2.4em;padding:0"></label>
+      <label>Body text   <input type="color" name="pdf_body_color"   value="{{ brand.pdf_body_color   or pdf.body }}"   style="height:2.4em;padding:0"></label>
+      <label>Hyperlink   <input type="color" name="pdf_link_color"   value="{{ brand.pdf_link_color   or pdf.link }}"   style="height:2.4em;padding:0"></label>
+    </div>
+    <p class="muted small" style="margin:.4em 0 0">
+      Hyperlink color is decoupled from <em>Primary</em> on purpose — primary doubles as the cover-page background, so a pale brand primary would render link text invisible. Default is a print-friendly blue (<code>#0645ad</code>) that stays legible on a black-and-white printout.
+    </p>
+
+    <button type="submit" style="margin-top:1em">Save PDF theme</button>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,198 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Schedule detail / edit page. The form mirrors /assess but binds to
+  /schedule/<id>/update. The lower section lists every assessment that
+  was materialized from this schedule so the operator can trace history
+  end-to-end.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Schedule #{{ schedule.id }} — {{ schedule.name }}</h1>
+
+{% if request.query_params.get("msg") %}
+<div class="msg" style="margin:.5em 0; padding:.6em .9em;
+                       border:1px solid var(--accent, #5d8aa8);
+                       background:rgba(95,179,215,0.08);
+                       border-radius:6px">
+  {{ request.query_params.get("msg") }}
+</div>
+{% endif %}
+
+<p>
+  <a href="{{ base }}/schedules">← Back to all schedules</a>
+</p>
+
+<section class="card" style="margin-top:1em">
+  <h2>Next firings (UTC)</h2>
+  {% if schedule.preview %}
+    <ul>
+      {% for d in schedule.preview %}
+        <li><code>{{ d.strftime('%Y-%m-%d %H:%M:%S') }}</code></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">Cron expression is invalid; no upcoming runs computed.</p>
+  {% endif %}
+  <p class="muted">
+    Cron expression: <code>{{ schedule.cron_expr }}</code> ·
+    {% if schedule.enabled %}enabled{% else %}<strong>disabled</strong>{% endif %} ·
+    {% if schedule.skip_if_running %}skips if a same-FQDN scan is running{% else %}always fires{% endif %} ·
+    {% if schedule.keep_only_latest %}keep-only-latest <strong>on</strong>{% else %}keep-only-latest off{% endif %}
+  </p>
+  <div style="margin-top:.6em">
+    <form method="post" style="display:inline" action="{{ base }}/schedule/{{ schedule.id }}/run">
+      <button class="primary" type="submit">Run now (one-off)</button>
+    </form>
+    <form method="post" style="display:inline; margin-left:.4em"
+          action="{{ base }}/schedule/{{ schedule.id }}/toggle">
+      <button class="ghost" type="submit">
+        {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
+      </button>
+    </form>
+    <form method="post" style="display:inline; margin-left:.4em"
+          action="{{ base }}/schedule/{{ schedule.id }}/delete"
+          onsubmit="return confirm('Delete schedule #{{ schedule.id }}? Historical assessments are preserved.');">
+      <button class="ghost" type="submit">Delete</button>
+    </form>
+  </div>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Edit schedule</h2>
+  <form method="post" action="{{ base }}/schedule/{{ schedule.id }}/update">
+    <label>Schedule name
+      <input name="name" value="{{ schedule.name }}" required>
+    </label>
+
+    <label>FQDN
+      <input name="fqdn" value="{{ schedule.fqdn }}" required>
+    </label>
+
+    <label>Application ID <small class="muted">(optional)</small>
+      <input name="application_id" maxlength="128"
+             value="{{ schedule.application_id or '' }}">
+    </label>
+
+    <div style="display:flex; gap:1.5em">
+      <label class="check"><input type="checkbox" name="scan_http"
+        {% if schedule.scan_http %}checked{% endif %}> http://</label>
+      <label class="check"><input type="checkbox" name="scan_https"
+        {% if schedule.scan_https %}checked{% endif %}> https://</label>
+    </div>
+
+    <label>Profile
+      <select name="profile">
+        {% for p in ('quick','standard','thorough','premium') %}
+          <option value="{{ p }}"
+            {% if schedule.profile == p %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>LLM tier
+      <select name="llm_tier">
+        {% for t in ('none','basic','advanced') %}
+          <option value="{{ t }}"
+            {% if schedule.llm_tier == t %}selected{% endif %}>{{ t }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>LLM endpoint
+      <select name="llm_endpoint_id">
+        <option value="">— default —</option>
+        {% for e in endpoints %}
+          <option value="{{ e.id }}"
+            {% if schedule.llm_endpoint_id == e.id %}selected{% endif %}>
+            {{ e.name }} ({{ e.model }})
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>User-Agent
+      <select name="user_agent_id">
+        <option value="">— default —</option>
+        {% for u in user_agents %}
+          <option value="{{ u.id }}"
+            {% if schedule.user_agent_id == u.id %}selected
+            {% elif not schedule.user_agent_id and u.is_default %}selected{% endif %}>
+            {{ u.label }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:.8em 1em">
+      <legend style="padding:0 .4em; color: var(--muted)">Credentialed scan (optional)</legend>
+      <label>Username
+        <input name="creds_username" value="{{ schedule.creds_username or '' }}">
+      </label>
+      <label>Password
+        <input name="creds_password" type="password"
+               value="{{ schedule.creds_password or '' }}">
+      </label>
+      <label>Login URL
+        <input name="login_url" value="{{ schedule.login_url or '' }}">
+      </label>
+    </fieldset>
+
+    <label>Cron expression <small class="muted">(5-field, UTC)</small>
+      <input name="cron_expr" value="{{ schedule.cron_expr }}" required>
+    </label>
+
+    <div style="display:flex; gap:1em; flex-wrap:wrap">
+      <label>Start after <small class="muted">(UTC)</small>
+        <input name="start_after" type="datetime-local"
+               value="{{ schedule.start_after.strftime('%Y-%m-%dT%H:%M') if schedule.start_after else '' }}">
+      </label>
+      <label>End before <small class="muted">(UTC)</small>
+        <input name="end_before" type="datetime-local"
+               value="{{ schedule.end_before.strftime('%Y-%m-%dT%H:%M') if schedule.end_before else '' }}">
+      </label>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" name="skip_if_running"
+        {% if schedule.skip_if_running %}checked{% endif %}>
+      Skip if a same-FQDN scan is still running
+    </label>
+    <label class="check">
+      <input type="checkbox" name="keep_only_latest"
+        {% if schedule.keep_only_latest %}checked{% endif %}>
+      Keep only latest <small class="muted">— after each run, delete prior completed assessments for this FQDN.</small>
+    </label>
+
+    <button type="submit">Save changes</button>
+  </form>
+</section>
+
+<section style="margin-top:1em">
+  <h2>Assessments materialized from this schedule</h2>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th><th>Status</th><th>Findings</th>
+        <th>Started</th><th>Finished</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td><a href="{{ base }}/assessment/{{ r.id }}">#{{ r.id }}</a></td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.total_findings or 0 }}</td>
+        <td>{{ r.started_at or '—' }}</td>
+        <td>{{ r.finished_at or '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No runs yet. The next fire is shown above.</p>
+  {% endif %}
+</section>
+{% endblock %}

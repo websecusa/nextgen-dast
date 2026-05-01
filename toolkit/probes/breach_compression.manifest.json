@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "breach_compression",
+  "version": "1.1",
+  "summary": "Validates a Nikto-style BREACH finding by checking the four preconditions (TLS + HTTP compression + reflected input + secret-shaped value in the same response).",
+  "validates": [
+    "CWE-310"
+  ],
+  "matches_titles": [
+    "breach",
+    "content-encoding header is set",
+    "compression side-channel",
+    "crime attack"
+  ],
+  "matches_tools": [
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "probe",
+  "request_budget_typical": 2,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target URL the scanner reported (required)",
+    "--method": "HTTP method (default GET)",
+    "--cookie": "Cookie header to send (use the victim's session cookie when available so the response carries real per-user secrets)",
+    "--reflect-param": "Query-param name used to probe for reflected input (default 'breach_probe')",
+    "--require-tls": "If set, treat plain-HTTP targets as definitively NOT exploitable (BREACH only applies to TLS)"
+  }
+}

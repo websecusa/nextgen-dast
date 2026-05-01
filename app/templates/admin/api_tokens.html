@@ -1,0 +1,144 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>API tokens</h1>
+<p class="muted">
+  OUI-format bearer tokens for the
+  <a href="{{ base }}/api/v1/docs">REST API</a>. Each token is restricted to a
+  whitelist of source IPs / CIDR ranges; requests from any other source are
+  rejected with <code>403</code>. The secret half of a token is shown only
+  once at creation time and is stored as a SHA-256 hash, so a database leak
+  never yields a usable credential.
+</p>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+{# One-time reveal of the freshly-minted plaintext token. After the page is
+   refreshed (msg query string dropped), this banner disappears forever. #}
+{% if new_token %}
+<section class="card" style="border-color: var(--accent)">
+  <h2 style="margin-top:0">New token, copy it now</h2>
+  <p class="muted">
+    This is the <strong>only</strong> time the secret half of this token will
+    be shown. After you leave this page, neither the UI nor the database can
+    recover it.
+  </p>
+  <pre class="log" style="margin:0; user-select: all">{{ new_token }}</pre>
+  <p class="muted small" style="margin-top:.5em">
+    Use it as <code>Authorization: Bearer {{ new_token }}</code> against any
+    endpoint under <code>/api/v1/...</code>.
+  </p>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Issue a new token</h2>
+  <form method="post" action="{{ base }}/admin/api-tokens">
+    <label>Label
+      <input name="label" maxlength="128" required
+             placeholder="e.g. ci-pipeline / app-team / scanner-1">
+    </label>
+    <label>Allowed source IPs (comma-separated; CIDR ranges OK)
+      <input name="allowed_ips" maxlength="2000" required
+             placeholder="203.0.113.4, 198.51.100.0/24">
+    </label>
+    <label>Notes <small class="muted">(optional)</small>
+      <textarea name="notes" rows="2" maxlength="2000"
+                placeholder="Who to contact, what this token is used for."></textarea>
+    </label>
+    <button type="submit">Issue token</button>
+  </form>
+  <p class="muted small">
+    A token without an IP whitelist is unusable by design; the form will
+    refuse to mint one. Update the whitelist later if the caller's IP
+    moves, no need to re-issue.
+  </p>
+</section>
+
+<section>
+  <h2>Existing tokens ({{ tokens|length }})</h2>
+  {% if tokens %}
+  <table>
+    <thead><tr>
+      <th>ID</th><th>Label</th><th>Prefix</th><th>Allowed IPs</th>
+      <th>Status</th><th>Last used</th><th>Created</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for t in tokens %}
+      <tr>
+        <td>{{ t.id }}</td>
+        <td>{{ t.label }}</td>
+        <td><code>{{ t.prefix }}:…</code></td>
+        <td>
+          <code style="white-space:pre-wrap">{{ t.allowed_ips or "" }}</code>
+        </td>
+        <td>
+          {% if t.disabled %}
+            <span class="badge red">disabled</span>
+          {% else %}
+            <span class="badge done">enabled</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if t.last_used_at %}
+            {{ t.last_used_at }}<br>
+            <small class="muted">from {{ t.last_used_ip or "?" }}</small>
+          {% else %}
+            <span class="muted">never</span>
+          {% endif %}
+        </td>
+        <td>{{ t.created_at }}</td>
+        <td>
+          <details>
+            <summary class="muted" style="cursor:pointer">edit</summary>
+            <form method="post"
+                  action="{{ base }}/admin/api-tokens/{{ t.id }}/update"
+                  style="margin-top:.5em">
+              <label>Label
+                <input name="label" value="{{ t.label }}" maxlength="128">
+              </label>
+              <label>Allowed IPs
+                <input name="allowed_ips" value="{{ t.allowed_ips or '' }}"
+                       maxlength="2000">
+              </label>
+              <label>Notes
+                <textarea name="notes" rows="2" maxlength="2000">{{ t.notes or '' }}</textarea>
+              </label>
+              <button type="submit">Save</button>
+            </form>
+          </details>
+          <form method="post" style="display:inline; margin-top:.4em"
+                action="{{ base }}/admin/api-tokens/{{ t.id }}/{% if t.disabled %}enable{% else %}disable{% endif %}">
+            <button type="submit">{% if t.disabled %}Enable{% else %}Disable{% endif %}</button>
+          </form>
+          <form method="post" style="display:inline; margin-top:.4em"
+                action="{{ base }}/admin/api-tokens/{{ t.id }}/delete"
+                onsubmit="return confirm('Permanently delete token #{{ t.id }} ({{ t.label }})? Callers using this token will start getting 401.')">
+            <button type="submit" class="warn">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No tokens have been issued yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Quick reference</h2>
+  <ul>
+    <li><a href="{{ base }}/api/v1/docs">/api/v1/docs</a> — Swagger UI playground (live, calls the running API).</li>
+    <li><a href="{{ base }}/api/v1/openapi.json">/api/v1/openapi.json</a> — OpenAPI 3.0 service definition.</li>
+    <li><a href="{{ base }}/api/v1/postman.json">/api/v1/postman.json</a> — Postman v2.1 collection (import into Postman).</li>
+    <li><a href="{{ base }}/api/v1/health">/api/v1/health</a> — liveness probe (no auth).</li>
+  </ul>
+  <pre class="log">curl -H "Authorization: Bearer 4E:47:44:..." \
+     -H "Content-Type: application/json" \
+     -d '{"fqdn":"app.example.com","application_id":"APP-1234","profile":"standard"}' \
+     {{ request.url.scheme }}://{{ request.headers['host'] }}{{ base }}/api/v1/scans</pre>
+</section>
+{% endblock %}

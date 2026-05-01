@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "ssti_pug_username",
+  "version": "1.0",
+  "summary": "Re-runs the Pug SSTI probe via the username field (off by default; mutates the throwaway user when --allow-destroy is set).",
+  "validates": [
+    "CWE-1336",
+    "CWE-94"
+  ],
+  "matches_titles": [
+    "ssti_pug_username",
+    "ssti",
+    "server side template injection",
+    "pug"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "destructive",
+  "requires_post": true,
+  "request_budget_typical": 0,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--allow-destroy": "Required — probe mutates the throwaway user"
+  }
+}

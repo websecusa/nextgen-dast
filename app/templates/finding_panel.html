@@ -1,0 +1,101 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Self-contained finding-detail partial. Rendered both:
+    * inline by assessment_detail.html for the initially-selected row
+    * as a fragment by GET /finding/<id>/panel, swapped into the middle
+      pane when the operator clicks a different finding (no full-page
+      reload — the workspace state survives).
+
+  Kept deliberately compact: the rich edit / enrichment / ticket-export
+  surface still lives at /finding/<id> as a separate page, accessible
+  via the "Open full detail →" link in the head row.
+
+  Renders nothing if `f` is None (used as the empty-state guard so
+  the same template can serve the "select a finding" placeholder).
+#}
+{% if not f %}
+  <div class="empty">
+    Select a finding from the list to see its detail.
+  </div>
+{% else %}
+<div class="detail-head">
+  <div style="flex:1; min-width:0">
+    <span class="sev-label sev-{{ f.severity }}">{{ f.severity }}</span>
+    <h2>{{ f.title }}</h2>
+    <div class="head-chips">
+      <span class="badge">{{ f.source_tool }}</span>
+      {% if f.owasp_category %}<span class="badge">{{ f.owasp_category }}</span>{% endif %}
+      {% if f.cwe %}<span class="badge">CWE-{{ f.cwe }}</span>{% endif %}
+      {% if f.cvss %}<span class="badge">CVSS {{ f.cvss }}</span>{% endif %}
+      {% if f.validation_status == 'validated' %}
+        <span class="badge done">✓ validated</span>
+      {% elif f.validation_status == 'false_positive' %}
+        <span class="badge warn">false positive</span>
+      {% endif %}
+    </div>
+  </div>
+  <a href="{{ base }}/finding/{{ f.id }}"
+     class="button ghost" style="font-size:.82em">Open full detail →</a>
+</div>
+
+{# "What was detected" — the scanner's specific, finding-level
+   description. We render this BEFORE the generic enrichment Overview
+   so the analyst sees the concrete weakness ("verbose error page on X
+   leaks SQLite engine details") before the generic class context
+   ("a configuration setting weakens the security posture..."). When
+   the scanner did not write a description we fall back to the title.
+
+   Only suppressed when the scanner-level text is the SAME as the
+   enrichment text (no point printing the same paragraph twice). #}
+{% set fdesc = (f.description or "").strip() %}
+{% set edesc = ((e and e.description_long) or "").strip() %}
+{% if fdesc and fdesc != edesc %}
+<h3 class="section">What was detected</h3>
+<p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
+{% endif %}
+
+<h3 class="section">Overview</h3>
+{% if edesc %}
+  <p style="white-space:pre-wrap; margin-top:0">{{ edesc }}</p>
+{% elif fdesc %}
+  <p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
+{% else %}
+  <p class="muted small">No description was attached to this finding by the
+    source scanner.</p>
+{% endif %}
+
+{% if e and e.impact %}
+<h3 class="section">Breakdown — impact</h3>
+<p style="white-space:pre-wrap">{{ e.impact }}</p>
+{% endif %}
+
+<h3 class="section">Technical details</h3>
+{% if f.evidence_url %}
+  <p style="margin-top:0">
+    <strong>Affected:</strong>
+    {% if f.evidence_method %}<code>{{ f.evidence_method }}</code>{% endif %}
+    <code>{{ f.evidence_url }}</code>
+  </p>
+{% endif %}
+{% if e and e.remediation_long %}
+  <p><strong>Remediation:</strong> {{ e.remediation_long }}</p>
+{% elif f.remediation %}
+  <p><strong>Remediation:</strong> {{ f.remediation }}</p>
+{% endif %}
+{% if e and e.steps %}
+  <ol>
+    {% for step in e.steps %}<li>{{ step }}</li>{% endfor %}
+  </ol>
+{% endif %}
+{% include '_finding_reproduce.html' %}
+{% if repro and repro.references %}
+  <p class="muted small" style="margin-top: .8em">
+    <strong>References:</strong>
+    {% for label, url in repro.references %}
+      <a href="{{ url }}" target="_blank" rel="noopener">{{ label }}</a>{{ ", " if not loop.last }}
+    {% endfor %}
+  </p>
+{% endif %}
+{% endif %}

@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_logout_does_not_invalidate",
+  "version": "1.0",
+  "summary": "Re-runs the post-logout JWT replay probe.",
+  "validates": [
+    "CWE-613",
+    "CWE-384"
+  ],
+  "matches_titles": [
+    "auth_logout_does_not_invalidate",
+    "logout invalidation",
+    "session fixation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 5,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--logout-path": "Additional logout path (repeatable)"
+  }
+}

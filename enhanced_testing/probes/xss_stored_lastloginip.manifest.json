@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "xss_stored_lastloginip",
+  "version": "1.0",
+  "summary": "Re-runs the saveLoginIp stored-XSS probe via True-Client-IP / X-Forwarded-For.",
+  "validates": [
+    "CWE-79",
+    "CWE-116"
+  ],
+  "matches_titles": [
+    "xss_stored_lastloginip",
+    "stored xss",
+    "ip header xss"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--marker-host": "Marker host inside the iframe payload"
+  }
+}

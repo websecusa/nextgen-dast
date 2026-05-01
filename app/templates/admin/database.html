@@ -1,0 +1,126 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Settings → Database. Lets an admin dump the live MariaDB to a gzipped
+  .sql archive (saved under /data/backups), download a previous dump,
+  delete a stale dump, and restore the database from an uploaded archive.
+
+  The page is intentionally light on JavaScript: the backup button is a
+  POST form (the browser handles the round-trip and shows the redirect
+  message), and the restore form is a multipart upload. We rely on the
+  middleware-level admin gate (ADMIN_PATHS) for access control.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Database backup &amp; restore</h1>
+
+{% if msg %}
+<div class="msg" style="margin:.5em 0; padding:.6em .9em;
+                       border:1px solid var(--accent, #5d8aa8);
+                       background:rgba(95,179,215,0.08);
+                       border-radius:6px">
+  {{ msg }}
+</div>
+{% endif %}
+
+<section class="card" style="margin-top:1em">
+  <h2>Create a backup</h2>
+  <p>Runs <code>mariadb-dump</code> against the live database and writes a
+     gzipped <code>.sql</code> file into <code>/data/backups/</code>. Uses
+     <code>--single-transaction</code> for a non-locking, point-in-time
+     consistent snapshot. Triggers, routines and events are included.</p>
+  <p class="muted small">For a multi-gigabyte database the dump can take a
+     minute or more. The browser stays on this tab until it finishes —
+     that is normal; do not close the tab.</p>
+  <form method="post" action="{{ base }}/admin/database/backup">
+    <button class="primary" type="submit">Create backup now</button>
+  </form>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Existing backups</h2>
+  {% if not backups %}
+    <p class="muted">No backups yet. Use the button above to create one.</p>
+  {% else %}
+    <table style="width:100%; border-collapse:collapse">
+      <thead>
+        <tr>
+          <th style="text-align:left">Filename</th>
+          <th style="text-align:right">Size</th>
+          <th style="text-align:left">Created (UTC)</th>
+          <th style="text-align:right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in backups %}
+        <tr>
+          <td><code>{{ b.filename }}</code></td>
+          <td style="text-align:right">
+            {{ '%.2f' % (b.size_bytes / 1024 / 1024) }} MB
+          </td>
+          <td>{{ b.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td style="text-align:right">
+            <a class="ghost small"
+               href="{{ base }}/admin/database/backup/{{ b.filename }}">
+              Download
+            </a>
+            <form method="post" style="display:inline; margin-left:.4em"
+                  action="{{ base }}/admin/database/backup/{{ b.filename }}/delete"
+                  onsubmit="return confirm('Delete {{ b.filename }}? This cannot be undone.');">
+              <button class="ghost small" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top:1em; border-color:var(--sev-high,#c0392b)">
+  <h2 style="color:var(--sev-high,#c0392b)">Restore from a backup</h2>
+  <p><strong>Warning:</strong> a restore replays the SQL inside the
+     uploaded dump against the current database. Any conflicting rows
+     (same primary key) will fail individually and be reported in the
+     restore message; tables that already exist with a different schema
+     will produce errors. <em>Take a backup first</em> if you are not
+     sure.</p>
+  <p class="muted small">Maximum upload size:
+     {{ '%.2f' % (max_restore_bytes / 1024 / 1024 / 1024) }} GB.
+     Both <code>.sql</code> and <code>.sql.gz</code> are accepted; the
+     server auto-detects gzip from the first two bytes.</p>
+  <form method="post"
+        enctype="multipart/form-data"
+        action="{{ base }}/admin/database/restore"
+        onsubmit="return confirm('Apply this dump to the live database? Make sure you have a recent backup.');">
+    <p>
+      <input type="file" name="file"
+             accept=".sql,.sql.gz,.gz,application/gzip,application/sql"
+             required>
+    </p>
+    <button class="primary" type="submit"
+            style="background:var(--sev-high,#c0392b)">
+      Upload and restore
+    </button>
+  </form>
+</section>
+
+<section class="card" style="margin-top:1em">
+  <h2>Operational notes</h2>
+  <ul style="margin:.4em 0 .4em 1.2em">
+    <li>The MariaDB container is configured with
+      <code>max_allowed_packet=1G</code>,
+      <code>net_read_timeout=600</code> and
+      <code>innodb_log_file_size=256M</code> so dumps and restores
+      involving large <code>raw_data</code> blobs survive without
+      packet-too-large errors.</li>
+    <li>Backups are stored under <code>/data/backups/</code> on the host
+      (mounted from <code>./data/backups</code>). They survive container
+      restarts and are included if you snapshot the host volume.</li>
+    <li>A backup taken on this version (2.1.1) is intended to be
+      restored onto the same version. Restoring across major schema
+      changes is not supported by this tool — use migrations instead.</li>
+  </ul>
+</section>
+{% endblock %}

@@ -1,0 +1,790 @@
+/*
+ * Author: Tim Rice <tim.j.rice@hackrange.com>
+ * Part of nextgen-dast. See README.md for license and overall architecture.
+ *
+ * Modern dark theme: near-black canvas, slightly raised cards with soft
+ * borders + radius, pill buttons, and a left sidebar layout. Severity
+ * colors are themed via CSS custom properties set per-deployment in
+ * base.html so the branding admin can override without touching this file.
+ */
+
+:root {
+  /* Canvas + surfaces. The two-step "panel above bg" pattern gives cards
+     a subtle lift without leaning on heavy shadows. */
+  --bg:        #0a0b0d;
+  --panel:     #14161a;
+  --panel-2:   #1b1e23;
+  --elevated:  #1f242b;
+  --border:    rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .12);
+
+  /* Text */
+  --text:      #e6e8ec;
+  --text-soft: #c2c7cf;
+  --muted:     #7a828d;
+  --muted-2:   #5b6168;
+
+  /* Brand + accents — overridden per-deployment via the branding system. */
+  --accent:    #5fb3d7;
+  --accent-2:  #4a9fc4;
+  --green:     #61c08f;
+  --red:       #e87060;
+  --yellow:    #e4b757;
+  --orange:    #e08a4f;
+
+  /* Layout */
+  --sidebar-w: 240px;
+  --radius-card:   14px;
+  --radius-input:  10px;
+  --radius-pill:   9999px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, system-ui, "Segoe UI", "Inter", sans-serif;
+  margin: 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  font-feature-settings: "ss01", "cv11"; /* nicer numerals where supported */
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+code, pre {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: .92em;
+}
+
+/* ---- App shell: sidebar + main --------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 100vh;
+}
+
+aside.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 1.2em 0.9em 1em;
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+/* Logo stacked above the company name and centered horizontally inside
+   the sidebar column. flex-direction:column gives the image its own
+   row; align-items:center centers the logo and the name underneath it.
+   text-align:center handles the inline-text alignment on the company
+   name so a long name still reads centered when it wraps. */
+aside.sidebar .brand {
+  display: flex; flex-direction: column; align-items: center;
+  gap: .35em;
+  padding: .2em .4em .8em;
+  font-weight: 700;
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: -.01em;
+  text-align: center;
+}
+/* With the logo on its own row we can give it more vertical room than
+   the previous inline 22px cap. Width is capped at the sidebar's
+   content area so a wide banner image scales down proportionally
+   instead of overflowing; object-fit:contain preserves aspect ratio.
+   The !important rules defeat any user-uploaded <img width=...>
+   attribute or cached older stylesheet. */
+aside.sidebar .brand img {
+  height: auto !important;
+  max-height: 56px !important;
+  width: auto !important;
+  max-width: 100% !important;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+}
+
+aside.sidebar .cta {
+  display: flex; align-items: center; justify-content: center; gap: .4em;
+  background: var(--accent);
+  color: #07111a;
+  font-weight: 700;
+  border-radius: var(--radius-pill);
+  padding: .55em 1em;
+  margin: .35em .25em 1.2em;
+  text-decoration: none;
+  transition: background-color .12s ease;
+}
+aside.sidebar .cta:hover { background: var(--accent-2); color: #07111a;
+                           text-decoration: none; }
+
+aside.sidebar .nav-section {
+  font-size: .72em;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted-2);
+  padding: 1em .8em .35em;
+}
+
+aside.sidebar nav { display: flex; flex-direction: column; gap: 1px; }
+aside.sidebar nav a {
+  display: flex; align-items: center; gap: .6em;
+  padding: .5em .8em;
+  border-radius: 8px;
+  color: var(--text-soft);
+  font-size: .92em;
+  font-weight: 500;
+  transition: background-color .12s, color .12s;
+}
+aside.sidebar nav a:hover {
+  background: var(--panel-2);
+  color: var(--text);
+  text-decoration: none;
+}
+aside.sidebar nav a.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+/* Inline-SVG icons. Default size applies anywhere the svg.icon class
+   appears (nav rows, the CTA, inline buttons). Without this universal
+   rule an unsized <svg> renders at its intrinsic size and blows the
+   layout up — that was the "crazy light-blue triangle" in the CTA. */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  opacity: .85;
+  display: inline-block;
+  vertical-align: middle;
+}
+aside.sidebar nav a.active .icon,
+aside.sidebar nav a:hover .icon { opacity: 1; }
+aside.sidebar .cta .icon { opacity: 1; color: inherit; }
+
+aside.sidebar .sidebar-footer {
+  margin-top: auto;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 1px;
+}
+aside.sidebar .user-pill {
+  display: flex; align-items: center; gap: .55em;
+  padding: .55em .8em;
+  margin-top: .3em;
+  font-size: .9em;
+  color: var(--text-soft);
+}
+aside.sidebar .user-pill .avatar {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #07111a;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .82em;
+}
+aside.sidebar .user-pill .username { font-weight: 600; color: var(--text); }
+aside.sidebar .user-pill .role { font-size: .78em; color: var(--muted); }
+aside.sidebar form.signout { margin: .25em .25em 0; }
+aside.sidebar form.signout button {
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-soft);
+  font-weight: 500;
+  border-radius: 8px;
+  padding: .35em .6em;
+  font-size: .82em;
+  cursor: pointer;
+}
+aside.sidebar form.signout button:hover {
+  border-color: var(--text-soft);
+  color: var(--text);
+}
+aside.sidebar .build-tag {
+  font-size: .72em;
+  color: var(--muted-2);
+  padding: .8em .8em 0;
+  letter-spacing: .04em;
+}
+
+/* Mobile: collapse sidebar to top bar. */
+@media (max-width: 800px) {
+  .app { grid-template-columns: 1fr; }
+  aside.sidebar {
+    position: relative;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: .8em;
+  }
+  aside.sidebar nav { flex-direction: row; flex-wrap: wrap; }
+  aside.sidebar .sidebar-footer { display: none; }
+}
+
+/* ---- Main column ---------------------------------------------------- */
+
+main.main {
+  padding: 1.6em 1.8em 2.4em;
+  max-width: 1400px;
+}
+main.main h1 {
+  font-weight: 700;
+  font-size: 1.7em;
+  letter-spacing: -.015em;
+  margin: 0 0 .6em;
+  color: var(--text);
+}
+main.main h2 {
+  font-weight: 600;
+  font-size: 1em;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin: 0 0 .8em;
+}
+main.main h3 { font-weight: 600; font-size: 1em; color: var(--text); margin: 0 0 .4em; }
+
+/* Classification banner (when set) */
+.classification-banner {
+  background: var(--red);
+  color: #fff;
+  text-align: center;
+  font-weight: 700;
+  padding: .25em;
+  font-size: .8em;
+  letter-spacing: .08em;
+}
+
+/* ---- Cards ---------------------------------------------------------- */
+
+section, .card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 1.2em 1.4em;
+  margin-bottom: 1.2em;
+}
+section.bare, .card.bare {
+  background: transparent; border: 0; padding: 0;
+}
+.card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: .8em;
+}
+.card-header h2 { margin: 0; }
+
+.grid       { display: grid; gap: 1.1em; grid-template-columns: 1fr 1fr; }
+.grid-3     { display: grid; gap: 1.1em; grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 1100px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 800px)  { .grid, .grid-3 { grid-template-columns: 1fr; } }
+
+/* ---- Tables --------------------------------------------------------- */
+
+table { width: 100%; border-collapse: collapse; font-size: .92em; }
+th, td {
+  padding: .55em .7em;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: .76em;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+tbody tr:hover { background: rgba(255,255,255,.02); }
+td.url {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: .85em;
+  word-break: break-all;
+  max-width: 50ch;
+}
+
+/* ---- Forms / inputs ------------------------------------------------- */
+
+form { display: flex; flex-direction: column; gap: .7em; }
+label { display: flex; flex-direction: column; gap: .25em; font-size: .9em;
+        color: var(--text-soft); }
+label.check { flex-direction: row; align-items: center; gap: .5em; }
+
+input, select, textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: .55em .7em;
+  border-radius: var(--radius-input);
+  font-size: 14px;
+  font-family: inherit;
+  transition: border-color .12s, background-color .12s;
+}
+input:hover, select:hover, textarea:hover { border-color: var(--muted); }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--elevated);
+}
+textarea { font-family: ui-monospace, Menlo, monospace; min-height: 5em; }
+
+button, .button {
+  cursor: pointer;
+  background: var(--accent);
+  color: #07111a;
+  font-weight: 600;
+  border: 0;
+  padding: .55em 1.1em;
+  font-size: 14px;
+  font-family: inherit;
+  border-radius: var(--radius-input);
+  transition: background-color .12s, opacity .12s;
+}
+button:hover, .button:hover { background: var(--accent-2); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.warn { background: var(--red); color: #fff; }
+button.warn:hover { background: #d35a4a; }
+button.ghost, .button.ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-weight: 500;
+}
+button.ghost:hover, .button.ghost:hover {
+  background: var(--panel-2);
+  border-color: var(--muted);
+}
+button.link, .button.link {
+  background: transparent; padding: 0; color: var(--accent); font-weight: 500;
+  border: 0;
+}
+
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .35em 1em; margin: 0; }
+dt { color: var(--muted); }
+dd { margin: 0; word-break: break-all; }
+
+/* ---- Status pills + badges ----------------------------------------- */
+
+.badge {
+  display: inline-flex; align-items: center; gap: .35em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: .76em;
+  font-weight: 600;
+  background: var(--panel-2);
+  color: var(--text-soft);
+  border: 1px solid var(--border);
+  letter-spacing: .01em;
+}
+.badge.warn      { background: rgba(228,183,87,.12); color: var(--yellow); border-color: transparent; }
+.badge.red       { background: rgba(232,112,96,.13); color: var(--red); border-color: transparent; }
+.badge.running   { background: rgba(95,179,215,.13); color: var(--accent); border-color: transparent; }
+.badge.queued    { background: rgba(122,130,141,.16); color: var(--muted); border-color: transparent; }
+.badge.consolidating { background: rgba(95,179,215,.13); color: var(--accent); border-color: transparent; }
+.badge.done,
+.badge.finished  { background: rgba(97,192,143,.14); color: var(--green); border-color: transparent; }
+.badge.error     { background: rgba(232,112,96,.18); color: var(--red); border-color: transparent; }
+.badge.cancelled,
+.badge.killed,
+.badge.deleting  { background: rgba(122,130,141,.16); color: var(--muted); border-color: transparent; }
+
+/* Severity rendering — text + dot, not blocky background, so screen-reader
+   users still get the word and color-blind users still get the label. */
+.sev,
+.badge.sev-critical, .badge.sev-high, .badge.sev-medium,
+.badge.sev-low,      .badge.sev-info {
+  background: transparent;
+  border: 0;
+  padding: 0 .15em;
+  font-weight: 700;
+  font-size: .82em;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.sev-critical, .badge.sev-critical { color: var(--sev-critical); }
+.sev-high,     .badge.sev-high     { color: var(--sev-high); }
+.sev-medium,   .badge.sev-medium   { color: var(--sev-medium); }
+.sev-low,      .badge.sev-low      { color: var(--sev-low); }
+.sev-info,     .badge.sev-info     { color: var(--sev-info); }
+
+/* Severity dot used in the dashboard / pip rows. */
+.sev-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: .35em;
+}
+.sev-dot.sev-critical { background: var(--sev-critical); }
+.sev-dot.sev-high     { background: var(--sev-high); }
+.sev-dot.sev-medium   { background: var(--sev-medium); }
+.sev-dot.sev-low      { background: var(--sev-low); }
+.sev-dot.sev-info     { background: var(--sev-info); }
+
+/* ---- Dashboard primitives ------------------------------------------ */
+
+.kpi-strip {
+  display: flex; align-items: center; gap: 1.6em;
+  padding: 1em 1.4em;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  margin-bottom: 1.2em;
+  flex-wrap: wrap;
+}
+.kpi {
+  display: flex; align-items: baseline; gap: .55em;
+  font-size: .95em;
+  color: var(--text-soft);
+}
+.kpi .v { font-size: 1.45em; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+.kpi .lbl { font-size: .85em; color: var(--muted); }
+.kpi .delta.up   { color: var(--red); }
+.kpi .delta.down { color: var(--green); }
+
+/* Pip row used inside cards (severity counts, time-to-fix tiles, etc.) */
+.pip-row { display: flex; gap: .55em; flex-wrap: wrap; }
+.pip {
+  flex: 1; min-width: 88px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .55em .7em;
+  text-align: left;
+}
+.pip .lbl { font-size: .72em; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .07em; margin-bottom: .15em; }
+.pip .n { font-size: 1.45em; font-weight: 700; color: var(--text); line-height: 1; }
+.pip .sub { font-size: .78em; color: var(--muted); margin-top: .2em; }
+
+.muted { color: var(--muted); }
+.small { font-size: .85em; }
+.ok    { color: var(--green); }
+.err   { color: var(--red); }
+
+/* Logs / pre blocks */
+pre.log {
+  background: #06070a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .9em 1em;
+  overflow: auto;
+  max-height: 60vh;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Footer (rarely used now — main info lives in the sidebar). */
+footer {
+  border-top: 1px solid var(--border);
+  padding: 1em;
+  text-align: center;
+  color: var(--muted);
+  font-size: .82em;
+}
+
+/* ---- Findings workspace (assessment_detail) ----------------------- */
+/*
+ * Three-column layout: filterable list (left) + selected finding's
+ * detail (middle) + AT A GLANCE metadata + actions (right). Each
+ * column is independently scrollable so the workspace fills the
+ * viewport without the page itself scrolling.
+ */
+.fw {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr) 320px;
+  gap: 1.1em;
+  /* Fill the viewport minus the page header (h1 + KPI strip ~ 180px). */
+  height: calc(100vh - 220px);
+  min-height: 540px;
+}
+@media (max-width: 1200px) {
+  .fw { grid-template-columns: 340px minmax(0, 1fr); }
+  .fw .fw-aside { display: none; }
+}
+@media (max-width: 900px) {
+  .fw { grid-template-columns: 1fr; height: auto; }
+  .fw-list, .fw-detail { max-height: 60vh; }
+}
+
+.fw-list, .fw-detail, .fw-aside {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.fw-detail, .fw-aside { padding: 1.2em 1.4em; overflow-y: auto; }
+
+.fw-list-toolbar {
+  padding: .7em .8em;
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: .4em; flex-wrap: wrap; align-items: center;
+}
+.fw-list-toolbar .tabs { display: flex; gap: .15em; }
+.fw-list-toolbar .tabs a {
+  padding: .35em .75em;
+  border-radius: var(--radius-pill);
+  font-size: .82em;
+  font-weight: 500;
+  color: var(--text-soft);
+  text-decoration: none;
+}
+.fw-list-toolbar .tabs a:hover { background: var(--panel-2); text-decoration: none; }
+.fw-list-toolbar .tabs a.active { background: var(--panel-2); color: var(--text); }
+
+.fw-list-toolbar select,
+.fw-list-toolbar input[type=search] {
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: .35em .55em;
+  border-radius: 8px;
+  font-size: .85em;
+}
+.fw-list-toolbar input[type=search] { flex: 1; min-width: 100px; }
+
+.fw-list-items {
+  overflow-y: auto;
+  flex: 1;
+  /* leave room for the bulk-action bar at the bottom (which is
+     `position: sticky` inside this scroll container). */
+}
+.fw-item {
+  display: flex; gap: .55em; align-items: flex-start;
+  padding: .7em .9em;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background-color .12s;
+  position: relative;
+}
+.fw-item:hover { background: var(--panel-2); }
+.fw-item.active {
+  background: var(--panel-2);
+}
+.fw-item.active::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px; background: var(--accent);
+}
+.fw-item input[type=checkbox] {
+  margin-top: .25em; cursor: pointer; flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.fw-item .fi-body { min-width: 0; flex: 1; }
+.fw-item .fi-title {
+  font-size: .9em; font-weight: 500; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.fw-item .fi-meta {
+  display: flex; gap: .55em; align-items: center; flex-wrap: wrap;
+  font-size: .76em; color: var(--muted); margin-top: .3em;
+}
+.fw-item.is-fp { opacity: .55; }
+
+.fw-bulk-bar {
+  position: sticky; bottom: 0;
+  background: var(--elevated);
+  border-top: 1px solid var(--border-strong);
+  padding: .65em .8em;
+  display: flex; gap: .5em; align-items: center; flex-wrap: wrap;
+}
+.fw-bulk-bar[hidden] { display: none; }
+.fw-bulk-bar .count {
+  font-size: .85em; font-weight: 600; color: var(--text);
+  margin-right: auto;
+}
+.fw-bulk-bar button { padding: .3em .8em; font-size: .82em; }
+
+/* Detail pane */
+.fw-detail .detail-head {
+  display: flex; align-items: flex-start; gap: 1em;
+  padding-bottom: .8em; margin-bottom: 1em;
+  border-bottom: 1px solid var(--border);
+}
+.fw-detail .detail-head .sev-label {
+  display: block; font-size: .82em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+  margin-bottom: .25em;
+}
+.fw-detail .detail-head h2 {
+  margin: 0; color: var(--text); text-transform: none; letter-spacing: 0;
+  font-size: 1.2em; font-weight: 600;
+}
+.fw-detail .detail-head .head-chips {
+  display: flex; gap: .35em; margin-top: .4em; flex-wrap: wrap;
+}
+.fw-detail h3.section {
+  font-size: .8em; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 1.4em 0 .4em; font-weight: 600;
+}
+.fw-detail .empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--muted); font-size: .9em;
+}
+
+/* Aside (AT A GLANCE) */
+.fw-aside .aside-section {
+  font-size: .72em; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin: 1.1em 0 .4em; font-weight: 600;
+}
+.fw-aside .aside-section:first-child { margin-top: 0; }
+.fw-aside .aside-row {
+  display: flex; justify-content: space-between; gap: .6em;
+  padding: .25em 0; font-size: .85em;
+}
+.fw-aside .aside-row .lbl { color: var(--muted); }
+.fw-aside .aside-row .val { color: var(--text); text-align: right;
+                             word-break: break-word; max-width: 60%; }
+.fw-aside .action-btn {
+  display: flex; align-items: center; gap: .55em; width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  padding: .55em .8em;
+  margin: .35em 0 0;
+  border-radius: 10px;
+  font-size: .88em; font-weight: 500;
+  text-align: left; cursor: pointer;
+  transition: background-color .12s, border-color .12s;
+}
+.fw-aside .action-btn:hover {
+  background: var(--elevated); border-color: var(--muted);
+}
+.fw-aside .action-btn.primary {
+  background: var(--accent); color: #07111a; border-color: transparent;
+  font-weight: 600;
+}
+.fw-aside .action-btn.primary:hover { background: var(--accent-2); }
+.fw-aside .action-btn.warn {
+  background: transparent; color: var(--red); border-color: var(--red);
+}
+.fw-aside .action-btn.warn:hover { background: rgba(232,112,96,.1); }
+
+/* Page header for the assessment workspace */
+.fw-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1em; flex-wrap: wrap;
+  margin-bottom: 1em;
+}
+.fw-header .title { display: flex; flex-direction: column; gap: .15em; }
+.fw-header h1 { margin: 0; }
+.fw-header .subtitle { color: var(--muted); font-size: .9em;
+                       display: flex; gap: .55em; align-items: center;
+                       flex-wrap: wrap; }
+.fw-header .actions { display: flex; gap: .5em; flex-wrap: wrap; }
+
+/* ---- Dashboard trend chart ----------------------------------------- */
+/* Layout: y-axis-labels | (svg + crosshair + x-axis-row) | y-axis-labels.
+   The numbers live outside the SVG because the chart uses
+   preserveAspectRatio="none" to fill the available width, which would
+   otherwise stretch the text into unreadable smears. */
+.trend-grid {
+  display: grid;
+  grid-template-columns: 2.4em 1fr 2.4em;
+  gap: .55em;
+  align-items: stretch;
+  margin: .8em 0 .6em;
+  position: relative;
+}
+.trend-yaxis {
+  display: flex; flex-direction: column; justify-content: space-between;
+  font-size: 11px; color: var(--muted);
+  padding: 2px 0;
+  text-align: right;
+  height: 200px;
+}
+.trend-yaxis-right { text-align: left; }
+.trend-svg-wrap {
+  position: relative;
+  height: 200px;
+  cursor: crosshair;
+}
+.trend-svg {
+  width: 100%; height: 100%; display: block;
+}
+.trend-xaxis {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--muted);
+  margin-top: 4px;
+}
+.trend-crosshair {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 1px;
+  background: rgba(255,255,255,.18);
+  pointer-events: none;
+  transform: translateX(-0.5px);
+}
+.trend-tooltip {
+  position: absolute;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: .55em .7em;
+  font-size: 12px;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  z-index: 20;
+  min-width: 130px;
+}
+.trend-tooltip .tt-date {
+  color: var(--muted); font-size: 11px; margin-bottom: 2px;
+}
+.trend-tooltip .tt-total {
+  font-weight: 700; font-size: 14px; margin-bottom: 4px;
+}
+.trend-tooltip .tt-row {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: .4em;
+  padding: 1px 0;
+}
+.trend-tooltip .tt-label { color: var(--muted); }
+.trend-tooltip .tt-n { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ---- Custom typeahead (used by trend filter) ----------------------- */
+.typeahead {
+  position: relative;
+  display: flex; gap: .4em; align-items: center; flex-wrap: wrap;
+}
+.typeahead-input {
+  width: 240px; font-size: .85em;
+}
+.typeahead-apply {
+  padding: .35em .75em; font-size: .82em;
+}
+.typeahead-suggest {
+  position: absolute;
+  top: calc(100% + 4px); left: 0;
+  margin: 0; padding: 4px 0;
+  list-style: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  min-width: 240px;
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 30;
+  box-shadow: 0 8px 22px rgba(0,0,0,.5);
+}
+.typeahead-suggest li {
+  padding: .35em .7em;
+  font-size: .88em;
+  cursor: pointer;
+  color: var(--text);
+}
+.typeahead-suggest li:hover,
+.typeahead-suggest li.active {
+  background: var(--panel);
+  color: var(--text);
+}

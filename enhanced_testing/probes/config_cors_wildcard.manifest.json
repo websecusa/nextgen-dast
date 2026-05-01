@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_cors_wildcard",
+  "version": "1.0",
+  "summary": "Re-issues the CORS preflight against authenticated endpoints and asserts whether ACAO=* still appears together with Authorization in ACAH (custom-auth-scheme bypass surface).",
+  "validates": [
+    "CWE-942",
+    "CWE-346"
+  ],
+  "matches_titles": [
+    "config_cors_wildcard",
+    "cors wildcard",
+    "cors misconfiguration",
+    "permissive cors"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to enumerate authenticated endpoints under"
+  }
+}

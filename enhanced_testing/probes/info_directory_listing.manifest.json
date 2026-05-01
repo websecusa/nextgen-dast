@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_directory_listing",
+  "version": "1.0",
+  "summary": "Re-fetches the directory and asserts whether the autoindex / directory-listing signature is still present in the response body.",
+  "validates": [
+    "CWE-548",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_directory_listing",
+    "directory listing",
+    "directory indexing",
+    "autoindex"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Directory URL to inspect (the probe also tests common siblings like /ftp/, /uploads/)"
+  }
+}

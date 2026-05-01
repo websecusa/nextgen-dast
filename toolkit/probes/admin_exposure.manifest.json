@@ -1,0 +1,49 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "admin_exposure",
+  "version": "1.1",
+  "summary": "Validates 'Administrative interface exposed' findings: distinguishes public exposure / authenticated-user area / web-server-gated path / misclassified marketing page. Uses identity reflection (hashed username) to confirm authenticated rendering.",
+  "validates": [
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "administrative interface exposed",
+    "administrative path discovered",
+    "admin interface exposed",
+    "admin interface identified",
+    "admin interface",
+    "admin panel exposed",
+    "admin panel",
+    "admin console exposed",
+    "admin console",
+    "management interface",
+    "management console",
+    "/jamonadmin",
+    "/jenkins",
+    "/jolokia",
+    "/manager/html",
+    "/manager/status",
+    "/wp-admin",
+    "/phpmyadmin",
+    "/grafana",
+    "/kibana",
+    "/console",
+    "/actuator"
+  ],
+  "matches_tools": [
+    "ffuf",
+    "nuclei",
+    "dirb",
+    "gobuster",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 3,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target URL the scanner reported (required)",
+    "--cookie": "Cookie header sent on the authenticated baseline. The anonymous baseline always strips cookies regardless of this value.",
+    "--auth-username": "Username the assessment authenticated as. Used to detect identity reflection in the response body. Never echoed back; only a 16-hex SHA-256 fingerprint is stored in evidence.",
+    "--baseline-404": "Optional URL guaranteed to 404 on this host, used as the negative-control fingerprint. If omitted, the probe synthesizes one."
+  }
+}

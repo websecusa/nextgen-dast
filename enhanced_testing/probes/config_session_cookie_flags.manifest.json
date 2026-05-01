@@ -1,0 +1,33 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_session_cookie_flags",
+  "version": "1.0",
+  "summary": "Re-runs the session-cookie security-flag probe (HttpOnly / Secure / SameSite).",
+  "validates": [
+    "CWE-1004",
+    "CWE-614",
+    "CWE-1275"
+  ],
+  "matches_titles": [
+    "config_session_cookie_flags",
+    "session cookie",
+    "missing httponly",
+    "missing secure",
+    "missing samesite"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "testssl"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--login-email": "Email for trigger login",
+    "--login-password": "Password for trigger login",
+    "--login-path": "Login endpoint path"
+  }
+}

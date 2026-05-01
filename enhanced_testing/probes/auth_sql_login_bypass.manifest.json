@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_sql_login_bypass",
+  "version": "1.1",
+  "summary": "Re-runs the SQL-injection login probe: POST a tautology payload into the email field, decode the returned JWT, confirm role='admin'.",
+  "validates": [
+    "CWE-89",
+    "CWE-287"
+  ],
+  "matches_titles": [
+    "auth_sql_login_bypass",
+    "sql injection in login",
+    "login sql injection",
+    "sqli login",
+    "auth sql"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL (the probe sweeps common login paths under it)"
+  }
+}

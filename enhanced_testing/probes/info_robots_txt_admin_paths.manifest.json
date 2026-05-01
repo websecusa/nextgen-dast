@@ -1,0 +1,23 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_robots_txt_admin_paths",
+  "version": "1.0",
+  "summary": "Re-runs the robots.txt admin-paths leak probe.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_robots_txt_admin_paths",
+    "robots.txt leak"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

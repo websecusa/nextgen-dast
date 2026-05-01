@@ -1,0 +1,76 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: pentest-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-pentest}
+      MARIADB_USER: ${MARIADB_USER:-pentest}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+    # Server-side knobs sized for the database backup / restore feature
+    # (Settings → Database). The defaults (max_allowed_packet=1MB,
+    # innodb_log_file_size=48MB) refuse multi-megabyte INSERT statements,
+    # which kills any restore that involves a single large raw_data
+    # blob. We bump the four settings that actually matter:
+    #   max_allowed_packet   1G   — single statement / row bound
+    #   innodb_log_file_size 256M — accommodates large transactions
+    #   net_read_timeout     600s — restore may stall on large rows
+    #   net_write_timeout    600s — backup may stall on large blobs
+    # The orchestrator's mariadb-client uses matching --max-allowed-packet=1G
+    # arguments so the two ends always agree.
+    command:
+      - --max_allowed_packet=1G
+      - --innodb_log_file_size=256M
+      - --net_read_timeout=600
+      - --net_write_timeout=600
+      - --wait_timeout=600
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+      - ./db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:13306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  nextgen-dast:
+    image: dockerregistry.fairtprm.com/nextgen-dast:2.1.1
+    # Registry-pull deployment. To build locally for development:
+    #   docker compose --env-file .env_<suffix> build
+    # Then comment out the `image:` line above and uncomment the `build:`.
+    # build: .
+    container_name: nextgen-dast
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      # Only the runtime-state directory is mounted. scripts/, toolkit/, and
+      # db/ are baked into the image (Dockerfile lines 86-92) — mounting them
+      # from the host would hide the baked-in copy and only work if the host
+      # also carried a matching source tree, which a registry-image deploy
+      # won't. To override a probe at runtime for development, edit the file
+      # in-place inside the container or rebuild and redeploy.
+      - ./data:/data
+    environment:
+      - UI_HOST=127.0.0.1
+      - UI_PORT=8888
+      - UI_ROOT_PATH=
+      - DB_HOST=127.0.0.1
+      - DB_PORT=13306
+      - DB_NAME=${MARIADB_DATABASE:-pentest}
+      - DB_USER=${MARIADB_USER:-pentest}
+      - DB_PASSWORD=${MARIADB_PASSWORD}
+      - ENV_SUFFIX=${ENV_SUFFIX}
+      - SECRETS_FILE=${SECRETS_FILE:-/data/.sensitive_secrets_info}
+      - APP_URL=${APP_URL:-https://localhost/}
+      - APP_SECRET=${APP_SECRET}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    command: ["python", "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8888"]

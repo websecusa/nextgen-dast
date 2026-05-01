@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_basket_idor_walk",
+  "version": "1.0",
+  "summary": "Re-runs the basket-IDOR walk: registers a throwaway user and iterates small basket ids to confirm whether other users' baskets leak.",
+  "validates": [
+    "CWE-639",
+    "CWE-284",
+    "CWE-863"
+  ],
+  "matches_titles": [
+    "authz_basket_idor_walk",
+    "idor",
+    "bola",
+    "broken object level authorization"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 8,
+  "request_budget_max": 16,
+  "args": {
+    "--url": "Target origin URL",
+    "--max-id": "Walk basket ids 1..max-id (default 6)"
+  }
+}

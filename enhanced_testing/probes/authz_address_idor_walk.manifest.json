@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_address_idor_walk",
+  "version": "1.0",
+  "summary": "Re-runs the address-IDOR walk: registers a throwaway user and iterates small ids against /api/Addresss to confirm whether other users' addresses leak.",
+  "validates": [
+    "CWE-639",
+    "CWE-284"
+  ],
+  "matches_titles": [
+    "authz_address_idor_walk",
+    "address idor",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 12,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Target origin URL",
+    "--max-id": "Walk address ids 1..max-id (default 10)"
+  }
+}

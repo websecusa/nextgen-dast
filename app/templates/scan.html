@@ -1,0 +1,143 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Launch a scan</h1>
+{% if request.query_params.get("msg") %}
+  <p class="muted"><code>{{ request.query_params.get("msg") }}</code></p>
+{% endif %}
+
+<section class="card">
+  <form method="post" action="{{ base }}/scan">
+    <label>Tool
+      <select name="tool" required>
+        <option value="wapiti">wapiti — web app scanner (broad, slow)</option>
+        <option value="nikto">nikto — web server scanner (header / known-path)</option>
+        <option value="nuclei">nuclei — template / CVE scanner (fast, high-signal)</option>
+        <option value="testssl">testssl.sh — TLS / cipher / cert analyzer</option>
+        <option value="sqlmap">sqlmap — SQL injection (slow, target one URL)</option>
+        <option value="dalfox">dalfox — XSS scanner (target one URL)</option>
+      </select>
+    </label>
+    <label>Target host or URL
+      <input name="target" value="127.0.0.1" required
+             placeholder="127.0.0.1:10007 or https://127.0.0.1:9443">
+      <small class="muted">
+        Examples: <code>127.0.0.1:10007</code> for a local docker container,
+        <code>https://127.0.0.1:9443</code> to scan through the intercept proxy
+        (so the scan traffic is also logged for review).
+      </small>
+    </label>
+    <label>Auth profile (optional)
+      <select name="auth_profile">
+        <option value="">— none (unauthenticated scan) —</option>
+        {% for p in profiles %}
+          <option value="{{ p.name }}">{{ p.name }} ({{ p.type }})</option>
+        {% endfor %}
+      </select>
+      <small class="muted">
+        For SSO / Okta FastPass / DUO targets: log in once through the proxy
+        in a browser, then capture the session from a flow on
+        <a href="{{ base }}/flows">Flows</a> → save as a "cookies" profile.
+        Manage profiles on <a href="{{ base }}/auth">Auth</a>.
+      </small>
+    </label>
+    <label>User-Agent
+      <select name="user_agent_id">
+        <option value="">— default —</option>
+        {% for u in user_agents %}
+          <option value="{{ u.id }}" {% if u.is_default %}selected{% endif %}>{{ u.label }}</option>
+        {% endfor %}
+      </select>
+      <small class="muted">Manage on <a href="{{ base }}/user-agents">/user-agents</a>.
+      testssl ignores this (raw TLS).</small>
+    </label>
+    <label>Extra args (optional)
+      <input name="extra" placeholder="e.g. --scope=domain   (wapiti)   |   -Tuning 9   (nikto)">
+    </label>
+    <button type="submit">Start scan</button>
+  </form>
+</section>
+
+<section>
+  <h2>All scans
+    {% if scans %}
+      <small class="muted" style="font-weight: normal; font-size: .65em">
+        ({{ scans|length }} total)
+      </small>
+    {% endif %}
+  </h2>
+  {% if scans %}
+    {% if is_admin %}
+    <form method="post" action="{{ base }}/scans/delete"
+          onsubmit="return confirm('Delete the selected scan(s)? This permanently removes their on-disk artifacts.')">
+      <p style="display:flex; gap:.6em; align-items:center; margin:.6em 0">
+        <button type="submit" class="warn" id="bulk-delete-btn" disabled>
+          Delete selected
+        </button>
+        <span class="muted small" id="bulk-delete-count">0 selected</span>
+      </p>
+      <table>
+        <thead><tr>
+          <th style="width:1.2em">
+            <input type="checkbox" id="select-all"
+                   title="Select / deselect all visible">
+          </th>
+          <th>Started</th><th>Tool</th><th>Target</th><th>Status</th>
+        </tr></thead>
+        <tbody>
+        {% for s in scans %}
+          <tr>
+            <td>
+              <input type="checkbox" name="scan_ids" value="{{ s.id }}"
+                     class="row-cb">
+            </td>
+            <td><a href="{{ base }}/scan/{{ s.id }}">{{ s.started_at[:19] }}</a></td>
+            <td>{{ s.tool }}</td>
+            <td class="url">{{ s.target }}</td>
+            <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </form>
+    <script>
+      (function () {
+        const all = document.getElementById('select-all');
+        const cbs = document.querySelectorAll('.row-cb');
+        const btn = document.getElementById('bulk-delete-btn');
+        const cnt = document.getElementById('bulk-delete-count');
+        function refresh() {
+          const n = Array.from(cbs).filter(c => c.checked).length;
+          btn.disabled = (n === 0);
+          cnt.textContent = n + ' selected';
+          all.indeterminate = (n > 0 && n < cbs.length);
+          all.checked = (n === cbs.length);
+        }
+        all.addEventListener('change', () => {
+          cbs.forEach(c => c.checked = all.checked);
+          refresh();
+        });
+        cbs.forEach(c => c.addEventListener('change', refresh));
+      })();
+    </script>
+    {% else %}
+    <table>
+      <thead><tr><th>Started</th><th>Tool</th><th>Target</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for s in scans %}
+        <tr>
+          <td><a href="{{ base }}/scan/{{ s.id }}">{{ s.started_at[:19] }}</a></td>
+          <td>{{ s.tool }}</td>
+          <td class="url">{{ s.target }}</td>
+          <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  {% else %}<p class="muted">No scans yet.</p>{% endif %}
+</section>
+{% endblock %}
