@@ -493,6 +493,20 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
     REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Boot-time data-migration bookkeeping. Each row records that one
+-- migration in app/migrations.py:MIGRATIONS has been applied to this
+-- database. Pending migrations run on every container start; rows with
+-- status='success' are skipped. A failed migration writes status='failed'
+-- with the exception text in `notes` so an operator can diagnose, fix,
+-- and retry on the next boot. See app/migrations.py for the runner.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id VARCHAR(64) PRIMARY KEY,
+  applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ON UPDATE CURRENT_TIMESTAMP,
+  status ENUM('success','failed') NOT NULL DEFAULT 'success',
+  notes TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ===========================================================================
 -- §2  ALTER TABLEs (migrations for existing DBs)
 --

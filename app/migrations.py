@@ -1,0 +1,204 @@
+# Author: Tim Rice <tim.j.rice@hackrange.com>
+# Part of nextgen-dast. See README.md for license and overall architecture.
+"""Boot-time schema migration runner.
+
+Why a hand-rolled framework instead of Alembic / Django migrations: the
+project intentionally has zero ORM and one DB engine. A 90-line runner
+gives us idempotent boot-time fixups without dragging in a 50k-line
+dependency. Each migration is a callable that returns a one-line summary
+on success or raises on failure.
+
+Migrations run once per database. The `schema_migrations` table records
+which ids have been applied; pending ids are applied in registration
+order on every container start. If a migration fails, the row is marked
+`status='failed'` with the exception text and the runner re-raises so
+the boot stops — better than silently coming up half-migrated.
+
+Adding a new migration:
+  1. Write a function `def my_migration() -> str` that performs the
+     work and returns a short human-readable summary (stored in
+     schema_migrations.notes).
+  2. Append `(id, fn)` to MIGRATIONS below using a date-prefixed id.
+  3. Ship. Every container that pulls the new image will apply the
+     migration on first start; reruns on already-migrated DBs are
+     no-ops.
+
+What does NOT belong in here:
+  * DDL changes — those are still expressed in db/schema.sql, applied
+    on boot by the schema-drift auto-healer in server.py.
+  * Per-assessment ad-hoc fixups — those go in scripts/ as standalone
+    CLI tools.
+This module is for one-shot DATA migrations that must run exactly once
+per upgrade, fleet-wide, without operator action.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Callable
+
+import db
+
+log = logging.getLogger("nextgen-dast.migrations")
+
+# MariaDB advisory lock name. If two boots race (multi-worker uvicorn,
+# or a compose `up -d` while a sibling worker is still finishing),
+# only one acquires the lock and runs the migration loop; the others
+# observe `applied_ids` already includes everything and exit cleanly.
+_LOCK_NAME = "nextgen_dast_schema_migrations"
+_LOCK_TIMEOUT_SEC = 60
+
+
+# ---- bookkeeping helpers ---------------------------------------------------
+
+def _ensure_table() -> None:
+    """Create the `schema_migrations` table if it does not yet exist.
+
+    The DDL is also in db/schema.sql so a fresh `pentest.sh bootstrap`
+    creates it alongside everything else; this CREATE-IF-NOT-EXISTS
+    keeps already-running 2.1.1 databases self-bootstrapping when they
+    pull the first image that ships migrations."""
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+              id VARCHAR(64) PRIMARY KEY,
+              applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  ON UPDATE CURRENT_TIMESTAMP,
+              status ENUM('success','failed') NOT NULL DEFAULT 'success',
+              notes TEXT
+           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+
+
+def _applied_ids() -> set:
+    """Set of migration ids that previously ran to completion. Failed
+    rows are NOT included — they will be retried on the next boot, which
+    is usually what an operator wants after fixing the underlying issue."""
+    rows = db.query_all(
+        "SELECT id FROM schema_migrations WHERE status = 'success'")
+    return {r["id"] for r in rows}
+
+
+def _record(id: str, status: str, notes: str) -> None:
+    """Upsert into schema_migrations. ON DUPLICATE handles the retry-after-
+    fix case (a failed row gets its status flipped to 'success' on rerun)."""
+    db.execute(
+        """INSERT INTO schema_migrations (id, status, notes)
+           VALUES (%s, %s, %s)
+           ON DUPLICATE KEY UPDATE status = VALUES(status),
+                                   notes = VALUES(notes),
+                                   applied_at = CURRENT_TIMESTAMP""",
+        (id, status, (notes or "")[:65000]))
+
+
+# ---- migration definitions -------------------------------------------------
+
+def m_2026_05_01_enrichment_orphan_cleanup() -> str:
+    """Re-point findings whose enrichment_id is keyed under the pre-2.1.1
+    broad signature hash. Locked manual rows are preserved untouched.
+
+    Same logic as scripts/enrichment_orphan_cleanup.py — that script
+    remains as a manual fallback (with --assessment / --commit flags)
+    for ad-hoc runs. The migration is "all assessments, always commit"
+    and runs exactly once per database."""
+    import enrichment as enrichment_mod
+
+    rows = db.query_all(
+        """SELECT f.id, f.source_tool, f.title, f.cwe, f.owasp_category,
+                  f.evidence_url, f.raw_data,
+                  e.signature_hash AS linked_sig,
+                  e.is_locked       AS linked_locked
+             FROM findings f
+             JOIN finding_enrichment e ON e.id = f.enrichment_id
+            WHERE f.enrichment_id IS NOT NULL""")
+
+    aligned = 0
+    locked_kept = 0
+    cleared = 0
+    for row in rows:
+        # Reconstruct just enough of the canonical finding-shape dict for
+        # signature() to read its discriminator fields. raw_data is JSON
+        # in the DB; pre-parse so the helper sees the structured form.
+        raw = row.get("raw_data")
+        parsed: dict = {}
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = {}
+        elif isinstance(raw, dict):
+            parsed = raw
+        finding = {
+            "source_tool": row.get("source_tool") or "",
+            "title": row.get("title") or "",
+            "cwe": row.get("cwe") or "",
+            "owasp_category": row.get("owasp_category") or "",
+            "evidence_url": row.get("evidence_url") or "",
+            "raw_data": parsed,
+        }
+        new_sig = enrichment_mod.signature(finding)
+        if row["linked_sig"] == new_sig:
+            aligned += 1
+            continue
+        if row["linked_locked"]:
+            # Preserve admin-curated guidance even if the hash drifted.
+            # We never silently strip a locked manual entry.
+            locked_kept += 1
+            continue
+        cleared += 1
+        db.execute(
+            "UPDATE findings SET enrichment_id = NULL WHERE id = %s",
+            (row["id"],))
+    return (f"scanned {len(rows)} findings: aligned={aligned}, "
+            f"locked_kept={locked_kept}, cleared={cleared}")
+
+
+# Append-only registration list. Ids are date-prefixed (YYYY_MM_DD_) so
+# alphabetical ordering matches chronological ordering. Ids never change
+# once shipped — renaming would re-run the migration on databases that
+# already applied the original.
+MIGRATIONS: list = [
+    ("2026_05_01_enrichment_orphan_cleanup",
+     m_2026_05_01_enrichment_orphan_cleanup),
+]
+
+
+# ---- public entry point ----------------------------------------------------
+
+def run_pending() -> None:
+    """Apply every migration that has not yet succeeded against this DB.
+
+    Idempotent: callable on every container boot. Already-applied
+    migrations are skipped via the schema_migrations bookkeeping table.
+    Concurrent boots are serialized via a MariaDB advisory lock; if the
+    lock cannot be acquired in _LOCK_TIMEOUT_SEC, the runner logs a
+    warning and returns (the lock-holder will run the migrations).
+
+    Raises whatever the failing migration raises, so the FastAPI
+    lifespan in server.py can surface the failure to the operator
+    instead of letting a half-migrated container come up healthy."""
+    _ensure_table()
+    lock = db.query_one(
+        "SELECT GET_LOCK(%s, %s) AS got",
+        (_LOCK_NAME, _LOCK_TIMEOUT_SEC))
+    if not lock or not lock.get("got"):
+        log.warning(
+            "schema migrations: another worker holds the lock — skipping "
+            "(it will run them).")
+        return
+    try:
+        applied = _applied_ids()
+        for migration_id, fn in MIGRATIONS:
+            if migration_id in applied:
+                continue
+            log.info("running migration %s", migration_id)
+            try:
+                summary = fn() or ""
+                _record(migration_id, "success", summary)
+                log.info("migration %s OK: %s", migration_id, summary)
+            except Exception as exc:
+                msg = f"{type(exc).__name__}: {exc}"
+                log.exception("migration %s FAILED: %s", migration_id, msg)
+                _record(migration_id, "failed", msg)
+                raise
+    finally:
+        # RELEASE_LOCK is safe to call even if GET_LOCK already timed out.
+        db.execute("SELECT RELEASE_LOCK(%s)", (_LOCK_NAME,))
