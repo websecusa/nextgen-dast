@@ -4,17 +4,34 @@
 #}
 {% extends "base.html" %}
 {% block content %}
-<h1>Assess a target</h1>
+{# `prefill` is populated when this page is reached via the "Re-scan"
+   button on an assessment detail page (?from=<aid>). It carries the
+   previous scan's settings for that target so the form arrives ready
+   to submit. The password is deliberately not pre-filled -- see the
+   credentials fieldset below. The default value `{}` keeps the
+   greenfield "Assess a target" path unaffected when no prefill is
+   present. #}
+{% set prefill = prefill or {} %}
+<h1>{% if prefill %}Re-scan {{ prefill.fqdn }}{% else %}Assess a target{% endif %}</h1>
+{% if prefill %}
+<p class="muted">Pre-filled with the last scan settings for
+<code>{{ prefill.fqdn }}</code>. Adjust anything you'd like to change
+and click <em>Start assessment</em>. The credentialed-scan password is
+intentionally blank — re-enter it if you want a credentialed re-scan,
+or leave it blank for an anonymous one.</p>
+{% else %}
 <p class="muted">Enter an FQDN, optionally with a port (e.g.
 <code>app.example.com:8443</code>). We'll run the per-profile tool set
 against the schemes you select, capture every probe, and hand the results
 to the LLM tier you choose for a consolidated report. For non-standard
 ports, check only the scheme that actually listens on that port.</p>
+{% endif %}
 
 <section class="card">
   <form method="post" action="{{ base }}/assess">
     <label>FQDN
       <input name="fqdn" required
+             value="{{ prefill.fqdn or '' }}"
              placeholder="example.com  /  app.example.com  /  app.example.com:8443"
              autofocus>
     </label>
@@ -25,30 +42,42 @@ ports, check only the scheme that actually listens on that port.</p>
        on the assessment detail page and on the API responses. #}
     <label>Application ID <small class="muted">(optional)</small>
       <input name="application_id" maxlength="128"
+             value="{{ prefill.application_id or '' }}"
              placeholder="e.g. APP-1234 or your internal catalog ID">
     </label>
+    {# Scheme checkboxes. When prefilling, honor the source assessment's
+       columns; otherwise default to both schemes checked (the original
+       greenfield behavior). prefill.scan_http/scan_https are 0/1 ints. #}
+    {% set http_checked = ('scan_http' not in prefill) or prefill.scan_http %}
+    {% set https_checked = ('scan_https' not in prefill) or prefill.scan_https %}
     <div style="display:flex; gap:1.5em">
-      <label class="check"><input type="checkbox" name="scan_http" checked> http://</label>
-      <label class="check"><input type="checkbox" name="scan_https" checked> https://</label>
+      <label class="check"><input type="checkbox" name="scan_http" {% if http_checked %}checked{% endif %}> http://</label>
+      <label class="check"><input type="checkbox" name="scan_https" {% if https_checked %}checked{% endif %}> https://</label>
     </div>
 
+    {# Profile / LLM tier / LLM endpoint / User-Agent: default to the
+       previous scan's value when prefilling, else fall back to the
+       greenfield defaults (standard / none / "" / the row flagged
+       is_default). #}
+    {% set profile_sel = prefill.profile or 'standard' %}
     <label>Profile
       <select name="profile">
-        <option value="quick">quick — testssl + nuclei (curated tags). ~5 min.</option>
-        <option value="standard" selected>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
-        <option value="thorough">thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
-        <option value="premium">premium — everything thorough does + sqlmap + dalfox + the in-house high-fidelity probe pass (auth bypasses, IDOR, info disclosure, CORS, default creds…). Slowest tier; catches what traditional scanners miss.</option>
+        <option value="quick"     {% if profile_sel == 'quick' %}selected{% endif %}>quick — testssl + nuclei (curated tags). ~5 min.</option>
+        <option value="standard"  {% if profile_sel == 'standard' %}selected{% endif %}>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
+        <option value="thorough"  {% if profile_sel == 'thorough' %}selected{% endif %}>thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
+        <option value="premium"   {% if profile_sel == 'premium' %}selected{% endif %}>premium — everything thorough does + sqlmap + dalfox + the in-house high-fidelity probe pass (auth bypasses, IDOR, info disclosure, CORS, default creds…). Slowest tier; catches what traditional scanners miss.</option>
       </select>
     </label>
 
+    {% set tier_sel = prefill.llm_tier or 'none' %}
     <label>LLM tier
       <select name="llm_tier">
         {# Default selection is `none`. Pulling in the LLM is opt-in so a
            caller never accrues LLM cost (or sends scan output off-box)
            without explicitly choosing a tier. #}
-        <option value="none" selected>none — scanners only, no LLM</option>
-        <option value="basic">basic — roll-up + executive summary (~$5–10 / scan)</option>
-        <option value="advanced">advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
+        <option value="none"     {% if tier_sel == 'none' %}selected{% endif %}>none — scanners only, no LLM</option>
+        <option value="basic"    {% if tier_sel == 'basic' %}selected{% endif %}>basic — roll-up + executive summary (~$5–10 / scan)</option>
+        <option value="advanced" {% if tier_sel == 'advanced' %}selected{% endif %}>advanced — per-flow deep analysis + roll-up (~$50–100 / scan)</option>
       </select>
     </label>
 
@@ -56,7 +85,7 @@ ports, check only the scheme that actually listens on that port.</p>
       <select name="llm_endpoint_id">
         <option value="">— default —</option>
         {% for e in endpoints %}
-          <option value="{{ e.id }}">{{ e.name }} ({{ e.model }})</option>
+          <option value="{{ e.id }}" {% if prefill.llm_endpoint_id == e.id %}selected{% endif %}>{{ e.name }} ({{ e.model }})</option>
         {% endfor %}
       </select>
     </label>
@@ -65,7 +94,12 @@ ports, check only the scheme that actually listens on that port.</p>
       <select name="user_agent_id">
         <option value="">— default —</option>
         {% for u in user_agents %}
-          <option value="{{ u.id }}" {% if u.is_default %}selected{% endif %}>{{ u.label }}</option>
+          {# Prefer the prefill UA when prefilling; otherwise mark the
+             default UA as selected (the original greenfield behavior). #}
+          <option value="{{ u.id }}"
+            {% if prefill.user_agent_id is defined and prefill.user_agent_id %}{% if prefill.user_agent_id == u.id %}selected{% endif %}{% elif u.is_default %}selected{% endif %}>
+            {{ u.label }}
+          </option>
         {% endfor %}
       </select>
       <small class="muted">Sent by every HTTP scanner. Manage on <a href="{{ base }}/user-agents">/user-agents</a>.</small>
@@ -75,10 +109,19 @@ ports, check only the scheme that actually listens on that port.</p>
       <legend style="padding:0 .4em; color: var(--muted)">Credentialed scan (optional)</legend>
       <p class="muted" style="margin-top:0">Leave blank for an unauthenticated scan. SSO / Okta FastPass / DUO targets:
       use <a href="{{ base }}/auth">capture-then-replay</a> instead — paste-in form creds can't drive MFA.</p>
-      <label>Username <input name="creds_username"></label>
-      <label>Password <input name="creds_password" type="password"></label>
+      <label>Username <input name="creds_username" value="{{ prefill.creds_username or '' }}"></label>
+      {# Password is intentionally NOT pre-filled. Echoing the stored
+         password back into the rendered HTML would leak it to anyone
+         who screenshots the page or pastes its DOM. The analyst
+         re-enters the password if they want a credentialed re-scan,
+         or leaves it blank for an anonymous one. #}
+      <label>Password
+        <input name="creds_password" type="password"
+               {% if prefill.creds_username %}placeholder="re-enter to use credentials, or leave blank for an anonymous re-scan"{% endif %}>
+      </label>
       <label>Login URL (form POST target)
-        <input name="login_url" placeholder="https://app.example.com/login">
+        <input name="login_url" value="{{ prefill.login_url or '' }}"
+               placeholder="https://app.example.com/login">
       </label>
     </fieldset>
 
@@ -87,7 +130,7 @@ ports, check only the scheme that actually listens on that port.</p>
        this scan finishes — so only the most recent run survives. In-flight
        scans are never touched. #}
     <label class="check" style="margin-top:.6em">
-      <input type="checkbox" name="keep_only_latest">
+      <input type="checkbox" name="keep_only_latest" {% if prefill.keep_only_latest %}checked{% endif %}>
       Keep only latest
       <small class="muted">
         — when this scan finishes, automatically delete prior completed

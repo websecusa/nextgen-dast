@@ -246,7 +246,21 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
   "Archive (accepted risk)" join Resolved as pseudo-severities.
 
 
-## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits
+## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
+
+- **2026-05-01** — **Re-scan button prefill** — the "Re-scan / new
+  target" link on the assessment detail page is renamed to
+  **Re-scan** and now carries `?from=<aid>`. The `/assess` GET
+  handler reads the source assessment and pre-populates the form
+  with the prior scan's settings: FQDN, application id, schemes
+  (http/https), profile, LLM tier + endpoint, user-agent, login
+  URL, creds_username, and keep-only-latest. The credentials
+  password is intentionally NOT echoed into the DOM (would leak it
+  via screenshots / pasted DOM); the analyst re-enters it for a
+  credentialed re-scan or leaves it blank for an anonymous one.
+  The greenfield "Assess a target" path is unchanged when no
+  `from` parameter is supplied.
+
 
 - **2026-05-01** — **`admin_exposure` v1.2** and **`info_disclosure`
   v1.2** — add 404 short-circuits. When a discovery scanner (ffuf,
