@@ -144,50 +144,81 @@ def run(aid: int, safe_only: bool = False) -> None:
                 "login_diagnostics": result.get("diagnostics") or {},
             }
 
-    # 2. Enumerate candidate findings — open + has an evidence URL +
-    # severity is actionable + validation_status is non-terminal. Info-
-    # severity rows are skipped because they're reconnaissance signal
-    # rather than vulnerabilities and burning probe budget on them
-    # dilutes the run. Validation states are split into terminal vs
-    # re-runnable: 'validated' and 'false_positive' are terminal (the
-    # probe already gave a confident verdict and the analyst should
-    # review manually before re-firing), while 'errored' and
-    # 'inconclusive' are re-runnable — a transient probe failure or a
-    # bad first attempt should NOT freeze the finding out of every
-    # subsequent bulk run, which is the trap the per-finding Challenge
-    # button avoided but this filter previously walked into.
-    findings = db.query(
+    # 2. Enumerate every open finding in the assessment with an
+    # evidence URL, then bucket each one as eligible / skipped-by-
+    # reason. We pull all severity levels and statuses up front (rather
+    # than filtering in SQL) so the counts can be reported back to the
+    # operator — the previous version filtered silently in SQL, which
+    # made bulk runs look like they had simply "done nothing" when in
+    # reality dozens of findings had been screened out.
+    #
+    # Skip rules:
+    #   * info-severity     → reconnaissance signal, not vulnerabilities;
+    #                         probing them produces noise and drains
+    #                         budget without analyst value.
+    #   * already-terminal  → validation_status in (validated,
+    #                         false_positive). The probe already gave a
+    #                         confident verdict; re-running on every
+    #                         bulk pass would burn budget and pollute
+    #                         the audit log. Re-runnable states
+    #                         (inconclusive, errored, unvalidated)
+    #                         flow through to the eligible bucket.
+    #   * non-open status   → fixed / accepted_risk / false_positive on
+    #                         findings.status — the analyst already
+    #                         dispositioned the row. Skipping respects
+    #                         that and avoids re-opening a closed
+    #                         triage decision.
+    #   * no probe match    → no toolkit probe is registered for this
+    #                         (source_tool, owasp, cwe) combination.
+    candidates = db.query(
         "SELECT * FROM findings WHERE assessment_id = %s "
-        "  AND COALESCE(status,'open') = 'open' "
-        "  AND COALESCE(validation_status,'unvalidated') "
-        "      NOT IN ('validated','false_positive') "
-        "  AND severity IN ('critical','high','medium','low') "
         "  AND evidence_url IS NOT NULL AND evidence_url <> '' "
-        "ORDER BY FIELD(severity,'critical','high','medium','low'), id",
+        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (aid,))
 
-    # 3. Filter to ones that have a probe match. In safe-only mode we
-    # additionally require the matched probe to be classified
-    # `read-only` — anything that injects payloads or modifies state
-    # falls back to the manual Challenge button, where the analyst
-    # sees the budget and confirms before it runs.
+    skip_counts = {"info": 0, "terminal": 0, "non_open": 0, "no_probe": 0}
     plan: list[tuple[dict, dict]] = []
-    for f in findings:
+    for f in candidates:
+        if (f.get("severity") or "").lower() == "info":
+            skip_counts["info"] += 1
+            continue
+        vs = (f.get("validation_status") or "unvalidated").lower()
+        if vs in ("validated", "false_positive"):
+            skip_counts["terminal"] += 1
+            continue
+        st = (f.get("status") or "open").lower()
+        if st != "open":
+            skip_counts["non_open"] += 1
+            continue
         p = toolkit_mod.find_probe_for_finding(f)
         if not p:
+            skip_counts["no_probe"] += 1
             continue
+        # safe-only mode adds one more filter: the matched probe must
+        # be classified read-only. Stateful probes only run via the
+        # manual per-finding Challenge button, where the analyst sees
+        # the budget and confirms.
         if safe_only and (p.get("safety_class") != "read-only"):
+            skip_counts["no_probe"] += 1
             continue
         plan.append((f, p))
 
     total = len(plan)
+    skipped_total = sum(skip_counts.values())
+    skip_summary = (f"skipped {skipped_total}: "
+                    f"{skip_counts['terminal']} already-validated, "
+                    f"{skip_counts['info']} info, "
+                    f"{skip_counts['non_open']} closed-status, "
+                    f"{skip_counts['no_probe']} no-probe")
+
     if not total:
-        _step(aid, f"{label}: no eligible findings (skipped or no probes)")
-        print("[challenge_runner] nothing to do", flush=True)
+        _step(aid, f"{label}: nothing to run — {skip_summary}")
+        print(f"[challenge_runner] aid={aid} mode={label} eligible=0 "
+              f"{skip_summary}", flush=True)
         return
 
     print(f"[challenge_runner] aid={aid} mode={label} eligible={total} "
-          f"auth_source={auth_diag.get('source')}", flush=True)
+          f"{skip_summary} auth_source={auth_diag.get('source')}", flush=True)
 
     # 4. Run each probe. Light pacing between findings to be polite to
     # the target — the per-probe SafeClient already rate-limits per
@@ -236,10 +267,14 @@ def run(aid: int, safe_only: bool = False) -> None:
 
         time.sleep(0.5)
 
+    # Final summary includes both run counts and skip-reason counts so
+    # the operator can see at a glance why "Challenge all" did N of M
+    # — e.g. "done: 4 validated, 0 fp, 1 inconclusive, 0 errored;
+    # skipped 8: 6 already-validated, 2 info" makes the gap legible.
     summary = (f"{label}: done — {counts['validated']} validated, "
                f"{counts['false_positive']} false-positive, "
                f"{counts['inconclusive']} inconclusive, "
-               f"{counts['errored']} errored")
+               f"{counts['errored']} errored; {skip_summary}")
     _step(aid, summary)
     print(f"[challenge_runner] {summary}", flush=True)
 
