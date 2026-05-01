@@ -12,7 +12,7 @@ a high-fidelity validation toolkit. Ships as a Docker image
 This README walks you through a fresh-machine install end-to-end. If
 something doesn't work, jump to **Troubleshooting** at the bottom.
 
-License: Free to use.  This is my part at helping security teams get a basic DAST in environments, especially teams with small budgets.
+## License: Free to use.  This is my part at helping security teams get a basic DAST in environments, especially teams with small budgets.
 
 ---
 
