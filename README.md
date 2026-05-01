@@ -13,9 +13,8 @@ This README walks you through a fresh-machine install end-to-end. If
 something doesn't work, jump to **Troubleshooting** at the bottom.
 
 ## License: Free to use.  This is my part at helping security teams get a basic DAST in environments, especially teams with small budgets.
-  <h1 align="center">                                                                                                                                                                  
-    <strong><span style="color:red">⚠️  I am not responsible for any damages. Use at your own risk! Community should help to update! ⚠️ </span></strong>                                 
-  </h1> 
+[!CAUTION]
+# I am not responsible for any damages. Use at your own risk! Community should help to update!
 
 ---
 
