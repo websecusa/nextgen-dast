@@ -1,0 +1,34 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "anomaly_5xx_validation",
+  "version": "1.0",
+  "summary": "Validates wapiti / nikto / nuclei 'anomaly: 5xx' findings by replaying the captured request, scanning for information disclosure in the 5xx body, and using a same-length benign control payload to disambiguate content-driven 5xx from upstream buffer / size-driven 5xx (the common false-positive mode).",
+  "validates": [
+    "CWE-209",
+    "CWE-754",
+    "CWE-755"
+  ],
+  "matches_titles": [
+    "anomaly: internal server error",
+    "anomaly: 500",
+    "anomaly: 502",
+    "anomaly: 503",
+    "anomaly: 504",
+    "anomaly: bad gateway",
+    "anomaly: service unavailable",
+    "anomaly: gateway timeout",
+    "internal server error"
+  ],
+  "matches_tools": ["wapiti", "nuclei", "nikto"],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 5,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Evidence URL of the finding (used as fallback when raw_data has no captured request)",
+    "--param": "Parameter wapiti was injecting into (auto-detected from raw_data.parameter)",
+    "--module": "Originating wapiti module (file / sql / xss / ...). Used to apply module-aware sanity checks; auto-detected from raw_data.module",
+    "--retries": "Number of replays before declaring non-reproduction (default 2)",
+    "--control-char": "Single character used to build the same-length benign control payload (default A)"
+  }
+}

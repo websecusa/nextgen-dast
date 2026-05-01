@@ -246,7 +246,29 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
   "Archive (accepted risk)" join Resolved as pseudo-severities.
 
 
-## 2026-05 — High-fidelity CSRF rule
+## 2026-05 — High-fidelity CSRF rule + anomaly_5xx_validation
+
+- **2026-05-01** — **`anomaly_5xx_validation` probe v1.0** — new
+  validator for wapiti / nuclei / nikto "anomaly: Internal Server
+  Error" findings. Replays the captured HTTP request, scans the
+  5xx response body for real information disclosure (stack traces,
+  framework banners, internal paths, SQL errors), and uses a
+  same-wire-length benign control payload to disambiguate
+  content-driven 5xx (a real robustness bug) from upstream buffer
+  / proxy header overflow (the common false-positive mode where a
+  long parameter is reflected into a redirect Location header that
+  exceeds nginx's proxy_buffer_size).
+  - Module-aware sanity: `file`-module / LFI findings against a
+    Python / Node / Java stack also note that `php://filter`
+    chains are semantically impossible regardless of the 5xx
+    behaviour.
+  - Sizes the control payload by the parameter's WIRE length
+    (url-encoded bytes), not its decoded length, since the
+    upstream-buffer overflow is triggered by encoded bytes.
+  - Routed via `matches_titles` for "anomaly: Internal Server
+    Error", "anomaly: 502 Bad Gateway", etc. and via
+    `matches_tools` (wapiti / nuclei / nikto) so multi-tool
+    pipelines all hit it.
 
 - **2026-05-01** — **`csrf_validation` probe v1.2** — full rewrite
   of the verdict logic so wapiti CSRF findings are no longer left
