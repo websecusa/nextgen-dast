@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, "/app")
 import db
 
-WAPITI_DB = "/root/.wapiti/scans/74180302530230.customer.fairtprm.com_domain_89a036ad.db"
+WAPITI_DB = "/root/.wapiti/scans/<sampledomain>_domain_89a036ad.db"
 ASSESSMENT_ID = 3
 WAPITI_SCAN_ID = "20260425-225817-a99ad7"
 
