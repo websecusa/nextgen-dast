@@ -401,6 +401,66 @@ WAPITI_SEVERITY_OVERRIDES = {
 }
 
 
+# Path patterns that indicate the request was hitting a login-style endpoint.
+# Wapiti's `csrf` module flags any HTML form lacking an anti-CSRF token —
+# including the login form, where a session-bound CSRF token cannot apply
+# (there is no session yet). The classic CSRF threat model also does not
+# cover login forms: an attacker who can submit credentials on the victim's
+# behalf already knows the credentials. Residual login-CSRF risk (forced
+# sign-in into an attacker-controlled account) is a real but lower-impact
+# class — it's mitigated by SameSite=Strict cookies + Origin/Referer checks
+# on POST /login (both present in nextgen-dast 2.1.1).
+#
+# Anchored at end-of-path so /api/login matches but /loginstatus does not.
+# Case-insensitive because some apps capitalize the route.
+_WAPITI_LOGIN_PATH_RE = re.compile(
+    r"(?:^|/)(?:login|signin|sign-in|signup|sign-up|register|auth)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def _wapiti_is_login_form_csrf(category: str, item: dict) -> bool:
+    """True when a wapiti `Cross Site Request Forgery` finding is on a
+    request that looks like a login / sign-up endpoint.
+
+    The match is on the request path AND HTTP method (POST or PUT only —
+    a CSRF flag on a GET is itself spurious). Conservative: anything
+    that's only a substring match (e.g. /loginhelp) does not qualify."""
+    if category != "Cross Site Request Forgery":
+        return False
+    method = (item.get("method") or "").upper()
+    if method not in ("POST", "PUT"):
+        return False
+    path = item.get("path") or ""
+    # `path` from wapiti is typically a full URL; pull the path component
+    # if so, else use as-is.
+    if "://" in path:
+        try:
+            from urllib.parse import urlsplit
+            path = urlsplit(path).path or path
+        except Exception:
+            pass
+    return bool(_WAPITI_LOGIN_PATH_RE.search(path))
+
+
+def _wapiti_login_csrf_addendum() -> str:
+    """Human-readable note appended to the description so a reviewer
+    understands WHY the severity was demoted. Mentions the load-bearing
+    mitigations the platform itself supplies."""
+    return (
+        "\n\n[normalized by nextgen-dast 2.1.1] Severity downgraded "
+        "because this CSRF flag is on a login / sign-up form. A "
+        "session-bound CSRF token cannot apply on these endpoints "
+        "(there is no session before the request succeeds). Residual "
+        "login-CSRF risk (forced sign-in into an attacker-controlled "
+        "account) is mitigated when the application sets "
+        "SameSite=Strict on session cookies AND verifies the Origin / "
+        "Referer header on credential-submission requests. Confirm "
+        "both are present before triaging this as informational; if "
+        "either is missing, restore the original 'medium' severity."
+    )
+
+
 def parse_wapiti(scan_dir: Path) -> Iterable[dict]:
     rep = scan_dir / "report"
     if not rep.is_dir():
@@ -417,11 +477,20 @@ def parse_wapiti(scan_dir: Path) -> Iterable[dict]:
             level = it.get("level", 1)
             sev = WAPITI_SEV_BY_LEVEL.get(level, "low")
             sev = WAPITI_SEVERITY_OVERRIDES.get(category, sev)
+            description = it.get("info") or ""
+            # Login-form CSRF triage: see _wapiti_is_login_form_csrf above
+            # for the rationale. The finding itself is preserved (so the
+            # reviewer still sees that the form has no token); only the
+            # severity is demoted and the description annotated.
+            if _wapiti_is_login_form_csrf(category, it):
+                sev = "info"
+                description = (description.rstrip() +
+                               _wapiti_login_csrf_addendum())
             yield {
                 "source_tool": "wapiti",
                 "severity": sev,
                 "title": category,
-                "description": it.get("info") or "",
+                "description": description,
                 "evidence_url": it.get("path"),
                 "evidence_method": it.get("method"),
                 "remediation": (data.get("classifications") or {})
