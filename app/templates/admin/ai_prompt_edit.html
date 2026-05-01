@@ -1,0 +1,117 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  AI Prompt editor. Used for both new prompts (is_new=True) and edits
+  to an existing row. The placeholders sidebar lists the {names} valid
+  for the chosen slot — these are declared in code by
+  enhanced_ai_prompts.PLACEHOLDERS_BY_SLOT and surfaced here so the
+  editor knows what substitutions the runtime will provide.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>{% if is_new %}Add AI Prompt{% else %}Edit AI Prompt — {{ row.name }}{% endif %}</h1>
+{% if msg %}<p class="banner">{{ msg.replace('+', ' ') }}</p>{% endif %}
+
+<div style="display:grid; grid-template-columns: 3fr 1fr; gap:1em">
+  <section class="card">
+    <form method="post"
+          action="{{ base }}/admin/ai-prompts{% if not is_new %}/{{ row.id }}{% endif %}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label>Slot
+        {% if is_new %}
+          <select name="slot">
+            {% for s in slot_options %}
+              <option value="{{ s }}" {% if s == row.slot %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        {% else %}
+          <input value="{{ row.slot }}" disabled>
+          <small class="muted">Slot is fixed once a prompt is created — slots correspond to runtime hooks in app/enhanced_ai.py.</small>
+        {% endif %}
+      </label>
+
+      <label>Name
+        <input name="name" value="{{ row.name }}" required maxlength="128">
+      </label>
+
+      <label>Description
+        <input name="description" value="{{ row.description or '' }}" maxlength="500">
+      </label>
+
+      <div style="display:flex; gap:1em">
+        <label style="flex:1">Category
+          <input name="category" value="{{ row.category or '' }}" maxlength="64">
+          <small class="muted">Used as the <code>category</code> field on emitted findings (weakness slots only).</small>
+        </label>
+        <label style="flex:1">Sort order
+          <input name="sort_order" type="number" value="{{ row.sort_order }}">
+        </label>
+        <label style="flex:1">Batch size
+          <input name="batch_size" type="number" value="{{ row.batch_size or '' }}">
+          <small class="muted">Fidelity slot only. Findings per LLM call.</small>
+        </label>
+      </div>
+
+      <label>Fire-when expression
+        <input name="fire_when" value="{{ row.fire_when or '' }}" maxlength="255"
+               placeholder="e.g. has_creds AND findings_count >= 3">
+        <small class="muted">
+          Boolean expression evaluated against the per-assessment telemetry summary.
+          Empty = always fire. Atoms: see placeholders sidebar (booleans only).
+          Comparisons: <code>findings_count &gt;= 5</code>. Operators: AND, OR, parens.
+        </small>
+      </label>
+
+      <label>System prompt
+        <textarea name="system_prompt" rows="20" required style="font-family:monospace; width:100%">{{ row.system_prompt }}</textarea>
+        <small class="muted">
+          Carries the non-destructive operating constraints (HEADER) and the
+          finding output schema (FOOTER) for weakness-discovery scenarios.
+          Edit with care — weakening these instructions in a single prompt
+          changes the safety posture of just this scenario.
+        </small>
+      </label>
+
+      <label>User template
+        <textarea name="user_template" rows="14" required style="font-family:monospace; width:100%">{{ row.user_template }}</textarea>
+        <small class="muted">
+          Substituted at scan time with the placeholders listed on the right.
+          Unknown placeholders render as <code>{placeholder=??unknown??:&lt;name&gt;}</code>
+          rather than crashing the run.
+        </small>
+      </label>
+
+      <label class="check" style="margin-top:.6em">
+        <input type="checkbox" name="is_active" {% if row.is_active %}checked{% endif %}>
+        Active
+        <small class="muted">— Inactive prompts are skipped at scan time but kept for re-enabling later.</small>
+      </label>
+
+      <div style="margin-top:1em; display:flex; gap:.5em">
+        <button type="submit">Save</button>
+        <a href="{{ base }}/admin/ai-prompts" class="button ghost">Cancel</a>
+      </div>
+    </form>
+  </section>
+
+  <aside class="card" style="font-size:.9em">
+    <h3 style="margin-top:0">Available placeholders</h3>
+    <p class="muted small">
+      These are the only substitutions wired in code for this slot. Reference
+      them in the user template (and in the system prompt's
+      <code>&#123;fqdn&#125;</code> banner) using single curly braces.
+    </p>
+    <ul style="font-family:monospace; line-height:1.5">
+      {% for p in placeholders %}
+        <li>{{ '{' }}{{ p }}{{ '}' }}</li>
+      {% endfor %}
+    </ul>
+    <p class="muted small">
+      Other braces in the prompt body (e.g. JSON examples) must be doubled
+      ({{ '{{' }}…{{ '}}' }}) so they survive str.format substitution.
+    </p>
+  </aside>
+</div>
+{% endblock %}

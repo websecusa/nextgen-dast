@@ -766,12 +766,51 @@ def main() -> int:
                 update(aid, total_findings=total_findings)
         update(aid, current_step="ingestion complete",
                status="consolidating")
+        # Automatic post-scan validation pass FIRST — re-run every read-only
+        # toolkit probe against its matched findings to catch obvious
+        # false positives before the LLM passes see them. A high-confidence
+        # "not reproduced" verdict auto-flips the finding to
+        # status=false_positive; everything else is left for human triage
+        # (and, on advanced tier, for the enhanced_ai_testing fidelity pass
+        # below). This ran AFTER consolidation in earlier 2.1.1 builds; it
+        # was moved up so consolidation's exec summary sees post-validation
+        # state and (on advanced tier) sees enhanced_ai_testing findings.
+        # We deliberately fence this in a try/except so a flaky probe
+        # (timeout, target down, etc.) cannot mark the whole assessment
+        # as errored — the scan results are already persisted at this point.
+        update(aid, current_step="auto_validate: starting")
+        try:
+            challenge_runner.run(aid, safe_only=True)
+        except Exception as e:
+            update(aid, error_text=f"auto_validate crashed: {e!r}")
+
+        # Enhanced-AI-Testing pass — advanced tier only. Runs after
+        # challenge_runner so the fidelity sub-pass can re-grade only
+        # the findings the read-only probes couldn't decide on
+        # (validation_status in unvalidated/inconclusive). Emits new
+        # weakness-discovery findings as source_tool='enhanced_ai_testing'
+        # under a per-scan budget cap. Failures are isolated inside
+        # enhanced_ai.run; this try/except catches anything that escapes
+        # so the orchestrator finalize path always reaches done/error.
+        if a.get("llm_tier") == "advanced":
+            update(aid, current_step="enhanced_ai_testing: weakness + fidelity")
+            try:
+                import enhanced_ai as enhanced_ai_mod
+                ea_summary = enhanced_ai_mod.run(aid, enrich_endpoint)
+                if ea_summary.get("errors"):
+                    # Don't overwrite a prior error_text — append.
+                    update(aid, error_text=("enhanced_ai_testing: "
+                                             + "; ".join(ea_summary["errors"])[:1000]))
+            except Exception as e:
+                update(aid, error_text=f"enhanced_ai_testing crashed: {e!r}")
+
         # Basic-tier roll-up: ask the LLM to produce an executive summary,
         # an overall risk score, and a top-priorities list from the
-        # deduplicated findings. Per-flow deep analysis (advanced tier)
-        # will hook in here as well in a follow-up. A failure in this
-        # pass must NOT lose the underlying findings — log the error and
-        # still mark the assessment done so the user can recover.
+        # deduplicated findings. On advanced tier this runs LAST so the
+        # exec summary reflects both validation verdicts (challenge_runner)
+        # and enhanced_ai_testing findings + fidelity adjustments.
+        # A failure here must NOT lose the underlying findings — log the
+        # error and still mark the assessment done so the user can recover.
         if a.get("llm_tier") in ("basic", "advanced"):
             update(aid, current_step="consolidating: roll-up + exec summary")
             try:
@@ -782,20 +821,7 @@ def main() -> int:
                     ))
             except Exception as e:
                 update(aid, error_text=f"consolidation crashed: {e!r}")
-        # Automatic post-scan validation pass: re-run every read-only
-        # toolkit probe against its matched findings to catch obvious
-        # false positives before the analyst opens the assessment. A
-        # high-confidence "not reproduced" verdict auto-flips the
-        # finding to status=false_positive; everything else is left
-        # for human triage. We deliberately fence this in a try/except
-        # so a flaky probe (timeout, target down, etc.) cannot mark
-        # the whole assessment as errored — the scan results are
-        # already persisted at this point.
-        update(aid, current_step="auto_validate: starting")
-        try:
-            challenge_runner.run(aid, safe_only=True)
-        except Exception as e:
-            update(aid, error_text=f"auto_validate crashed: {e!r}")
+
         update(aid, status="done", current_step="done", finished_at=now())
 
         # Auto-dedupe pass. If this assessment was created with

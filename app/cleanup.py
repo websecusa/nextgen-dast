@@ -255,6 +255,15 @@ def cleanup_assessment(assessment_id: int) -> dict:
         "DELETE FROM llm_analyses WHERE target_type='flow' AND "
         "target_id IN (SELECT id FROM (SELECT %s AS id) t WHERE 1=0) ",
         ("",))  # placeholder — we don't track scan-flow→llm linkage strongly enough yet
+    # Enhanced-AI / consolidation / enrichment llm_analyses rows now carry
+    # a direct assessment_id (added when the Enhanced-AI-Testing pass
+    # shipped). On fresh DBs the FK has ON DELETE CASCADE; on existing
+    # 2.1.1 DBs that picked the column up via ALTER, no FK was created
+    # (MariaDB ADD CONSTRAINT is not idempotent — see db/schema.sql), so
+    # we delete by hand here. The query is a no-op on fresh DBs because
+    # the cascade has already swept the rows by the time we reach it.
+    db.execute(
+        "DELETE FROM llm_analyses WHERE assessment_id = %s", (a["id"],))
     db.execute("DELETE FROM assessments WHERE id = %s", (a["id"],))
     summary["db"] = "deleted"
 

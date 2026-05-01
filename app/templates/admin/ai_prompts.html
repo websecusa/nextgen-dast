@@ -1,0 +1,99 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  AI Prompts admin (Enhanced-AI-Testing scenarios).
+
+  Lists every row in ai_prompts grouped by slot, with edit / restore /
+  delete / toggle controls. Superadmin-only — `require_superadmin` on
+  every handler enforces the gate; the layout file already excludes
+  the link below admin tier.
+
+  Adding a brand-new prompt links to /admin/ai-prompts/new?slot=<slot>;
+  the editor pre-fills the right placeholder set for that slot.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>AI Prompts (Enhanced-AI-Testing)</h1>
+<p class="muted">
+  These prompts drive the advanced-tier post-scan LLM pass. Each row
+  is one scenario — the orchestrator iterates the active rows in
+  sort order, evaluating each scenario's <code>fire_when</code>
+  expression against the per-assessment telemetry summary and
+  skipping silently when it evaluates false (so unused scenarios
+  burn no LLM budget).
+</p>
+<p class="muted">
+  Editing a prompt's body is a <strong>security-sensitive</strong>
+  operation — the system-prompt boilerplate carries the
+  non-destructive operating constraints. Per-prompt edits land in the
+  audit log; <em>Restore to default</em> reverts a seeded row to its
+  in-code baseline.
+</p>
+
+{% if msg %}<p class="banner">{{ msg.replace('+', ' ') }}</p>{% endif %}
+
+{% for slot, rows in grouped.items() %}
+<section class="card" style="margin-bottom:1em">
+  <h2 style="margin-top:0">{{ slot }}</h2>
+  <p class="muted">
+    {{ rows|length }} prompt(s);
+    {{ rows|selectattr('is_active', 'equalto', 1)|list|length }} active.
+  </p>
+  <table>
+    <thead><tr>
+      <th>Sort</th>
+      <th>Name</th>
+      <th>Category</th>
+      <th>Fire when</th>
+      <th>Active</th>
+      <th>Seeded</th>
+      <th>Version</th>
+      <th>Updated</th>
+      <th>Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.sort_order }}</td>
+        <td><a href="{{ base }}/admin/ai-prompts/{{ r.id }}"><strong>{{ r.name }}</strong></a>
+            <div class="muted small">{{ r.description or "" }}</div></td>
+        <td>{{ r.category or '—' }}</td>
+        <td><code class="small">{{ r.fire_when or '(always)' }}</code></td>
+        <td>{% if r.is_active %}<span class="badge ok">on</span>{% else %}<span class="badge">off</span>{% endif %}</td>
+        <td>{% if r.is_seeded %}seeded{% else %}custom{% endif %}</td>
+        <td>v{{ r.version }}</td>
+        <td class="muted small">{{ r.updated_at }}</td>
+        <td style="white-space:nowrap">
+          <a href="{{ base }}/admin/ai-prompts/{{ r.id }}" class="button ghost small">Edit</a>
+          {% if r.is_seeded %}
+            <form method="post" action="{{ base }}/admin/ai-prompts/{{ r.id }}/restore"
+                  style="display:inline"
+                  onsubmit="return confirm('Restore this prompt to its in-code default? Local edits will be lost.')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="ghost small">Restore</button>
+            </form>
+          {% endif %}
+          <form method="post" action="{{ base }}/admin/ai-prompts/{{ r.id }}/delete"
+                style="display:inline"
+                onsubmit="return confirm('Delete this prompt? Seeded rows can be brought back via Restore from any other seeded row in the same slot.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="warn small">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p style="margin-top:.6em">
+    <a href="{{ base }}/admin/ai-prompts/new?slot={{ slot }}" class="button">+ Add prompt to {{ slot }}</a>
+  </p>
+</section>
+{% endfor %}
+
+{% if not grouped %}
+  <p class="muted">No prompts yet. The default eleven seed on first boot of
+  the Enhanced-AI-Testing image — if you see this, the seed step did not
+  run; check the container logs for <code>enhanced_ai_prompts seed failed</code>.</p>
+{% endif %}
+{% endblock %}

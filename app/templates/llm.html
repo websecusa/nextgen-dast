@@ -64,6 +64,33 @@
 </section>
 
 <section class="card">
+  <h2>Enhanced-AI-Testing</h2>
+  <p>Per-scan budget cap (USD) used by the advanced LLM tier's
+  Enhanced-AI-Testing pass. The value below pre-fills the assess-form
+  budget field; per-user <code>max_spend</code> caps on
+  <a href="{{ base }}/admin/users">/admin/users</a> can lower it
+  further on a per-user basis.</p>
+  {% if is_superadmin %}
+    <form method="post" action="{{ base }}/llm/budget_default" style="display:flex; gap:.5em; align-items:end">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>System default (USD)
+        <input name="advanced_ai_budget_default_usd" type="number" min="0" step="0.01"
+               value="{{ '%.2f'|format(ai_budget_system_default) }}">
+      </label>
+      <button type="submit">Save system default</button>
+    </form>
+  {% else %}
+    <p class="muted">System default: <code>${{ '%.2f'|format(ai_budget_system_default) }}</code>.
+    Only a superadmin can change this value.</p>
+  {% endif %}
+  <p class="muted" style="margin-top:.6em">
+    Edit the AI prompts that drive the Enhanced-AI-Testing pass at
+    <a href="{{ base }}/admin/ai-prompts">/admin/ai-prompts</a>
+    {% if not is_superadmin %} (superadmin only){% endif %}.
+  </p>
+</section>
+
+<section class="card">
   <h2>Add / update endpoint</h2>
   <form method="post" action="{{ base }}/llm/endpoint">
     <label>Name (unique)

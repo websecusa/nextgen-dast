@@ -88,6 +88,10 @@ _WRITABLE_FIELDS = (
     "llm_endpoint_id", "user_agent_id", "creds_username", "creds_password",
     "login_url", "application_id", "cron_expr", "start_after", "end_before",
     "enabled", "skip_if_running", "keep_only_latest",
+    # Enhanced-AI controls. Carried into every materialized assessments
+    # row so a scheduled scan inherits the debug + budget the schedule
+    # was configured with. Only meaningful for llm_tier='advanced'.
+    "llm_debug", "enhanced_ai_budget_usd",
 )
 
 
@@ -112,16 +116,25 @@ def _normalize(payload: dict) -> dict:
 
     # Booleans (forms send "on" / "1" / missing).
     for k in ("scan_http", "scan_https", "enabled",
-              "skip_if_running", "keep_only_latest"):
+              "skip_if_running", "keep_only_latest", "llm_debug"):
         if k in out:
             out[k] = 1 if out[k] in (1, "1", True, "on", "true") else 0
 
     # Empty strings → NULL for the nullable text columns.
     for k in ("creds_username", "creds_password", "login_url",
               "application_id", "start_after", "end_before",
-              "llm_endpoint_id", "user_agent_id"):
+              "llm_endpoint_id", "user_agent_id",
+              "enhanced_ai_budget_usd"):
         if k in out and (out[k] is None or out[k] == ""):
             out[k] = None
+
+    # Coerce the budget cap if present (form/API may send it as a string).
+    if out.get("enhanced_ai_budget_usd") is not None:
+        try:
+            out["enhanced_ai_budget_usd"] = round(
+                float(out["enhanced_ai_budget_usd"]), 2)
+        except (TypeError, ValueError):
+            out["enhanced_ai_budget_usd"] = None
 
     # Cap application_id to its column width to match /assess.
     if out.get("application_id"):
@@ -245,9 +258,10 @@ def _materialize(sched: dict) -> int:
               (fqdn, scan_http, scan_https, profile, llm_tier,
                llm_endpoint_id, user_agent_id,
                creds_username, creds_password, login_url,
-               application_id, schedule_id, keep_only_latest, status)
+               application_id, schedule_id, keep_only_latest,
+               llm_debug, enhanced_ai_budget_usd, status)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   'queued')""",
+                   %s, %s, 'queued')""",
         (
             sched["fqdn"],
             int(sched.get("scan_http") or 0),
@@ -262,6 +276,8 @@ def _materialize(sched: dict) -> int:
             sched.get("application_id"),
             sched["id"],
             int(sched.get("keep_only_latest") or 0),
+            int(sched.get("llm_debug") or 0),
+            sched.get("enhanced_ai_budget_usd"),
         ),
     )
 
