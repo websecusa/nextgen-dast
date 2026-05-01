@@ -55,49 +55,16 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _verdict_to_status(verdict: dict) -> str:
-    """Same mapping as server._verdict_to_status — duplicated here so
-    this script can run standalone without importing the FastAPI app.
-
-    Distinguish a real crash (`error` field set — subprocess exception,
-    safety violation) from a soft refusal (probe ran cleanly but
-    declined to produce a verdict — `ok=False`, no error). The earlier
-    revision lumped both into 'errored', which had two bad effects:
-    the analyst saw a red badge for a perfectly clean run that just
-    needed different inputs, and the next bulk pass would skip those
-    findings as terminal even though they were re-runnable. Soft
-    refusals now collapse to 'inconclusive'.
-    """
-    if verdict.get("error"):
-        return "errored"
-    if not verdict.get("ok", True):
-        return "inconclusive"
-    v = verdict.get("validated")
-    if v is True:
-        return "validated"
-    if v is False:
-        if (verdict.get("confidence") or 0) >= 0.8:
-            return "false_positive"
-        return "inconclusive"
-    return "inconclusive"
-
-
-def _build_probe_config(finding: dict, probe: dict,
-                        cookie: Optional[str]) -> dict:
-    """Same shape that server._run_finding_probe produces."""
-    from urllib.parse import urlparse
-    parsed = urlparse(finding.get("evidence_url") or "")
-    config: dict = {
-        "url": finding.get("evidence_url") or "",
-        "method": (finding.get("evidence_method") or "GET").upper(),
-        "scope": [parsed.hostname] if parsed.hostname else [],
-        "max_requests": int(probe.get("request_budget_max") or 30),
-        "max_rps": 5.0,
-        "dry_run": False,
-    }
-    if cookie:
-        config["cookie"] = cookie
-    return config
+# Verdict→status mapping and probe-config construction live in the
+# shared toolkit module so the bulk runner and the per-finding /challenge
+# route stay byte-identical. Earlier revisions duplicated this logic
+# here and the two copies drifted: the bulk version omitted url-
+# absolutization, raw_data pass-through, the destructive-method gate,
+# and auth_username, which made the bulk runner systematically fail
+# probes (auth_logout_does_not_invalidate, config_hsts_missing on
+# path-only evidence URLs, etc.) that the per-finding click validated
+# cleanly. Sharing the helpers makes that class of bug structurally
+# impossible.
 
 
 def _step(aid: int, msg: str) -> None:
@@ -228,10 +195,14 @@ def run(aid: int, safe_only: bool = False) -> None:
     for i, (f, p) in enumerate(plan, 1):
         _step(aid, f"{label}: running probe {i}/{total} "
                    f"({p['name']} on finding #{f['id']})")
-        config = _build_probe_config(f, p, session_cookie)
-        # per-probe timeout from manifest typical budget × 2, clamped 30..120s
-        typical = int(p.get("request_budget_typical") or 12)
-        timeout = min(120.0, max(30.0, typical * 2.0))
+        # Shared config + timeout + verdict mapping with the per-finding
+        # /challenge route. See toolkit.build_finding_config for what
+        # gets populated; the bulk runner used to have its own stripped-
+        # down version, which was the root cause of probes (auth_logout,
+        # config_hsts on path-only urls, etc.) silently erroring under
+        # bulk Challenge while the per-finding click validated them.
+        config = toolkit_mod.build_finding_config(f, p, cookie=session_cookie)
+        timeout = toolkit_mod.probe_timeout(p)
         try:
             verdict = toolkit_mod.run_probe(p["name"], config, timeout=timeout)
         except Exception as e:
@@ -244,7 +215,7 @@ def run(aid: int, safe_only: bool = False) -> None:
                 if "headers" in entry:
                     entry["headers"].pop("Cookie", None)
 
-        new_status = _verdict_to_status(verdict)
+        new_status = toolkit_mod.verdict_to_status(verdict)
         counts[new_status] = counts.get(new_status, 0) + 1
 
         # Same write logic as the per-finding route: flip findings.status

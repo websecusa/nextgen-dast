@@ -176,6 +176,141 @@ def find_probe_for_finding(finding: dict) -> Optional[dict]:
     return None
 
 
+def build_finding_config(finding: dict, probe: dict,
+                         cookie: Optional[str] = None,
+                         extra: Optional[dict] = None) -> dict:
+    """Construct the probe-config dict for one finding.
+
+    Single source of truth shared between the per-finding /challenge web
+    route (server.py) and the bulk-Challenge runner (scripts/
+    challenge_runner.py). The two used to diverge — the bulk runner had
+    a stripped-down config that omitted url-absolutization, raw_data
+    pass-through, the destructive-method gate for `requires_post`
+    probes, and `auth_username`. That made the bulk runner systematically
+    fail probes that the manual click validated cleanly (notably
+    auth_logout_does_not_invalidate, which needs both the destructive
+    gate AND auth_username; and tools that emit path-only evidence_urls,
+    which urlparse cannot resolve to a host).
+
+    Centralizing the setup here means a probe's contract is satisfied
+    identically by both paths, and a future probe that adds a new
+    config key only needs to register it here once.
+
+    The function does NOT run anything — it returns a dict suitable for
+    `run_probe(probe['name'], config)`. Callers are responsible for
+    timeout selection and verdict-to-status mapping.
+    """
+    import db                 # late import — toolkit is imported very early
+    from urllib.parse import urlparse
+
+    url = finding.get("evidence_url") or ""
+    # Some scanners (wapiti, the older nikto formatters) emit evidence
+    # URLs as paths only — `/login.php`, `/api/auth`. urllib refuses to
+    # send a request without a scheme/host, so the probe would error
+    # before its first request. Resolve via the owning assessment's
+    # FQDN + scheme. Prefer https when both schemes were scanned;
+    # fall back to http only when that's the sole scheme tested.
+    if url.startswith("/"):
+        aid = finding.get("assessment_id")
+        if aid:
+            a = db.query_one("SELECT fqdn, scan_http, scan_https "
+                             "FROM assessments WHERE id = %s", (aid,))
+            if a and a.get("fqdn"):
+                scheme = "https" if a.get("scan_https") else (
+                    "http" if a.get("scan_http") else "https")
+                url = f"{scheme}://{a['fqdn']}{url}"
+    parsed = urlparse(url)
+    # Lock the probe to the host of the finding so it cannot wander to
+    # other assets even if the probe naively follows redirects.
+    scope = [parsed.hostname] if parsed.hostname else []
+
+    config: dict = {
+        "url": url,
+        "method": (finding.get("evidence_method") or "GET").upper(),
+        "scope": scope,
+        "max_requests": int(probe.get("request_budget_max") or 30),
+        "max_rps": 5.0,
+        "dry_run": False,
+        # Carry source-tool-specific context so probes that need it
+        # (testssl test id, nuclei matcher name, wapiti vulnerable
+        # parameter, etc.) can extract it from raw_data without the
+        # analyst typing it. Probes that don't know about these keys
+        # silently absorb them via Probe._config_from_stdin's unknown-
+        # key path.
+        "title": finding.get("title") or "",
+        "raw_data": finding.get("raw_data") or "",
+    }
+
+    # Probes whose manifest declares requires_post need the SafeClient
+    # destructive-method gate opened. The gate is keyed off the
+    # MANIFEST, never the caller, so a forged finding row cannot trick
+    # a read-only probe into mutating state.
+    if probe.get("requires_post"):
+        config["allow_destructive"] = True
+
+    if cookie:
+        config["cookie"] = cookie     # consumed by SafeClient via Probe._build_client
+
+    # Pass the assessment's username (NOT password) so identity-aware
+    # probes (auth_logout_does_not_invalidate, admin_exposure, etc.)
+    # can detect when the username is reflected in a response or use
+    # it to construct a follow-up request. Probes hash it before
+    # storing in evidence so the credential never lands in the
+    # persisted verdict in clear text.
+    aid = finding.get("assessment_id")
+    if aid:
+        a = db.query_one(
+            "SELECT creds_username FROM assessments WHERE id = %s", (aid,))
+        if a and (a.get("creds_username") or "").strip():
+            config["auth_username"] = a["creds_username"].strip()
+
+    if extra:
+        config.update(extra)
+    return config
+
+
+def probe_timeout(probe: dict) -> float:
+    """Per-probe timeout: typical budget × 2 seconds, clamped 30..120s.
+
+    Centralized so per-finding and bulk paths agree. Any probe whose
+    manifest understates `request_budget_typical` will hit the floor;
+    any one that overstates it will hit the ceiling. 120s is the upper
+    bound because a stuck request can otherwise hang the web request
+    or stall the bulk runner mid-batch."""
+    typical = int(probe.get("request_budget_typical") or 12)
+    return min(120.0, max(30.0, typical * 2.0))
+
+
+def verdict_to_status(verdict: dict) -> str:
+    """Map a probe verdict dict to the `findings.validation_status`
+    enum. Single source of truth, replacing the duplicated copy that
+    used to live in scripts/challenge_runner.py.
+
+    Distinguishes a real crash (`error` field set — subprocess died,
+    safety violation, malformed output) from a soft refusal (probe ran
+    cleanly but declined to produce a verdict — `ok=False` with no
+    `error`). The earlier behavior collapsed both into `errored`,
+    which (a) painted a red badge on a perfectly clean run and (b)
+    froze the finding out of subsequent bulk passes. Soft refusals
+    are now `inconclusive`; only hard crashes are `errored`.
+
+    The 0.8 confidence threshold on `validated=False` is what
+    separates a confident "this isn't real" (false_positive) from
+    a tentative one (inconclusive)."""
+    if verdict.get("error"):
+        return "errored"
+    if not verdict.get("ok", True):
+        return "inconclusive"
+    v = verdict.get("validated")
+    if v is True:
+        return "validated"
+    if v is False:
+        if (verdict.get("confidence") or 0) >= 0.8:
+            return "false_positive"
+        return "inconclusive"
+    return "inconclusive"
+
+
 def run_probe(name: str, config: dict, *,
               timeout: float = 60.0) -> dict:
     """Run a probe synchronously, feeding `config` as JSON on stdin and

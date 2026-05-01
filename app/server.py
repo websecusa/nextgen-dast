@@ -4927,108 +4927,24 @@ def _resolve_challenge_cookie(finding: dict,
 def _run_finding_probe(finding: dict, probe: dict,
                        cookie: Optional[str] = None,
                        extra: Optional[dict] = None) -> dict:
-    """Construct a probe config from the finding's evidence URL and
-    invoke toolkit.run_probe. Returns the probe's verdict dict (always —
-    errors are captured into the 'error' key, never raised).
+    """Thin wrapper around toolkit.build_finding_config + run_probe.
 
-    If a cookie is provided, it travels to the probe via stdin JSON only
-    — not argv (which would be visible in `ps aux`). The probe's
-    SafeClient sends it as a `Cookie:` header on every request."""
-    from urllib.parse import urlparse
-    url = finding.get("evidence_url") or ""
-    # Wapiti (and a couple of other tools) emit findings with a path-
-    # only evidence_url like "/login.php". urllib rejects those as
-    # "unknown url type", and the probe errors before sending its first
-    # request. Resolve to an absolute URL using the owning assessment's
-    # FQDN + scheme. Prefer https when the assessment scanned both;
-    # fall back to http if that's the only scheme tested.
-    if url.startswith("/"):
-        aid = finding.get("assessment_id")
-        if aid:
-            a = db.query_one("SELECT fqdn, scan_http, scan_https "
-                             "FROM assessments WHERE id = %s", (aid,))
-            if a and a.get("fqdn"):
-                scheme = "https" if a.get("scan_https") else (
-                    "http" if a.get("scan_http") else "https")
-                url = f"{scheme}://{a['fqdn']}{url}"
-    parsed = urlparse(url)
-    # Lock the probe to the host of the finding so it cannot wander.
-    scope = [parsed.hostname] if parsed.hostname else []
-    config = {
-        "url": url,
-        "method": (finding.get("evidence_method") or "GET").upper(),
-        "scope": scope,
-        "max_requests": int(probe.get("request_budget_max") or 30),
-        "max_rps": 5.0,
-        "dry_run": False,
-        # Pass the finding's title and raw_data through so probes that
-        # need source-tool-specific context (the testssl test id, the
-        # nuclei matcher name, the wapiti vulnerable parameter, ...)
-        # can extract it without the analyst typing it. Probes that
-        # don't know about these keys silently absorb them via the
-        # unknown-key path in Probe._config_from_stdin.
-        "title": finding.get("title") or "",
-        "raw_data": finding.get("raw_data") or "",
-    }
-    # Probes whose manifest declares requires_post need the destructive-
-    # method gate opened so the SafeClient will accept their POSTs. The
-    # gate is gated by the *manifest*, not by the caller, so a forged
-    # finding row cannot trigger destructive operations on a probe that
-    # didn't opt in.
-    if probe.get("requires_post"):
-        config["allow_destructive"] = True
-    if cookie:
-        config["cookie"] = cookie  # picked up by SafeClient via Probe._build_client
-    # Pass the assessment's username (NOT password) into the config so
-    # identity-aware probes (e.g. admin_exposure) can detect when the
-    # username is reflected in a response body. The probes hash it
-    # before storing in evidence so the credential never lands in the
-    # persisted verdict in the clear. Probes that don't know about
-    # `auth_username` ignore it via the unknown-key path in
-    # Probe._config_from_stdin.
-    aid = finding.get("assessment_id")
-    if aid:
-        a = db.query_one(
-            "SELECT creds_username FROM assessments WHERE id = %s", (aid,))
-        if a and (a.get("creds_username") or "").strip():
-            config["auth_username"] = a["creds_username"].strip()
-    if extra:
-        config.update(extra)
-    # Per-probe timeout = its typical budget × 2 seconds (worst case),
-    # clamped to 120s so a stuck request can't hang the web request.
-    typical = int(probe.get("request_budget_typical") or 12)
-    timeout = min(120.0, max(30.0, typical * 2.0))
-    return toolkit_mod.run_probe(probe["name"], config, timeout=timeout)
+    Kept as a function so existing callers (and the route signatures)
+    don't need to be touched, but the actual config setup now lives in
+    toolkit.build_finding_config so the bulk Challenge runner shares
+    one source of truth. See that helper for what gets populated and
+    why."""
+    config = toolkit_mod.build_finding_config(
+        finding, probe, cookie=cookie, extra=extra)
+    return toolkit_mod.run_probe(
+        probe["name"], config, timeout=toolkit_mod.probe_timeout(probe))
 
 
-def _verdict_to_status(verdict: dict) -> str:
-    """Map a probe verdict into the findings.validation_status enum.
-    The probe schema uses validated=True/False/None; we collapse that
-    plus 'ok' / 'error' into the four enum values supported by the DB.
-
-    Distinguish a real crash (subprocess exception, safety violation —
-    `error` field is set) from a soft refusal (probe ran cleanly but
-    decided it could not produce a verdict — `ok=False`, `error=None`).
-    Soft refusals map to 'inconclusive' so the analyst sees a neutral
-    badge rather than a red 'errored' state for a probe that simply
-    didn't have the inputs it needed."""
-    if verdict.get("error"):
-        return "errored"
-    if not verdict.get("ok", True):
-        # Soft refusal — surface as inconclusive. The probe's own
-        # summary string carries the WHY ("--param is required",
-        # "no candidate endpoints found", etc.) for the analyst.
-        return "inconclusive"
-    v = verdict.get("validated")
-    if v is True:
-        return "validated"
-    if v is False:
-        # A confident "no" from the probe — treat as a false positive on
-        # the original scanner finding.
-        if (verdict.get("confidence") or 0) >= 0.8:
-            return "false_positive"
-        return "inconclusive"
-    return "inconclusive"
+# Verdict→status mapping moved to toolkit.verdict_to_status so the bulk
+# Challenge runner shares the same logic. This thin alias preserves the
+# existing call sites in this file without forcing them to import a
+# different name.
+_verdict_to_status = toolkit_mod.verdict_to_status
 
 
 @app.post("/finding/{fid}/challenge")
