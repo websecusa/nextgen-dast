@@ -29,6 +29,14 @@ ports, check only the scheme that actually listens on that port.</p>
 
 <section class="card">
   <form method="post" action="{{ base }}/assess">
+    {# Re-scan token. Hidden carrier of the source assessment id so
+       the server can resolve the stored password if the visible
+       password field is left as the asterisk sentinel. The actual
+       password value never lands in the rendered HTML. Only emitted
+       when the form was reached via /assess?from=<aid>. #}
+    {% if prefill.from_id %}
+      <input type="hidden" name="prefill_creds_from" value="{{ prefill.from_id }}">
+    {% endif %}
     <label>FQDN
       <input name="fqdn" required
              value="{{ prefill.fqdn or '' }}"
@@ -110,14 +118,29 @@ ports, check only the scheme that actually listens on that port.</p>
       <p class="muted" style="margin-top:0">Leave blank for an unauthenticated scan. SSO / Okta FastPass / DUO targets:
       use <a href="{{ base }}/auth">capture-then-replay</a> instead — paste-in form creds can't drive MFA.</p>
       <label>Username <input name="creds_username" value="{{ prefill.creds_username or '' }}"></label>
-      {# Password is intentionally NOT pre-filled. Echoing the stored
-         password back into the rendered HTML would leak it to anyone
-         who screenshots the page or pastes its DOM. The analyst
-         re-enters the password if they want a credentialed re-scan,
-         or leaves it blank for an anonymous one. #}
+      {# Password handling on Re-scan.
+         When the source assessment has a stored password, we display
+         a fixed-length asterisk sentinel in the field as a visual cue
+         that credentials are on file. The real password is NEVER
+         echoed into the DOM -- on submit the server reads the hidden
+         prefill_creds_from token (above) and resolves the stored
+         value, but only after verifying the source assessment's FQDN
+         matches the FQDN being scanned (so a tampered token cannot
+         pull another target's creds).
+         The user can:
+           - leave the sentinel intact -> use the stored password,
+           - clear the field            -> anonymous re-scan,
+           - type a new password        -> override the stored one. #}
       <label>Password
-        <input name="creds_password" type="password"
-               {% if prefill.creds_username %}placeholder="re-enter to use credentials, or leave blank for an anonymous re-scan"{% endif %}>
+        {% if prefill.creds_password_stored %}
+          <input name="creds_password" type="password"
+                 value="****************"
+                 title="Stored password from the previous scan. Clear to scan anonymously, or type a new password to override.">
+          <small class="muted">Stored credentials on file from the previous scan. Clear the field to scan anonymously, or type a new password to override.</small>
+        {% else %}
+          <input name="creds_password" type="password"
+                 {% if prefill.creds_username %}placeholder="re-enter to use credentials, or leave blank for an anonymous re-scan"{% endif %}>
+        {% endif %}
       </label>
       <label>Login URL (form POST target)
         <input name="login_url" value="{{ prefill.login_url or '' }}"

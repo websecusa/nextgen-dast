@@ -1764,23 +1764,32 @@ def assess_page(request: Request):
               if db.healthy() else [])
     # Re-scan prefill. The "Re-scan" button on assessment_detail.html
     # links here with ?from=<aid>; we look up that row and hand the
-    # template a `prefill` dict so every input arrives populated. The
-    # password column is intentionally omitted -- echoing it back into
-    # the rendered HTML would leak it to anyone who later screenshots
-    # the page or pastes its DOM. The analyst re-enters the password
-    # if they want a credentialed re-scan, or leaves it blank for an
-    # anonymous one.
+    # template a `prefill` dict so every input arrives populated.
+    #
+    # The password value is NEVER echoed into the rendered HTML --
+    # screenshots and DOM dumps would otherwise leak it. Instead the
+    # template shows a fixed "**************" placeholder if a
+    # password is on file, plus a hidden `prefill_creds_from=<aid>`
+    # token. On POST, when the password field is left as the all-
+    # asterisks sentinel (or empty), the server resolves the stored
+    # password from the source assessment via that token. Typing a
+    # new password in the field overrides the stored one; clearing
+    # the field entirely produces an anonymous re-scan.
     prefill: dict = {}
     src_id = _opt_int(request.query_params.get("from"))
     if src_id and db.healthy():
         src = db.query_one(
             "SELECT fqdn, application_id, scan_http, scan_https, profile, "
             "llm_tier, llm_endpoint_id, user_agent_id, creds_username, "
-            "login_url, keep_only_latest "
+            "login_url, keep_only_latest, creds_password "
             "FROM assessments WHERE id = %s", (src_id,))
         if src:
             prefill = dict(src)
             prefill["from_id"] = src_id
+            # Boolean only -- the actual value never reaches the
+            # template (and thus never reaches the rendered DOM).
+            prefill["creds_password_stored"] = bool(src.get("creds_password"))
+            prefill.pop("creds_password", None)
     return templates.TemplateResponse(
         "assess.html",
         ctx(request, endpoints=endpoints, user_agents=uas, recent=recent,
@@ -1802,6 +1811,15 @@ def assess_start(
     login_url: str = Form(""),
     application_id: str = Form(""),
     keep_only_latest: Optional[str] = Form(None),
+    # Re-scan flow. When the form was reached via "Re-scan" on an
+    # assessment detail page, this hidden field carries the source
+    # assessment id. If the visible password field is left as the
+    # all-asterisks sentinel (the placeholder rendered by the
+    # template when a stored password exists), we resolve the real
+    # password from this assessment server-side -- the actual value
+    # never appeared in the DOM. Empty string = greenfield path,
+    # ignored.
+    prefill_creds_from: str = Form(""),
     # Optional schedule-mode fields. When `schedule_mode` is "schedule"
     # we route the request to the scheduling code path instead of starting
     # an immediate scan. Kept on the same endpoint so the form can submit
@@ -1813,6 +1831,35 @@ def assess_start(
     end_before: str = Form(""),
     skip_if_running: Optional[str] = Form(None),
 ):
+    # Resolve the stored password from the source Re-scan assessment
+    # when the visible field still holds the all-asterisks sentinel.
+    # We require both: (a) the sentinel is intact (user did not type
+    # anything), AND (b) the source assessment's FQDN matches what
+    # the form is now scanning. The FQDN guard means a hijacked
+    # `prefill_creds_from` cannot pull a password from an unrelated
+    # customer's prior scan -- the user has to actually be re-
+    # scanning the same target.
+    if (creds_password and creds_password.strip("*") == ""
+            and prefill_creds_from):
+        src_id = _opt_int(prefill_creds_from)
+        if src_id and db.healthy():
+            src = db.query_one(
+                "SELECT fqdn, creds_password FROM assessments "
+                "WHERE id = %s", (src_id,))
+            normalized_fqdn = re.sub(r"^https?://", "",
+                                     fqdn.strip().lower()).split("/", 1)[0]
+            if (src and src.get("creds_password")
+                    and (src.get("fqdn") or "").lower() == normalized_fqdn):
+                creds_password = src["creds_password"]
+            else:
+                # No match -- clear the sentinel so we do NOT pass a
+                # literal "**********" through to the orchestrator.
+                creds_password = ""
+    elif creds_password and creds_password.strip("*") == "":
+        # Sentinel without a token (e.g. typed by the user in the
+        # greenfield form). Treat as empty rather than scanning with
+        # a literal asterisk password.
+        creds_password = ""
     llm_endpoint_id_i = _opt_int(llm_endpoint_id)
     user_agent_id_i = _opt_int(user_agent_id)
     fqdn = fqdn.strip().lower()

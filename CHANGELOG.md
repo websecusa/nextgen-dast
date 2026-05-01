@@ -255,11 +255,17 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
   with the prior scan's settings: FQDN, application id, schemes
   (http/https), profile, LLM tier + endpoint, user-agent, login
   URL, creds_username, and keep-only-latest. The credentials
-  password is intentionally NOT echoed into the DOM (would leak it
-  via screenshots / pasted DOM); the analyst re-enters it for a
-  credentialed re-scan or leaves it blank for an anonymous one.
-  The greenfield "Assess a target" path is unchanged when no
-  `from` parameter is supplied.
+  password is **never** echoed into the DOM. When the source
+  assessment has a stored password the field shows a fixed-length
+  asterisk sentinel as a visual cue, plus a hidden
+  `prefill_creds_from=<aid>` token; the POST handler resolves the
+  stored password server-side from the source assessment, but
+  only after verifying the source FQDN matches the FQDN being
+  scanned (so a tampered token cannot pull another target's
+  credentials). The user can leave the sentinel intact (use stored
+  password), clear the field (anonymous re-scan), or type a new
+  password (override the stored one). The greenfield "Assess a
+  target" path is unchanged when no `from` parameter is supplied.
 
 
 - **2026-05-01** — **`admin_exposure` v1.2** and **`info_disclosure`
