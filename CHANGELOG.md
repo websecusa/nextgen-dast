@@ -246,7 +246,24 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
   "Archive (accepted risk)" join Resolved as pseudo-severities.
 
 
-## 2026-05 — High-fidelity CSRF rule + anomaly_5xx_validation
+## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits
+
+- **2026-05-01** — **`admin_exposure` v1.2** and **`info_disclosure`
+  v1.2** — add 404 short-circuits. When a discovery scanner (ffuf,
+  nikto) flags a path as "admin path discovered" or "configuration /
+  metadata path discovered" but the URL now returns HTTP 404, the
+  path does not exist and the finding is a definitive false
+  positive (commonly a stale hit from an earlier deployment, or a
+  custom 404 that the scanner mis-scored). Both probes now return
+  `validated=False` at confidence 0.95 in this case (maps cleanly
+  to `false_positive`) instead of falling through to the catch-all
+  `inconclusive` branch. Also: `info_disclosure` now upgrades the
+  no-disclosure-markers verdict to confidence 0.9 when the response
+  status is 401/403 (the path is access-controlled and the body we
+  CAN see has no markers — definitively not disclosure), keeping
+  the older 0.7 confidence only on 200 responses where the catalog
+  may still miss subtle leaks.
+
 
 - **2026-05-01** — **`anomaly_5xx_validation` probe v1.0** — new
   validator for wapiti / nuclei / nikto "anomaly: Internal Server
