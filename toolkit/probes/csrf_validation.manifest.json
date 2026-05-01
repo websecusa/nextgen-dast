@@ -1,8 +1,8 @@
 {
   "author": "Tim Rice <tim.j.rice@hackrange.com>",
   "name": "csrf_validation",
-  "version": "1.1",
-  "summary": "Confirms (or refutes) a wapiti CSRF finding via cross-session token swap. Wapiti's stock check produces frequent false positives because it reuses one session; this probe runs the textbook server-side CSRF tests (no token / garbage token / cross-session token) and reports a high-confidence verdict.",
+  "version": "1.2",
+  "summary": "High-fidelity CSRF enforcement check. Detects synchronizer tokens, double-submit cookies, AND Origin/Referer enforcement. Disambiguates auth failure from CSRF rejection so a missing-token finding can be confirmed or refuted even when the form has no synchronizer token at all.",
   "validates": [
     "CWE-352"
   ],
@@ -14,13 +14,14 @@
   "matches_tools": ["wapiti", "nikto"],
   "safety_class": "probe",
   "requires_post": true,
-  "request_budget_typical": 6,
-  "request_budget_max": 12,
+  "request_budget_typical": 9,
+  "request_budget_max": 16,
   "args": {
     "--url": "Form-POST endpoint to test (typically the form action — required)",
     "--login-page-url": "URL of the page that renders the form (defaults to --url)",
     "--token-field": "Name of the CSRF token field (auto-detected from the form when omitted)",
     "--credentials": "Optional username:password to send with the test POSTs. Use bogus values; the token check happens before credential validation in correctly-built apps, so the response still reveals enforcement.",
+    "--attacker-origin": "Origin used for the cross-origin POST test (default https://attacker.example). Must NOT match the target host.",
     "--method": "HTTP method for the test POSTs (default POST)"
   }
 }
