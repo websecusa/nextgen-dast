@@ -10,6 +10,7 @@
   │ Start previously-stopped containers              │ ./pentest.sh start                           │
   │ Restart                                          │ ./pentest.sh restart  (or down && up -d)     │
   │ Restart just the app                             │ ./pentest.sh restart nextgen-dast            │
+  | Re-installs.                                     | ./pentest.sh pull && ./pentest.sh up -d --force-recreate |
   ├──────────────────────────────────────────────────┼──────────────────────────────────────────────┤
   │ Pull a new image from the registry               │ ./pentest.sh pull                            │
   │ Pull + restart with the new image                │ ./pentest.sh pull && ./pentest.sh up -d      │
