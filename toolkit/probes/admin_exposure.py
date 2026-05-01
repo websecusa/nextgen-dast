@@ -268,6 +268,33 @@ class AdminExposureProbe(Probe):
         # next, then the ambiguous middle).
         # ------------------------------------------------------------------
 
+        # Strongest refutation: the path returns 404 to BOTH anonymous
+        # and authenticated traffic. The path simply does not exist on
+        # the host — there is no surface to be "access-protected" or
+        # "exposed". Most often a stale ffuf hit (the path existed at
+        # scan time, the application has since been redeployed) or a
+        # mis-classified custom 404 page that ffuf scored as a hit.
+        # Either way, no admin interface to validate.
+        if auth["status"] == 404 and anon["status"] == 404:
+            return Verdict(
+                validated=False, confidence=0.95,
+                summary=(
+                    "Refuted: the path returns HTTP 404 to both "
+                    "anonymous and authenticated traffic. The path "
+                    "does not exist on the host, so there is no "
+                    "admin surface to be exposed or protected. The "
+                    "scanner's 'admin path discovered' flag is a "
+                    "false positive (commonly a stale hit from an "
+                    "earlier deployment, or a custom 404 the "
+                    "scanner mis-scored)."),
+                evidence=evidence,
+                remediation=(
+                    "Mark as a false positive — no action required. "
+                    "If stale ffuf hits keep accumulating against "
+                    "this host, prune the wordlist or re-baseline "
+                    "the assessment."),
+            )
+
         # Strong refutation: both auth and anon are denied at the web-
         # server layer (401/403). The response is distinct from a real
         # 404 (we still verify that, so we don't accidentally bless a

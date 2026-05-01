@@ -66,6 +66,34 @@ class InfoDisclosureProbe(Probe):
             return Verdict(ok=False, validated=None,
                            summary="target unreachable")
 
+        # 404 short-circuit. A discovered-path / info-disclosure
+        # finding routed to this probe asserts that some specific
+        # URL leaks data. If the URL no longer resolves, the claim
+        # is moot. Common cause: a content-discovery scanner (ffuf,
+        # nikto) cached a hit from a moment when the path existed
+        # -- or mis-scored a custom 404 as a hit. Skip the body
+        # scan and refute confidently.
+        if r.status == 404:
+            return Verdict(
+                validated=False, confidence=0.95,
+                summary=(
+                    "Refuted: the path returns HTTP 404, so the "
+                    "resource does not exist on the host. There is "
+                    "nothing for it to disclose. The scanner's "
+                    "finding is a false positive -- usually a "
+                    "stale hit from an earlier deployment, or a "
+                    "custom 404 page the scanner mis-classified."),
+                evidence={"response_status": r.status,
+                          "response_size": r.size,
+                          "final_url": getattr(r, "final_url", args.url)},
+                remediation=(
+                    "Mark as a false positive -- no action "
+                    "required. If your environment routinely "
+                    "produces these stale hits, prune the "
+                    "discovery wordlist or re-baseline the "
+                    "assessment."),
+            )
+
         body = r.text
         headers_blob = "\n".join(f"{k}: {v}" for k, v in r.headers.items())
 
@@ -94,11 +122,25 @@ class InfoDisclosureProbe(Probe):
                     worst = sev
 
         if not hits:
+            # Confidence is higher when the response itself shows
+            # the path is gated. A 200 with no disclosure markers
+            # may still have subtle leaks the catalog doesn't
+            # catch -- stay at the original 0.7. A 401/403 with
+            # no markers, on the other hand, is a strong "the
+            # path exists but the body is access-controlled" --
+            # not info disclosure under any reasonable definition.
+            confidence = 0.9 if r.status in (401, 403) else 0.7
             return Verdict(
-                validated=False, confidence=0.7,
-                summary=("No information-disclosure indicators in response. "
-                         "If this finding came from a scanner, it's "
-                         "likely benign."),
+                validated=False, confidence=confidence,
+                summary=("No information-disclosure indicators in "
+                         f"response (HTTP {r.status}). " +
+                         ("Path is access-controlled and the body "
+                          "we can see contains no disclosure "
+                          "markers; the finding is a false "
+                          "positive."
+                          if r.status in (401, 403) else
+                          "If this finding came from a scanner, "
+                          "it's likely benign.")),
                 evidence={"response_status": r.status,
                           "response_size": r.size,
                           "patterns_checked": len(patterns)},
