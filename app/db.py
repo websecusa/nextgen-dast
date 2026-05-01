@@ -39,6 +39,12 @@ def query(sql: str, params: Optional[Iterable[Any]] = None) -> list[dict]:
         return list(cur.fetchall())
 
 
+# Idiomatic alias for callers that prefer the explicit "_all" suffix to
+# match `query_one` / standard DB-API naming conventions. Both names refer
+# to the same function — pick whichever reads better at the call site.
+query_all = query
+
+
 def query_one(sql: str, params: Optional[Iterable[Any]] = None) -> Optional[dict]:
     rows = query(sql, params)
     return rows[0] if rows else None
