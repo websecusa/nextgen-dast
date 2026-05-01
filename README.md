@@ -13,9 +13,7 @@ This README walks you through a fresh-machine install end-to-end. If
 something doesn't work, jump to **Troubleshooting** at the bottom.
 
 ## License: Free to use.  This is my part at helping security teams get a basic DAST in environments, especially teams with small budgets.
-[!CAUTION]
-# I am not responsible for any damages. Use at your own risk! Community should help to update!
-
+![](https://img.shields.io/badge/⚠️ _I_am_not_responsible_for_any_damages._Use_at_your_own_risk!_Community_should_help_to_update!-red?style=for-the-badge) 
 ---
 
 ## TL;DR — fast path
