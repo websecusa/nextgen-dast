@@ -99,7 +99,7 @@ def main() -> int:
         where += " AND f.assessment_id = %s"
         params = (args.assessment,)
 
-    rows = db.query_all(
+    rows = db.query(
         f"""SELECT f.id, f.assessment_id, f.source_tool, f.title, f.cwe,
                    f.owasp_category, f.evidence_url, f.raw_data,
                    f.enrichment_id,
