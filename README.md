@@ -26,7 +26,7 @@ sudo chown "$USER":"$USER" /data/pentest
 # 2. Clone the source tree directly into the deploy directory.
 #    This brings in setup.sh, docker-compose.yml, the Dockerfile, and
 #    everything else listed under "Files you need" below.
-git clone https://git.hackrange.com/trice/nextgen-dast.git /data/pentest
+git clone https://github.com/websecusa/nextgen-dast.git
 
 # 3. Run the bootstrap helper.
 cd /data/pentest
@@ -125,7 +125,7 @@ build the image locally. Clone it into `/data/pentest`:
 ```bash
 sudo mkdir -p /data/pentest
 sudo chown "$USER":"$USER" /data/pentest
-git clone https://git.hackrange.com/trice/nextgen-dast.git /data/pentest
+git clone https://github.com/websecusa/nextgen-dast.git /data/pentest
 ```
 
 (Alternative if a `git` client isn't available — `curl` a release
@@ -134,7 +134,7 @@ tarball and unpack it:
 ```bash
 sudo mkdir -p /data/pentest
 sudo curl -fsSL -o /tmp/nextgen-dast.tgz \
-    https://git.hackrange.com/trice/nextgen-dast/archive/2.1.1.tar.gz
+    https://github.com/websecusa/nextgen-dast.git/archive/2.1.1.tar.gz
 sudo tar -xzf /tmp/nextgen-dast.tgz -C /data/pentest --strip-components=1
 sudo chown -R "$USER":"$USER" /data/pentest
 ```
