@@ -1762,9 +1762,29 @@ def assess_page(request: Request):
     recent = (db.query("SELECT id, fqdn, profile, status, total_findings, "
                        "created_at FROM assessments ORDER BY id DESC LIMIT 20")
               if db.healthy() else [])
+    # Re-scan prefill. The "Re-scan" button on assessment_detail.html
+    # links here with ?from=<aid>; we look up that row and hand the
+    # template a `prefill` dict so every input arrives populated. The
+    # password column is intentionally omitted -- echoing it back into
+    # the rendered HTML would leak it to anyone who later screenshots
+    # the page or pastes its DOM. The analyst re-enters the password
+    # if they want a credentialed re-scan, or leaves it blank for an
+    # anonymous one.
+    prefill: dict = {}
+    src_id = _opt_int(request.query_params.get("from"))
+    if src_id and db.healthy():
+        src = db.query_one(
+            "SELECT fqdn, application_id, scan_http, scan_https, profile, "
+            "llm_tier, llm_endpoint_id, user_agent_id, creds_username, "
+            "login_url, keep_only_latest "
+            "FROM assessments WHERE id = %s", (src_id,))
+        if src:
+            prefill = dict(src)
+            prefill["from_id"] = src_id
     return templates.TemplateResponse(
         "assess.html",
-        ctx(request, endpoints=endpoints, user_agents=uas, recent=recent),
+        ctx(request, endpoints=endpoints, user_agents=uas, recent=recent,
+            prefill=prefill),
     )
 
 

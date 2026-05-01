@@ -120,7 +120,13 @@
         </div>
       </dialog>
     {% endif %}
-    <a href="{{ base }}/assess" class="button">Re-scan / new target</a>
+    {# Re-scan: jump to /assess with the assessment id pre-loaded so the
+       form arrives with this site's last scan settings already filled in
+       (FQDN, profile, schemes, LLM tier, user agent, application id,
+       creds_username + login_url, keep-only-latest). The password is
+       NOT echoed back into the DOM -- the analyst re-enters it if they
+       want a credentialed re-scan, or leaves it blank for an anon run. #}
+    <a href="{{ base }}/assess?from={{ a.id }}" class="button">Re-scan</a>
   </div>
 </div>
 
