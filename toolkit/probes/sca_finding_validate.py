@@ -565,10 +565,24 @@ class SCAFindingValidate(Probe):
             return
         pkg = raw.get("package") or {}
         cached_vuln = raw.get("cached_vuln") or {}
+        # Three raw_data shapes carry the (name, version) pair:
+        #   * OSV / retire / LLM-augmented: raw_data.package.{name,
+        #     version}
+        #   * fingerprinter info row:        raw_data.{component,
+        #     version}
+        # The fingerprinter info shape ships on the "Library
+        # detected (content fingerprint)" rows that are emitted
+        # alongside the OSV CVE rows; without this fallback the
+        # probe failed those rows with `missing component` and
+        # never got to the actual file inspection.
         if not args.component:
-            args.component = (pkg.get("name") or "").strip()
+            args.component = (pkg.get("name")
+                              or raw.get("component")
+                              or "").strip()
         if not args.claimed_version:
-            args.claimed_version = (pkg.get("version") or "").strip()
+            args.claimed_version = (pkg.get("version")
+                                    or raw.get("version")
+                                    or "").strip()
 
         # Branch 1 — retire.js / LLM-augmented findings carry a
         # pre-normalised cached_vuln block. Use it as-is.
@@ -725,16 +739,37 @@ class SCAFindingValidate(Probe):
 
         if not detected:
             # We fetched the cited URL (and any linked scripts) but found
-            # no version banner. We don't claim "patched" — the upstream
-            # SCA detector relied on signals (hash, AST shape) we can't
-            # reproduce here. We DO call the result a "no proof" verdict
-            # rather than asserting the finding stands: an open finding
-            # that has been validated and yielded no evidence should look
-            # different in the UI from one that simply has not been
-            # checked yet. confidence=0.5 (was 0.4) bumps the verdict out
-            # of the "obvious manual review" band into "the analyst has
-            # to make a call" territory; status remains 'open' but the
-            # validation_notes make the no-proof state explicit.
+            # no version banner. The verdict the probe returns depends
+            # on how confident we can be about the absence:
+            #
+            # * STRONG ABSENCE (validated=False, confidence=0.85, →
+            #   findings.status auto-flips to false_positive). The
+            #   named component IS in our regex catalog (we know what
+            #   to look for), the response was a real JS asset (not
+            #   an HTML wrapper that bounced us elsewhere), the
+            #   response is non-trivial size, and the per-library
+            #   regex + component-scoped banner + retire.js all
+            #   returned empty. That is exhaustive evidence of
+            #   absence -- the file does not contain the named
+            #   component. The verdict_to_status helper auto-FPs at
+            #   confidence >= 0.8, so this closes the finding without
+            #   a second analyst click.
+            #
+            # * WEAK ABSENCE (validated=None, inconclusive). HTML
+            #   wrapper page, very small response, or a component
+            #   the regex catalogue doesn't cover -- all cases where
+            #   the absence-of-banner is not strong evidence of
+            #   absence-of-library. Still no proof, still surfaces
+            #   the "no validation evidence" summary, but the analyst
+            #   has to make the call.
+            component_in_catalog = any(
+                name == component.strip().lower()
+                for name, _ in _VERSION_SNIFFERS)
+            response_is_js = (not _looks_like_html(body_text)
+                              and len(body_bytes) > 4096)
+            strong_absence = (component_in_catalog and response_is_js
+                              and not scripts_checked)
+
             checked_note = ""
             if scripts_checked:
                 checked_note = (
@@ -746,6 +781,22 @@ class SCAFindingValidate(Probe):
                     f" The response was HTML, not a JS asset, and "
                     "exposed no script references the probe could "
                     "fan out to.")
+
+            if strong_absence:
+                return Verdict(
+                    ok=True, validated=False, confidence=0.85,
+                    summary=(f"Strong false-positive: scanned the full "
+                             f"{len(body_bytes):,}-byte JS asset at "
+                             f"{url}, ran every catalog regex for "
+                             f"'{component}', and retire.js -- no "
+                             "version banner anywhere. The bundle "
+                             f"does not appear to contain '{component}'; "
+                             "the fingerprinter likely matched on a "
+                             "stray version-like string elsewhere in "
+                             "the file."),
+                    evidence=evidence,
+                )
+
             return Verdict(
                 ok=True, validated=None, confidence=0.5,
                 summary=(f"no validation evidence: fetched {url} but "

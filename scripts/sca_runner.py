@@ -518,6 +518,31 @@ _NAME_ALIASES = {
 }
 
 
+def _semver_tuple(v: str) -> tuple:
+    """Best-effort semver tuple for ordered comparison. Mirrors the
+    helper in sca_finding_validate.py but kept local so the runner
+    has no dependency on toolkit/probes/. Strips a leading 'v',
+    splits on '.' and '-', coerces numeric parts to int. Pre-release
+    suffix sorts before the same numeric. Used by the fingerprint
+    deduper to pick the latest version when multiple versions of
+    the same library are detected in one file."""
+    if not v:
+        return ()
+    s = str(v).lstrip("vV").strip()
+    base, _, pre = s.partition("-")
+    parts: list = []
+    for chunk in base.split("."):
+        try:
+            parts.append((1, int(chunk)))
+        except ValueError:
+            parts.append((0, chunk))
+    if pre:
+        parts.append((0, pre))
+    else:
+        parts.append((2, ""))
+    return tuple(parts)
+
+
 def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
                            ) -> list[dict]:
     """Grep saved JS bodies for hard-coded library version strings.
@@ -532,8 +557,21 @@ def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
          always preserved by minifiers and CDN copies.
       3. Loose `Foo v1.2.3` banner — only when the name is in a known
          allowlist, to avoid false positives on custom build IDs.
+
+    Per-library version deduplication: when multiple versions of the
+    same library are detected in the same file, only the HIGHEST
+    semver wins. Real-world JS bundles routinely contain stray
+    version-like strings -- jQuery's migrate shim mentions jQuery 1.x
+    in compat code, changelog fragments referencing older releases,
+    regex literals quoting old version numbers. Without dedup, those
+    artifacts produced separate (component, version) records and
+    drove the OSV pass to flag CVEs against versions the bundle
+    doesn't actually ship. Class-1 (runtime assignment) records win
+    over class-2 / class-3 (banner) records when both exist for the
+    same (file, component, version) tuple, because the runtime
+    assignment is the strongest single signal.
     """
-    out: list[dict] = []
+    raw: list[dict] = []
     for url, path in js_files:
         try:
             data = path.read_bytes()
@@ -559,7 +597,7 @@ def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
             if key in seen_for_file:
                 continue
             seen_for_file.add(key)
-            out.append({
+            raw.append({
                 "url": url,
                 "component": component,
                 "version": version,
@@ -576,7 +614,7 @@ def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
             if key in seen_for_file:
                 continue
             seen_for_file.add(key)
-            out.append({
+            raw.append({
                 "url": url,
                 "component": component,
                 "version": version,
@@ -584,7 +622,30 @@ def fingerprint_js_content(js_files: Iterable[tuple[str, Path]]
                 "_ecosystem": "npm",
                 "_detector": "content-fingerprint-banner",
             })
-    return out
+
+    # Per-library version dedup. Group by (url, component) and keep
+    # the record with the highest semver. Tie-break: prefer the
+    # class-1 runtime-assignment record (_detector ==
+    # "content-fingerprint") over the banner record because the
+    # runtime assignment is harder to fake than a comment.
+    best: dict[tuple[str, str], dict] = {}
+    for r in raw:
+        key = (r["url"], r["component"])
+        cur = best.get(key)
+        if cur is None:
+            best[key] = r
+            continue
+        cur_v = _semver_tuple(cur["version"])
+        new_v = _semver_tuple(r["version"])
+        if new_v > cur_v:
+            best[key] = r
+        elif new_v == cur_v:
+            # Same version — let the runtime-assignment detector win.
+            cur_strong = cur.get("_detector") == "content-fingerprint"
+            new_strong = r.get("_detector") == "content-fingerprint"
+            if new_strong and not cur_strong:
+                best[key] = r
+    return list(best.values())
 
 
 # ---- osv-scanner wrapper ----------------------------------------------------
