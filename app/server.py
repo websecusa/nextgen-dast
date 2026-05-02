@@ -3003,6 +3003,20 @@ def assessment_detail(request: Request, aid: int,
             visible.append(f)
             continue
 
+        # Hide triaged-out rows from any severity view (whether the
+        # analyst picked "All severities" or a specific level like
+        # "critical"). FP / fixed / accepted_risk are reachable via the
+        # dedicated dropdown options below the severities — keeping
+        # them out of the default "everything" view stops the workspace
+        # from drowning real findings in already-resolved noise. This
+        # exclusion runs BEFORE the Status tabs so it overrides them
+        # for severity selections; the four pseudo-status branches
+        # above already short-circuited their own paths so picking
+        # "False positives" still surfaces them as expected.
+        if sev in ("", "critical", "high", "medium", "low", "info") \
+                and st in ("false_positive", "fixed", "accepted_risk"):
+            continue
+
         # Status tabs
         if status == "open" and st not in ("open", "confirmed"):
             continue
