@@ -248,6 +248,48 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Enhanced AI weakness-discovery prompt
+  rendering** — the per-scenario `system_prompt` rows in `ai_prompts`
+  carry a literal JSON example (single `{`/`}` braces) showing the
+  expected response shape. The runtime used to call
+  `str.format_map()` on the stored prompt to substitute `{fqdn}`,
+  which mistook the JSON example for a Python format field and
+  raised `ValueError: Invalid format specifier`. Every weakness
+  scenario crashed and the run aborted with `enhanced_ai_testing
+  crashed: ...` in the assessment's `error_text`. Switched the
+  substitution to a literal `str.replace("{fqdn}", ...)` so the
+  format mini-language is no longer involved — JSON example braces
+  and any operator-pasted content stay inert.
+
+- **2026-05-02** — **SCA evidence URL preserved through synthetic
+  lockfile path** — when osv-scanner runs against the synthetic
+  `package-lock.json` we generate from content-fingerprint hits,
+  every produced finding used to record `evidence_url` as the bare
+  target hostname (the synthetic manifest_hits entry was registered
+  with `url=target`). The `sca_finding_validate` probe then refetched
+  the homepage HTML, found no JS banner, and returned an
+  inconclusive verdict for libraries we knew exactly which JS file
+  contained. `scripts/sca_runner.py` now builds a
+  `(ecosystem, name, version) -> source_url` map from the
+  fingerprint results and rewrites the synthetic-derived OSV
+  records' `manifest_url` to the real on-target asset before
+  normalization. New scans get accurate `evidence_url` values; the
+  validate probe lands on the right file on the first try.
+
+- **2026-05-02** — **`sca_finding_validate` HTML fan-out and
+  no-proof verdicts** — when the URL handed to the probe resolves
+  to an HTML page (legacy data with bare-hostname `evidence_url`,
+  or any case where SCA pointed at a wrapper page), the probe now
+  parses `<script src=...>` attributes and follows up to five
+  candidate scripts within its existing 6-request budget, sniffing
+  each for the named component before concluding. When no banner
+  is recoverable from any followed script, the verdict's summary
+  is reworded from "Original SCA finding stands; manual review
+  needed" to an explicit "no validation evidence" framing that
+  surfaces in the validation_notes column, and the evidence block
+  records a `scripts_checked` list so the audit trail shows every
+  asset the probe inspected.
+
 - **2026-05-01** — **Re-scan button prefill** — the "Re-scan / new
   target" link on the assessment detail page is renamed to
   **Re-scan** and now carries `?from=<aid>`. The `/assess` GET

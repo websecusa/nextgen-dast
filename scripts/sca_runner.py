@@ -983,6 +983,14 @@ def run(target: str, scan_dir: Path, *,
     # under the canonical name. Duplicate (name, version) pairs share
     # one entry; multiple versions of the same package use disambiguated
     # nested-path keys so npm lockfile v3 still parses cleanly.
+    # Map (ecosystem, name, version) -> the JS file URL the fingerprinter
+    # actually pulled the library out of. Populated alongside the synthetic
+    # lockfile so that any OSV finding produced from a synthetic hit can be
+    # rewritten to point evidence_url at the real on-target asset, instead
+    # of the bare site root the synthetic manifest_hit carries. Without
+    # this, the SCA validate probe later refetches the homepage HTML and
+    # cannot sniff a version banner — see sca_finding_validate.py.
+    fingerprint_url_map: dict[tuple, str] = {}
     if fingerprint_results:
         synthetic_dir = sca_dir / "manifests" / "_synthetic"
         synthetic_dir.mkdir(parents=True, exist_ok=True)
@@ -995,6 +1003,12 @@ def run(target: str, scan_dir: Path, *,
             eco = rf.get("_ecosystem") or "npm"
             if not (name and version and eco == "npm"):
                 continue
+            # Record the source URL even if we skip below for dedup; the
+            # url-map keeps the first URL seen per tuple so multiple JS
+            # bundles carrying the same library don't fight for the slot.
+            url = (rf.get("url") or "").strip()
+            if url:
+                fingerprint_url_map.setdefault((eco, name, version), url)
             versions = seen_versions.setdefault(name, set())
             if version in versions:
                 continue
@@ -1034,6 +1048,21 @@ def run(target: str, scan_dir: Path, *,
     # Pass 3 — OSV-Scanner over each retrieved manifest / lockfile
     osv_results = run_osv_scanner(manifest_hits, scan_dir)
     summary["osv_findings"] = len(osv_results)
+
+    # For every OSV record produced by the synthetic-lockfile path, swap
+    # in the real on-target JS URL so the resulting finding's evidence_url
+    # points at the asset where we actually fingerprinted the library.
+    # Records with manifest_url == target are the synthetic ones; records
+    # from a real exposed manifest already carry the manifest's own URL
+    # and are left alone.
+    if fingerprint_url_map:
+        for rec in osv_results:
+            real_url = fingerprint_url_map.get(
+                (rec.get("ecosystem") or "",
+                 rec.get("name") or "",
+                 rec.get("version") or ""))
+            if real_url and rec.get("manifest_url") == target:
+                rec["manifest_url"] = real_url
 
     # Build the normalized finding list + the package observation list.
     findings: list[dict] = []
