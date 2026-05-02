@@ -248,6 +248,14 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Wapiti `--max-scan-time` raised from 4 h to
+  12 h.** The previous 14400-second ceiling was clipping deep
+  authenticated runs against larger customer surfaces, which then
+  surfaced as truncated wapiti reports without a clear "we hit our
+  cap" signal in the assessment. Per-attack cap stays at 30 min
+  (`--max-attack-time 1800`); only the whole-scan ceiling moves to
+  43200 s.
+
 - **2026-05-02** — **`sca_finding_validate` quality pass — three
   bugs surfaced while re-validating the assessment 31 SCA findings.**
   (1) **Phantom detection**: when the named component (e.g.
