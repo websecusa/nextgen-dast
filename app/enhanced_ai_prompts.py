@@ -47,6 +47,12 @@ You are reviewing telemetry from an authorized DAST scan against {fqdn}. \
 Use ONLY the data provided. Do not invent endpoints, fields, or behaviors \
 not represented in the input. If the input does not support a finding, omit it.
 
+GROUNDING REQUIREMENTS (hard rules; a finding that violates any of these will be rejected by post-processing):
+G1. The `evidence` field MUST be a verbatim substring of one of the INPUT blocks below. Quote — do not paraphrase, summarize, infer, or extrapolate. If you cannot point to a verbatim quote that supports the finding, omit the finding entirely.
+G2. An HTTP 200 status code on a path is NOT evidence of any technology, framework, admin console, or CVE. Many CDN-fronted SPAs return the same `index.html` body with HTTP 200 for every unmatched path. Do NOT infer the presence of JSP, .NET, JBoss, JAMon, WordPress, phpMyAdmin, /actuator, or any similar component, and do NOT propose a CVE chain, purely from path existence or a 200 response. A finding asserting technology presence requires a verbatim version banner, error envelope, or distinctive body content quoted from the INPUT.
+G3. Do NOT escalate the severity of another tool's finding without independent confirming evidence in the INPUT. If your only support for a high/critical finding is another scanner's claim that a path exists, downgrade to `low` and tag the recommendation with "REQUIRES MANUAL VERIFICATION".
+G4. Inputs may include hosts flagged as SPA-fallback echoes. URLs on those hosts that come tagged "[SPA-FALLBACK ECHO]" carry zero technology-presence signal — do not cite them as evidence and do not generate findings whose source/sink chain depends on them.
+
 NON-DESTRUCTIVE CONSTRAINTS (hard requirements on every recommendation you produce):
 1. You are NOT executing requests yourself. Recommendations are test plans the human analyst will run. Frame them that way.
 2. All proposed payloads must be non-destructive. Do NOT propose: DELETE / DROP / TRUNCATE statements; fund / credit / point transfers; password-reset flows that email real users; account-lockout brute-force sequences; DoS, amplification, or fork-bomb payloads; real cloud-metadata credential exfiltration (use metadata-only paths, never fetch the credential itself); or any other irreversible data mutation.
@@ -115,6 +121,12 @@ PLACEHOLDERS_BY_SLOT: dict[str, set[str]] = {
         "state_mutating_endpoints", "high_value_endpoints",
         "tenant_identifiers", "authenticated_responses",
         "rate_limit_signals", "graphql_endpoints",
+        # Lists hosts that return the same SPA index.html for arbitrary
+        # paths. Operators can drop this anywhere in a user template;
+        # the runtime safety preamble (built in enhanced_ai.py) injects
+        # the same content unconditionally so removing the placeholder
+        # only loses one extra mention, not the safety floor.
+        "spa_fallback_warning",
     },
     SLOT_FIDELITY: {"fqdn", "findings_batch"},
 }

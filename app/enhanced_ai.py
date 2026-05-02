@@ -61,6 +61,7 @@ from typing import Any, Optional
 
 import db
 import llm as llm_mod
+import spa_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,30 @@ def build_telemetry(aid: int) -> dict:
                 rd_str = str(rd_raw)
         parsed.append({**f, "_raw": rd, "_raw_str": rd_str})
 
+    # ---- SPA-fallback fingerprinting --------------------------------------
+    #
+    # Many targets (CDN-fronted SPAs) answer every unmatched path with
+    # HTTP 200 and the same index.html. Without this guard, scanners
+    # like nikto report "X admin interface identified at /X.jsp" purely
+    # because the path returned 200, and the LLM weakness pass then
+    # extrapolates a CVE chain on top of that false signal. We fingerprint
+    # each unique host once per run, mark each finding whose evidence_url
+    # body matches the fallback, and surface the warning to the LLM in a
+    # dedicated placeholder block so the model knows to discount path-
+    # existence inferences on those hosts. The fingerprinter is also
+    # stashed on the summary (private key) so _insert_weakness_findings
+    # can re-check the LLM's own output for SPA-fallback URLs.
+    fingerprinter = spa_fallback.Fingerprinter()
+    for host_key in spa_fallback.hosts_in_findings(parsed):
+        try:
+            fingerprinter.probe_host(host_key)
+        except Exception as e:
+            logger.warning("spa_fallback probe of %s failed: %r",
+                           host_key, e)
+    for f in parsed:
+        u = f.get("evidence_url") or ""
+        f["_spa_fallback"] = bool(u) and fingerprinter.is_fallback(u)
+
     # ---- Boolean flags consumed by fire_when ------------------------------
 
     has_creds = bool((a.get("creds_username") or "").strip())
@@ -213,6 +238,10 @@ def build_telemetry(aid: int) -> dict:
         "has_high_value_endpoint": has_high_value_endpoint,
         "has_state_mutating_endpoint": has_state_mutating_endpoint,
         "has_tenant_identifier": has_tenant_identifier,
+        # Private key (leading underscore) — never substituted as a
+        # placeholder, only consulted by post-processing in
+        # _insert_weakness_findings to re-check LLM-emitted URLs.
+        "_spa_fingerprinter": fingerprinter,
     }
 
     # ---- Placeholder text blocks ------------------------------------------
@@ -271,8 +300,38 @@ def build_telemetry(aid: int) -> dict:
     summary["graphql_endpoints"] = _render_findings_filtered(
         parsed, lambda f: "/graphql" in (f.get("evidence_url") or "").lower()
                           or "graphql" in (f.get("title") or "").lower())
+    summary["spa_fallback_warning"] = _render_spa_fallback_warning(
+        fingerprinter)
 
     return summary
+
+
+def _render_spa_fallback_warning(fp: spa_fallback.Fingerprinter) -> str:
+    """Emit a placeholder block listing hosts that return the same SPA
+    shell (HTTP 200) for arbitrary paths, including paths that look
+    like deprecated/exploitable admin consoles. The block is loud and
+    explicit so the LLM treats path-existence on these hosts as zero
+    evidence — the most common Enhanced-AI false positive class is a
+    CDN-fronted SPA where every junk path 200s.
+
+    Returns a fixed "(no SPA fallbacks detected)" line when the run
+    found nothing, so the prompt always renders a real string and a
+    typo never silently swallows the entire safety block."""
+    hosts = fp.affected_hosts()
+    if not hosts:
+        return "(no SPA-fallback hosts detected on this scan)"
+    lines = [
+        "WARNING — the following hosts return HTTP 200 with the same",
+        "SPA index.html for arbitrary paths, including paths that look",
+        "like deprecated admin consoles. A 200 OK on these hosts is NOT",
+        "evidence that a particular technology, JSP, .NET handler, or",
+        "admin endpoint exists. Do NOT identify a technology or CVE",
+        "purely from path existence on these hosts:",
+    ]
+    for h in hosts:
+        sig = fp.host_signature(h) or {}
+        lines.append(f"  - {h}  (fallback body size={sig.get('size', 0)})")
+    return "\n".join(lines)
 
 
 # ---- placeholder render helpers --------------------------------------------
@@ -323,10 +382,20 @@ def _format_one_finding(f: dict) -> str:
     if len(rd) > PER_FINDING_QUOTE_MAX:
         rd = rd[:PER_FINDING_QUOTE_MAX] + "..."
     method = (f.get("evidence_method") or "").upper() or "GET"
+    # If our SPA-fallback probe identified this finding's URL as just
+    # the SPA index echo, label it loudly so the LLM does not treat
+    # the URL as evidence that a real handler/admin/version exists at
+    # that path. The label rides inline with the URL line because that
+    # is the line the model anchors its source/sink reasoning on.
+    spa_tag = ""
+    if f.get("_spa_fallback"):
+        spa_tag = ("  [SPA-FALLBACK ECHO — body identical to host index; "
+                   "do NOT infer technology presence from this URL]\n")
     return (f"#{f['id']} [{f.get('severity')}] {f.get('title')}\n"
             f"  tool={f.get('source_tool')} cwe={f.get('cwe') or '-'} "
             f"owasp={f.get('owasp_category') or '-'}\n"
             f"  {method} {f.get('evidence_url') or '-'}\n"
+            f"{spa_tag}"
             f"  raw_data: {rd or '-'}")
 
 
@@ -410,7 +479,13 @@ def _render_endpoints_by_methods(parsed: list[dict],
         if key in seen:
             continue
         seen.add(key)
-        out.append(f"  {m} {url}")
+        # Inline SPA-fallback tag when we know this URL is just the
+        # SPA index echo — keeps the warning attached to the URL line
+        # the LLM is most likely to lift verbatim into an evidence
+        # quote.
+        spa_tag = ("   [SPA-FALLBACK ECHO]"
+                   if f.get("_spa_fallback") else "")
+        out.append(f"  {m} {url}{spa_tag}")
         if len(out) >= 80:
             break
     return "\n".join(out) or "(none observed)"
@@ -732,12 +807,63 @@ def render_user_prompt(template: str, summary: dict) -> str:
     silent empty string. Curly braces inside the template that are NOT
     part of a placeholder name (e.g. JSON examples) must be doubled —
     same rule as Python's str.format. The seed prompts already follow
-    this convention."""
+    this convention.
+
+    Private summary keys (those whose name starts with '_') are
+    deliberately NOT exposed for substitution — they exist only so
+    post-processing can read them after the call."""
+    public = {k: v for k, v in summary.items() if not k.startswith("_")}
     try:
-        return template.format_map(_SafeDict(summary))
+        return template.format_map(_SafeDict(public))
     except Exception as e:
         logger.warning("render_user_prompt failed: %s; falling back", e)
         return template
+
+
+# Runtime safety preamble prepended to every weakness-discovery user
+# prompt at call time. It re-asserts two anti-hallucination rules
+# already present in HEADER, and injects the per-host SPA-fallback
+# warning so the LLM sees the warning even when the operator has
+# customized the user template to drop the {spa_fallback_warning}
+# placeholder. Keeping this in code (not in the seeded HEADER) means
+# operators can edit either prompt freely without removing the safety
+# floor.
+_RUNTIME_SAFETY_PREAMBLE = """\
+=== RUNTIME SAFETY CONTEXT (do NOT ignore) ===
+
+1. EVIDENCE MUST BE A VERBATIM QUOTE. Every value you put in the
+   `evidence` field must be an exact substring of the INPUT block
+   above. Do not paraphrase, summarize, or extrapolate. If you cannot
+   point to a verbatim quote that supports the finding, omit the
+   finding.
+
+2. PATH EXISTENCE IS NOT EVIDENCE. An HTTP 200 response on a path is
+   NOT proof that a particular technology, framework, or admin
+   console is deployed. Many CDN-fronted SPAs return the same
+   index.html with HTTP 200 for every unmatched path. Do not infer
+   JSP, .NET, WordPress, JBoss, JAMon, or any other component, and do
+   not propose a CVE chain, purely from the presence of a path or a
+   200 status. Require an explicit version banner, error envelope, or
+   distinctive body content quoted verbatim from the INPUT.
+
+3. SPA-FALLBACK HOSTS DETECTED THIS RUN
+{spa_fallback_warning}
+
+=== END RUNTIME SAFETY CONTEXT ===
+
+"""
+
+
+def _build_runtime_user_prompt(template: str, summary: dict) -> str:
+    """Render the operator-editable user template, then prepend the
+    runtime safety preamble. The preamble carries the SPA-fallback
+    warning and the verbatim-evidence rule so they apply even if an
+    operator removed the corresponding placeholder from the
+    user_template."""
+    rendered = render_user_prompt(template, summary)
+    preamble = _RUNTIME_SAFETY_PREAMBLE.format(
+        spa_fallback_warning=summary.get("spa_fallback_warning", ""))
+    return preamble + rendered
 
 
 # ---- LLM call wrapper with debug-log capture --------------------------------
@@ -912,7 +1038,12 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
         # the response size yet, so estimate input tokens from prompt
         # length and assume max output. Better to over-estimate and skip
         # a call than to overshoot the budget.
-        rendered_user = render_user_prompt(row["user_template"], telemetry)
+        # _build_runtime_user_prompt prepends the runtime safety
+        # preamble (verbatim-evidence rule + SPA-fallback warning) so
+        # the rules apply regardless of how the operator has edited
+        # the user_template column.
+        rendered_user = _build_runtime_user_prompt(
+            row["user_template"], telemetry)
         # System prompts only ever take a single substitution ({fqdn}). We
         # used to render via str.format_map, but the FOOTER carries a JSON
         # example with literal "{" / "}" that format_map mistakes for format
@@ -956,7 +1087,21 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
             continue
 
         findings = llm_mod.parse_findings(result.get("content") or "") or []
-        inserted = _insert_weakness_findings(aid, row, findings)
+        # Anti-hallucination filter — reject LLM findings whose
+        # evidence cannot be located verbatim in the rendered input
+        # corpus, and reject any finding whose URL is just an SPA-
+        # fallback echo. Pass both the system prompt and the rendered
+        # user prompt as the corpus; the LLM is allowed to quote from
+        # either.
+        kept, dropped = _filter_hallucinations(
+            findings, evidence_corpus=sys_prompt + "\n" + rendered_user,
+            fingerprinter=telemetry.get("_spa_fingerprinter"))
+        if dropped:
+            logger.info(
+                "enhanced_ai: dropped %d/%d findings from %s as "
+                "ungrounded or SPA-fallback hallucinations",
+                dropped, dropped + len(kept), row.get("name"))
+        inserted = _insert_weakness_findings(aid, row, kept)
         summary["weakness_findings_inserted"] += inserted
         summary["scenarios_run"] += 1
         _record_analysis(
@@ -1018,6 +1163,127 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
 # ---- weakness finding insertion --------------------------------------------
 
 _SEV_ALLOWED = {"critical", "high", "medium", "low", "info"}
+
+# Minimum evidence quote length we bother to verify. Anything shorter is
+# almost certainly a punctuation fragment ('GET', '200', '/api/') that
+# would substring-match anywhere and provides no real grounding signal.
+# Findings below this threshold pass the verbatim check on length alone.
+_VERBATIM_MIN_CHARS = 12
+
+# Maximum quote length checked verbatim. If the LLM emits a 4 KB quote
+# we still want a check, but normalizing 4 KB on every finding is
+# expensive; 800 chars is plenty to pin a finding to a specific input
+# block. (PER_FINDING_QUOTE_MAX matches; reusing the constant feels
+# coupled — kept independent so the verbatim-check budget can shrink
+# without touching prompt-rendering caps.)
+_VERBATIM_MAX_CHARS = 800
+
+# URL extractor for re-checking LLM output against the SPA-fallback
+# fingerprinter. We accept either a full https URL or a path token
+# the LLM might quote (e.g. "/JAMonAdmin.jsp"). When only a path is
+# present we have no host to probe, so the path-only case can only be
+# matched against fingerprinted hosts whose URLs the LLM also quoted.
+_URL_RE = re.compile(r"https?://[^\s\"'<>)]+", re.I)
+
+
+def _normalize_for_verbatim(s: str) -> str:
+    """Collapse whitespace runs to single spaces and lowercase. Used by
+    the verbatim-evidence check so trivial spacing/case differences
+    between the LLM's quote and the corpus do not falsely reject a
+    real quote. We deliberately keep punctuation — the LLM's evidence
+    still has to be a literal substring modulo spacing."""
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+
+def _evidence_is_grounded(evidence: str, normalized_corpus: str) -> bool:
+    """Return True iff the evidence string is a verbatim (whitespace-
+    normalized, case-insensitive) substring of the corpus. Very short
+    evidence (< _VERBATIM_MIN_CHARS) is allowed through unconditionally
+    — those quotes carry no real grounding signal but are common in
+    benign findings (e.g. "200", "no CSP header") and rejecting them
+    would over-block. Very long evidence is truncated before
+    comparison for performance."""
+    if not evidence:
+        # Empty evidence is its own bug, handled by the caller's
+        # title/severity check; do not double-flag here.
+        return True
+    norm = _normalize_for_verbatim(evidence)
+    if len(norm) < _VERBATIM_MIN_CHARS:
+        return True
+    if len(norm) > _VERBATIM_MAX_CHARS:
+        norm = norm[:_VERBATIM_MAX_CHARS]
+    return norm in normalized_corpus
+
+
+def _finding_cites_spa_fallback(item: dict,
+                                 fingerprinter: Optional[Any]) -> bool:
+    """Return True iff any URL the LLM mentions in this finding's
+    evidence/title/description/recommendation matches the cached SPA-
+    fallback signature. We only check fully-qualified URLs (the
+    fingerprinter needs a host); bare-path quotes are out of scope
+    because they have no host to associate with.
+
+    The fingerprinter caches per-URL probes, so calling is_fallback
+    on the same URL multiple times across findings is cheap."""
+    if not fingerprinter:
+        return False
+    blob = " ".join(str(item.get(k) or "") for k in
+                     ("evidence", "title", "description", "recommendation"))
+    for m in _URL_RE.finditer(blob):
+        url = m.group(0).rstrip(".,);'\"")
+        try:
+            if fingerprinter.is_fallback(url):
+                return True
+        except Exception as e:
+            logger.debug("spa_fallback is_fallback(%s) failed: %r", url, e)
+    return False
+
+
+def _filter_hallucinations(items: list,
+                            *, evidence_corpus: str,
+                            fingerprinter: Optional[Any]
+                            ) -> tuple[list, int]:
+    """Split LLM-emitted findings into (kept, dropped_count).
+
+    Two filters apply:
+      1. Verbatim-evidence — the `evidence` field must appear (modulo
+         whitespace and case) in the input corpus the LLM was given.
+         If it does not, the LLM either fabricated the quote or
+         paraphrased it past recognition; either way the finding is
+         not grounded in the scan data and we drop it.
+      2. SPA-fallback citation — any URL in the finding's text that
+         our fingerprinter has confirmed is just the SPA index echo
+         is treated as fabricated evidence; the finding is dropped.
+
+    Items that are not dicts pass through unchanged for the
+    downstream schema check in _insert_weakness_findings to handle.
+    """
+    if not isinstance(items, list):
+        return items, 0
+    normalized_corpus = _normalize_for_verbatim(evidence_corpus)
+    kept: list = []
+    dropped = 0
+    for item in items:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        if not _evidence_is_grounded(evidence, normalized_corpus):
+            logger.info(
+                "enhanced_ai: dropping ungrounded finding %r "
+                "(evidence quote not present verbatim in input)",
+                (item.get("title") or "")[:80])
+            dropped += 1
+            continue
+        if _finding_cites_spa_fallback(item, fingerprinter):
+            logger.info(
+                "enhanced_ai: dropping SPA-fallback finding %r "
+                "(LLM cited a URL whose body is just the SPA index)",
+                (item.get("title") or "")[:80])
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
 
 
 # Map an AI weakness-discovery scenario name (the `category` field the
