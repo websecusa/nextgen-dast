@@ -248,6 +248,23 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Filter-row spacing + /assessments parity.**
+  Two follow-ups to the dashboard overhaul. (1) The Assessments
+  filter row (FQDN search, status dropdown, page-size dropdown,
+  Apply button) now stays on a single line via
+  `flex-wrap: nowrap` on `.assessments-filter`, with a matching
+  ghost style applied to the `<select>` controls so they line up
+  visually with the input on the left and the Apply button on the
+  right. The card header itself can wrap below the h2 on narrow
+  viewports without splitting the form's children. (2) The
+  standalone `/assessments` page now uses the same
+  `_assessments_table_data` helper as the dashboard card, picking
+  up the typeahead FQDN search, status filter, 25/50/100 page-size
+  selector, sortable columns, and pagination. The standalone page's
+  query params are NOT prefixed with `a_` because there's no second
+  form on the page to disambiguate from. The Delete button and LLM-
+  tier column are preserved.
+
 - **2026-05-02** — **Dashboard UX overhaul.** Five related changes
   to the / page and the left nav: (a) the **PLATFORM** section
   header in the sidebar is gone and the first nav entry was renamed

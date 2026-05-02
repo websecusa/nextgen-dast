@@ -1,6 +1,15 @@
 {#
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Standalone Assessments listing. Mirrors the Assessments card on the
+  Dashboard: typeahead FQDN search, status dropdown, page-size
+  selector (25/50/100), sortable column headers, prev/next + first/
+  last pagination. Sortable columns are validated against the
+  _ASSESSMENTS_SORT_COLUMNS allowlist server-side. Open and Risk are
+  not sortable because their values come from a per-assessment live
+  finding aggregate that SQL ORDER BY cannot rank consistently
+  across paginated pages.
 #}
 {% extends "base.html" %}
 {% block content %}
@@ -10,44 +19,148 @@
   <p class="muted"><code>{{ request.query_params.get("msg") }}</code></p>
 {% endif %}
 
-{% if assessments %}
-<table>
-  <thead><tr>
-    <th>ID</th><th>App</th><th>Target</th><th>Profile</th><th>LLM</th>
-    <th>Status</th>
-    <th title="Open findings, post-triage (excludes false-positive, resolved, archived).">Open</th>
-    <th title="Live risk score, 0-100. Excludes triaged findings.">Risk</th>
-    <th>Started</th><th>Finished</th><th></th>
-  </tr></thead>
-  <tbody>
-  {% for a in assessments %}
-    <tr>
-      <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
-      <td>{% if a.application_id %}<code>{{ a.application_id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
-      <td><code>{{ a.fqdn }}</code></td>
-      <td><span class="badge">{{ a.profile }}</span></td>
-      <td>{{ a.llm_tier }}</td>
-      <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
-      <td>{{ a.open_findings if a.open_findings is defined else (a.total_findings or 0) }}</td>
-      <td>
-        {% if a.risk_score is defined and a.risk_score is not none %}
-          {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
-          <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
-        {% else %}<span class="muted">—</span>{% endif %}
-      </td>
-      <td>{{ a.created_at }}</td>
-      <td>{{ a.finished_at or "—" }}</td>
-      <td>
-        {% if a.status not in ('running', 'queued', 'deleting') %}
-          <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
-                onsubmit="return confirm('Delete assessment #{{ a.id }} ({{ a.fqdn }})?')">
-            <button type="submit" class="warn">Delete</button>
-          </form>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% else %}<p class="muted">No assessments yet.</p>{% endif %}
+{% set rs = state %}
+{% macro col_link(label, key, hint='') %}
+  {# Sortable header link. Click toggles direction on the active
+     column; clicking a different column starts at desc. Preserves
+     every other URL param. #}
+  {% set is_active = (rs.sort == key) %}
+  {% set next_dir = 'asc' if (is_active and rs.dir == 'desc') else 'desc' %}
+  {% set arrow = ('▼' if rs.dir == 'desc' else '▲') if is_active else '' %}
+  <a href="?q={{ rs.q | urlencode }}&status={{ rs.status | urlencode }}&size={{ rs.size }}&page=1&sort={{ key }}&dir={{ next_dir }}"
+     class="col-sort {{ 'active' if is_active }}"
+     {% if hint %}title="{{ hint }}"{% endif %}>
+    {{ label }} <span class="sort-arrow muted small">{{ arrow }}</span>
+  </a>
+{% endmacro %}
+
+<section>
+  <div class="card-header">
+    <div class="muted small">{{ assessments_total }} total</div>
+    <form method="get" action="" class="assessments-filter typeahead"
+          data-targets='{{ fqdn_suggest | tojson }}'>
+      {# Reset to page 1 on any filter change so the user doesn't end
+         up on "page 7" of a freshly narrowed result set. #}
+      <input type="hidden" name="page" value="1">
+      <input type="hidden" name="sort" value="{{ rs.sort }}">
+      <input type="hidden" name="dir" value="{{ rs.dir }}">
+
+      <input type="search" name="q"
+             class="typeahead-input"
+             value="{{ rs.q or '' }}"
+             placeholder="Search by FQDN…"
+             autocomplete="off"
+             spellcheck="false">
+      <ul class="typeahead-suggest" role="listbox" hidden></ul>
+
+      <select name="status" class="ghost"
+              onchange="this.form.submit()" title="Status filter">
+        <option value="">All statuses</option>
+        {% for s in status_options %}
+          <option value="{{ s }}"
+                  {% if rs.status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="size" class="ghost"
+              onchange="this.form.submit()" title="Rows per page">
+        {% for n in rs.size_options %}
+          <option value="{{ n }}"
+                  {% if rs.size == n %}selected{% endif %}>{{ n }} / page</option>
+        {% endfor %}
+      </select>
+
+      <button type="submit" class="ghost typeahead-apply">Apply</button>
+      {% if rs.q or rs.status %}
+        <a href="?size={{ rs.size }}" class="muted small">clear</a>
+      {% endif %}
+    </form>
+  </div>
+
+  {% if assessments %}
+  <table class="sortable-table">
+    <thead><tr>
+      <th>{{ col_link('ID', 'id') }}</th>
+      <th>{{ col_link('App', 'application_id') }}</th>
+      <th>{{ col_link('Target', 'fqdn') }}</th>
+      <th>{{ col_link('Profile', 'profile') }}</th>
+      <th>LLM</th>
+      <th>{{ col_link('Status', 'status') }}</th>
+      {# Open and Risk are aggregated post-fetch from the live findings
+         rows; SQL ORDER BY can't rank them across pages, so we keep
+         the headers static to match the displayed values. #}
+      <th title="Open findings, post-triage (excludes false-positive, resolved, archived).">Open</th>
+      <th title="Live risk score, 0-100. Excludes triaged findings.">Risk</th>
+      <th>{{ col_link('When', 'when') }}</th>
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {% for a in assessments %}
+      <tr>
+        <td><a href="{{ base }}/assessment/{{ a.id }}">#{{ a.id }}</a></td>
+        <td>{% if a.application_id %}<code>{{ a.application_id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td><code>{{ a.fqdn }}</code></td>
+        <td><span class="badge">{{ a.profile }}</span></td>
+        <td>{{ a.llm_tier }}</td>
+        <td><span class="badge {{ a.status }}">{{ a.status }}</span></td>
+        <td>{{ a.open_findings if a.open_findings is defined else (a.total_findings or 0) }}</td>
+        <td>
+          {% if a.risk_score is defined and a.risk_score is not none %}
+            {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
+            <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if a.finished_at %}
+            {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}
+          {% else %}
+            {{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at.strftime else a.created_at }}
+          {% endif %}
+        </td>
+        <td>
+          {% if a.status not in ('running', 'queued', 'deleting') %}
+            <form method="post" action="{{ base }}/assessment/{{ a.id }}/delete"
+                  onsubmit="return confirm('Delete assessment #{{ a.id }} ({{ a.fqdn }})?')">
+              <button type="submit" class="warn">Delete</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {# Pagination footer. Hidden when the result set fits in one page. #}
+  {% if rs.total_pages > 1 %}
+  {% set pg_base = '?q=' ~ (rs.q | urlencode) ~ '&status=' ~ (rs.status | urlencode) ~ '&size=' ~ rs.size ~ '&sort=' ~ rs.sort ~ '&dir=' ~ rs.dir %}
+  <div class="pagination muted small">
+    Page {{ rs.page }} of {{ rs.total_pages }} · {{ assessments_total }} total
+    <span class="pager">
+      {% if rs.page > 1 %}
+        <a href="{{ pg_base }}&page=1">«</a>
+        <a href="{{ pg_base }}&page={{ rs.page - 1 }}">‹</a>
+      {% else %}
+        <span class="disabled">«</span><span class="disabled">‹</span>
+      {% endif %}
+      {% if rs.page < rs.total_pages %}
+        <a href="{{ pg_base }}&page={{ rs.page + 1 }}">›</a>
+        <a href="{{ pg_base }}&page={{ rs.total_pages }}">»</a>
+      {% else %}
+        <span class="disabled">›</span><span class="disabled">»</span>
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+
+  {% else %}
+  <p class="muted">
+    {% if rs.q or rs.status %}
+      No assessments match those filters.
+      <a href="?">Clear filters →</a>
+    {% else %}
+      No assessments yet.
+    {% endif %}
+  </p>
+  {% endif %}
+</section>
 {% endblock %}

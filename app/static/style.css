@@ -789,6 +789,48 @@ footer {
   color: var(--text);
 }
 
+/* ---- Assessments filter bar ---------------------------------------- */
+/* The filter row groups the FQDN search, the status dropdown, the
+   page-size dropdown, and the Apply button. The default .typeahead
+   rule sets flex-wrap: wrap, but we want all four controls to stay
+   on a single row aligned with each other; let the parent
+   .card-header wrap the WHOLE form below the h2 when the viewport
+   is too narrow, but never split the controls themselves. */
+.assessments-filter.typeahead {
+  flex-wrap: nowrap;
+  gap: .5em;
+}
+.assessments-filter .typeahead-input {
+  width: 200px;
+}
+/* select.ghost wasn't styled before -- the existing rule only covered
+   button.ghost / .button.ghost. Match the visual weight (border,
+   color, padding, font-size, radius, height) so the dropdowns line
+   up cleanly with the input on the left and the Apply button on
+   the right. */
+.assessments-filter select.ghost,
+.trend-filter select.ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: inherit;
+  font-weight: 500;
+  font-size: .85em;
+  padding: .35em .55em;
+  border-radius: var(--radius-input);
+  line-height: 1.2;
+}
+.assessments-filter select.ghost:hover,
+.trend-filter select.ghost:hover {
+  background: var(--panel-2);
+  border-color: var(--muted);
+}
+/* Card headers were strict justify-content: space-between with no
+   wrap, which on narrow viewports left the form overflowing past
+   the h2. Allow the WHOLE form to drop below the heading when it
+   doesn't fit, but keep the form's own children on one row. */
+.card-header { flex-wrap: wrap; gap: .6em; }
+
 /* ---- Sortable column headers (Assessments table) ------------------- */
 /* Header cells become inline-block links so the arrow indicator and
    the label sit on the same baseline; hover lights up the muted
