@@ -3754,9 +3754,18 @@ def _finding_test_header_fast(host: str, port: int,
     import urllib.request as _urlreq
     import urllib.error as _urlerr
 
+    # Two callers: the testssl-id dispatch (keys by _HEADER_FAST_ID_TO_HEADER)
+    # AND the tool-agnostic _detect_header_check_target dispatch (passes
+    # a direct header name like "strict-transport-security" because
+    # nikto/wapiti/nuclei/LLM findings don't carry a testssl id but
+    # still encode the same "this header is missing" question).
+    # Accept either form: if the testssl_id IS itself a known
+    # response-header name, treat it as a direct passthrough.
     target_header = _HEADER_FAST_ID_TO_HEADER.get(testssl_id.lower())
     if not target_header:
-        # Defensive — caller should have gated on _HEADER_FAST_TESTSSL_IDS.
+        if testssl_id.lower() in _HEADER_FAST_ID_TO_HEADER.values():
+            target_header = testssl_id.lower()
+    if not target_header:
         return JSONResponse({
             "ok": False, "error": "no_header_for_id",
             "message": f"testssl id {testssl_id!r} is not in the "
@@ -4238,6 +4247,97 @@ _LEGACY_OPENSSL = "/opt/testssl/bin/openssl.Linux.x86_64"
 _LEGACY_PROTOCOL_IDS = {"SSLv2", "SSLv3", "TLS1", "TLS1_1"}
 _LEGACY_CIPHER_NAMES = {"NULL", "aNULL", "eNULL", "EXPORT",
                           "LOW", "DES", "MD5", "RC4", "3DES"}
+
+
+# Header-missing detector that works across every source tool. The
+# claim "this response is missing header X" is tool-agnostic — nikto,
+# wapiti, nuclei, testssl, enhanced_testing, and the LLM all phrase it
+# differently but all reduce to "fetch the URL once, look at the
+# headers". This regex catalog covers the wordings each scanner uses
+# for the common headers; whatever the source, route to the same
+# verdict-producing fast path instead of returning a raw HTTP dump.
+#
+# Each entry is (regex, response_header_name). The regex is matched
+# case-insensitively against the finding's title field. First match
+# wins. Patterns are ordered most-specific first so e.g. an explicit
+# "missing strict-transport-security" wins over a generic "HSTS"
+# match that might also fire on findings about HSTS configuration.
+_HEADER_TITLE_PATTERNS: list[tuple[str, str]] = [
+    # nikto: "Suggested security header missing: <NAME>"
+    (r"suggested security header missing:?\s*strict-transport-security",
+     "strict-transport-security"),
+    (r"suggested security header missing:?\s*content-security-policy",
+     "content-security-policy"),
+    (r"suggested security header missing:?\s*x-frame-options",
+     "x-frame-options"),
+    (r"suggested security header missing:?\s*x-content-type-options",
+     "x-content-type-options"),
+    (r"suggested security header missing:?\s*referrer-policy",
+     "referrer-policy"),
+    (r"suggested security header missing:?\s*permissions-policy",
+     "permissions-policy"),
+    (r"suggested security header missing:?\s*x-xss-protection",
+     "x-xss-protection"),
+    # nikto: "<HEADER> header is not set" / "header is deprecated"
+    (r"x-content-type-options header is not set",
+     "x-content-type-options"),
+    (r"x-frame-options header.*deprecated",
+     "x-frame-options"),
+    # wapiti: "HTTP Strict Transport Security (HSTS)" / "Clickjacking Protection"
+    (r"http strict transport security|hsts\b",
+     "strict-transport-security"),
+    (r"clickjacking protection",
+     "x-frame-options"),
+    # nuclei: "HTTP Missing Security Headers"
+    (r"http missing security headers?",
+     # Generic — nuclei doesn't name which one. We default to HSTS as
+     # the most-asked-for, but better to render a multi-header table.
+     # _finding_test_header_fast handles a single header at a time;
+     # for the generic case the analyst gets HSTS verdict and the
+     # full Set-Cookie/headers dump, which usually answers the
+     # follow-up they would have had.
+     "strict-transport-security"),
+    # enhanced_testing config_*_missing aliases
+    (r"config_hsts_missing",                "strict-transport-security"),
+    (r"config_csp_missing",                 "content-security-policy"),
+    (r"config_xfo_missing",                 "x-frame-options"),
+    (r"config_xcto_missing",                "x-content-type-options"),
+    (r"config_referrer_policy_missing",     "referrer-policy"),
+    (r"config_permissions_policy_missing",  "permissions-policy"),
+    # LLM-emitted titles (enhanced_ai_testing). The model tends to
+    # phrase findings as "missing X header" or "X not configured" or
+    # "Strict-Transport-Security absent". Match the longest header
+    # name first so e.g. "x-content-type-options" doesn't shadow a
+    # narrower "content-type" match.
+    (r"missing.*strict-transport-security|strict-transport-security.*(absent|missing|not (configured|set))",
+     "strict-transport-security"),
+    (r"missing.*content-security-policy|content-security-policy.*(absent|missing|not (configured|set))",
+     "content-security-policy"),
+    (r"missing.*x-content-type-options|x-content-type-options.*(absent|missing|not (configured|set))",
+     "x-content-type-options"),
+    (r"missing.*x-frame-options|x-frame-options.*(absent|missing|not (configured|set))",
+     "x-frame-options"),
+    (r"missing.*referrer-policy|referrer-policy.*(absent|missing|not (configured|set))",
+     "referrer-policy"),
+    (r"missing.*permissions-policy|permissions-policy.*(absent|missing|not (configured|set))",
+     "permissions-policy"),
+]
+
+
+def _detect_header_check_target(finding: dict) -> Optional[str]:
+    """If the finding's title indicates a missing/weak HTTP response
+    header (regardless of source tool), return the response header
+    name to inspect. Otherwise None. Lets the Test-button dispatch
+    route nikto / wapiti / nuclei / enhanced_testing / LLM
+    header-missing findings through the same verdict-producing fast
+    path that testssl HSTS findings already use."""
+    title = (finding.get("title") or "").strip().lower()
+    if not title:
+        return None
+    for pat, header_name in _HEADER_TITLE_PATTERNS:
+        if re.search(pat, title, re.IGNORECASE):
+            return header_name
+    return None
 
 
 def _resolve_assessment_user_agent(aid: int) -> str:
@@ -5373,6 +5473,23 @@ def finding_test(request: Request, fid: int):
     # check id and surface the JSON row(s) that match.
     if kind == "tls":
         return _finding_test_tls(f, parsed)
+
+    # Tool-agnostic header-missing fast path. Whether the finding came
+    # from nikto ("Suggested security header missing: x-frame-options"),
+    # wapiti ("HTTP Strict Transport Security (HSTS)"), nuclei ("HTTP
+    # Missing Security Headers"), enhanced_testing
+    # (config_*_missing), or the LLM ("missing X header") — they all
+    # reduce to "fetch the URL once, look at the headers". Route to
+    # the verdict-producing _finding_test_header_fast() so the analyst
+    # gets "Header X is absent — finding reproduced" instead of a raw
+    # HTTP dump they have to eyeball. Wins over nuclei subprocess and
+    # the generic HTTP path for these specifically.
+    detected_header = _detect_header_check_target(f)
+    if detected_header:
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return _finding_test_header_fast(
+            host, port, detected_header, f)
 
     # Nuclei test: re-run nuclei narrowly with the original template-id
     # so the matcher logic actually executes against the live target.
