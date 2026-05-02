@@ -248,6 +248,32 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Dashboard UX overhaul.** Five related changes
+  to the / page and the left nav: (a) the **PLATFORM** section
+  header in the sidebar is gone and the first nav entry was renamed
+  from **Overview** to **Dashboard** (URL stays `/`). (b) The
+  **Unresolved findings by age** and **Resolved findings by age**
+  cards now share a row in a 2-col `.grid` so they stop stacking
+  full-width and reclaim vertical real estate. (c) The trend chart
+  is now titled **Risk Trending** and exposes a window selector with
+  7 / 14 / 21 / 30-day options; the server-side helper accepts a
+  `trend_days` parameter (whitelisted, clamps to 30) and the SQL
+  / day-list both honor it. (d) The bottom **Recent assessments**
+  card was renamed to **Assessments** and grew real filtering: a
+  typeahead FQDN search (reusing the existing `form.typeahead` JS
+  hook so no new client code), a status dropdown (Done, Running,
+  Queued, etc.), a 25 / 50 / 100 page-size selector, and pagination
+  links. (e) Five sortable columns — ID, Target, App, Profile,
+  Status, When — toggle direction on click; the active column lights
+  up its arrow indicator. Open and Risk are intentionally not
+  sortable because their values come from a per-assessment live
+  finding aggregate that SQL ORDER BY cannot rank consistently
+  across pages. All Assessments-table query params are namespaced
+  with `a_` so the chart filter form and the table form can coexist
+  in the same URL without clobbering each other. Sortable columns
+  are validated against an allowlist (`_ASSESSMENTS_SORT_COLUMNS`)
+  before reaching the SQL ORDER BY.
+
 - **2026-05-02** — **Removed Target Security card from the
   dashboard.** The two-column row at the bottom of the index page
   used to pair "Target Security" (top six targets by live risk
