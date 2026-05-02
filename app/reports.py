@@ -249,6 +249,104 @@ def _exploitability_grade_cap(findings: list) -> Optional[dict]:
     return None
 
 
+def compute_overall_grade(findings: list,
+                          *, scan_ids: Optional[list[str]] = None) -> dict:
+    """Public, callable-from-anywhere version of the PDF cover's
+    overall-grade pipeline. Returns the same shape as `overall` in
+    `_gather`: `{score, grade, color, contributing, ...}`. Used by
+    the dashboard's Assessments table so the grade letter displayed
+    next to a row matches the grade letter on the PDF cover for the
+    same assessment — they used to disagree because the dashboard
+    ran a much simpler demerit sum without the bonuses, floors, or
+    exploitability cap below.
+
+    Pipeline (in order — later steps can shift the grade up or down
+    relative to earlier steps):
+
+      1. `_score_findings` — per-OWASP-category demerit math with
+         diminishing returns and a per-category cap. Produces
+         `{score, grade, color, contributing}`.
+      2. PQC bonus — when `scan_ids` is supplied AND the testssl
+         output for the included scans shows full PQC, +5 to the
+         score. PDF cover applies this; the dashboard skips it
+         (passes scan_ids=None) because per-row PQC analysis on
+         every dashboard render is too expensive for a dashboard.
+      3. Coverage bonus — +3 when 8 or more OWASP categories grade
+         A (rewards breadth-of-clean-posture).
+      4. Validation floor — when no critical/high finding exists
+         and no medium has been validated, floor the score at 70
+         (C) so unconfirmed scanner noise alone cannot drag the
+         grade below C.
+      5. Exploitability cap — toolkit-confirmed compromise (T1) or
+         multiple validated critical/high findings force F; a
+         single validated crit/high or any validated medium caps
+         at D.
+
+    Findings should be the post-triage list (same set the PDF
+    body shows); status filtering is the caller's responsibility,
+    NOT this function's, so callers can decide whether to grade
+    based on the raw set or the actionable set."""
+    overall = _score_findings(findings)
+    overall_grade = overall["grade"]
+
+    # PQC bonus — only applied when the caller gives us scan ids;
+    # the dashboard intentionally skips this because reading every
+    # assessment's testssl output on every dashboard render is too
+    # expensive. The PDF cover always supplies scan ids.
+    if scan_ids:
+        try:
+            pqc_info = pqc_mod.analyze_assessment(scan_ids) or {}
+        except Exception:
+            pqc_info = {}
+        if pqc_info.get("fully_pqc"):
+            overall["score"] = min(100, overall["score"] + 5)
+            overall["grade"] = _grade_for(overall["score"])
+            overall["color"] = _grade_color(overall["grade"])
+            overall["pqc_bonus_applied"] = True
+
+    # Coverage bonus — re-derive per-category grades inline so this
+    # helper is self-contained. Cheaper than a second pass over
+    # findings because _score_findings is already linear.
+    a_grade_count = 0
+    for key, _label in OWASP_TOP10:
+        sc = _score_findings(findings, scope=key)
+        if sc["grade"] == "A":
+            a_grade_count += 1
+    if a_grade_count >= COVERAGE_BONUS_THRESHOLD:
+        overall["score"] = min(100, overall["score"] + COVERAGE_BONUS_POINTS)
+        overall["grade"] = _grade_for(overall["score"])
+        overall["color"] = _grade_color(overall["grade"])
+        overall["coverage_bonus_applied"] = True
+        overall["coverage_a_count"] = a_grade_count
+
+    # Validation-aware floor — same logic as the PDF cover.
+    has_critical_or_high = any(
+        f.get("severity") in ("critical", "high") for f in findings)
+    has_validated_medium = any(
+        f.get("severity") == "medium"
+        and f.get("validation_status") == "validated"
+        for f in findings)
+    if not has_critical_or_high and not has_validated_medium:
+        if overall["score"] < VALIDATION_FLOOR_SCORE:
+            overall["score"] = VALIDATION_FLOOR_SCORE
+            overall["grade"] = _grade_for(overall["score"])
+            overall["color"] = _grade_color(overall["grade"])
+            overall["validation_floor_applied"] = True
+
+    # Exploitability gate — letter cannot be better than what the
+    # evidence supports.
+    exploit_cap = _exploitability_grade_cap(findings)
+    if exploit_cap is not None:
+        capped = _worst_grade(overall["grade"], exploit_cap["grade"])
+        if capped != overall["grade"]:
+            overall["grade"] = capped
+            overall["color"] = _grade_color(capped)
+            overall["exploit_cap_applied"] = exploit_cap["grade"]
+            overall["exploit_cap_reason"] = exploit_cap["reason"]
+
+    return overall
+
+
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     h = (h or "").lstrip("#")
     if len(h) != 6:
@@ -417,10 +515,11 @@ def _gather(assessment_id: int) -> Optional[dict]:
 
     scan_ids = [s for s in (a.get("scan_ids") or "").split(",") if s.strip()]
 
-    # Overall + per-OWASP-category letter grades. Per-category scores let
-    # the cover scorecard show "A in Crypto Failures, F in Misconfig" so a
-    # CISO sees the shape of the engagement at a glance.
-    overall = _score_findings(findings)
+    # Overall grade comes from the shared compute_overall_grade
+    # pipeline so the PDF cover and the dashboard's Assessments
+    # table stay in lockstep. Per-OWASP-category breakdown is still
+    # computed here because only the PDF cover needs it.
+    overall = compute_overall_grade(findings, scan_ids=scan_ids)
     category_scores = []
     for key, label in OWASP_TOP10:
         sc = _score_findings(findings, scope=key)
@@ -432,64 +531,11 @@ def _gather(assessment_id: int) -> Optional[dict]:
     pdf_brand = branding_mod.get_pdf()
     heat_map = _heat_map(findings, pdf_brand)
 
-    # Post-quantum cryptography compliance — sourced from the testssl scan
-    # included in this assessment (if any). Fully-PQC sites get a +5 bonus
-    # to the overall grade.
+    # PQC analysis is also surfaced standalone in the PDF body
+    # (separate section); the bonus has already been folded into the
+    # overall grade by compute_overall_grade. Re-fetching here is
+    # cheap (one cached call) and keeps the section self-contained.
     pqc = pqc_mod.analyze_assessment(scan_ids)
-    if pqc.get("fully_pqc"):
-        overall["score"] = min(100, overall["score"] + 5)
-        overall["grade"] = _grade_for(overall["score"])
-        overall["color"] = _grade_color(overall["grade"])
-        overall["pqc_bonus_applied"] = True
-
-    # Coverage bonus — when most OWASP categories already grade A, the
-    # engagement has demonstrated breadth-of-clean-posture. A small
-    # additive bonus reflects that signal, which the per-category demerit
-    # math alone cannot express.
-    a_grade_count = sum(1 for c in category_scores if c["grade"] == "A")
-    if a_grade_count >= COVERAGE_BONUS_THRESHOLD:
-        overall["score"] = min(100, overall["score"] + COVERAGE_BONUS_POINTS)
-        overall["grade"] = _grade_for(overall["score"])
-        overall["color"] = _grade_color(overall["grade"])
-        overall["coverage_bonus_applied"] = True
-        overall["coverage_a_count"] = a_grade_count
-
-    # Validation-aware floor — when the toolkit found nothing
-    # critical/high and validated no medium-severity issues, the report is
-    # describing hardening gaps and unconfirmed scanner suspicions, not
-    # confirmed exploitability. Floor the overall grade at C so a SCA
-    # blizzard cannot drag the rating below "could be better" into "fail".
-    has_critical_or_high = any(
-        f.get("severity") in ("critical", "high") for f in findings
-    )
-    has_validated_medium = any(
-        f.get("severity") == "medium"
-        and f.get("validation_status") == "validated"
-        for f in findings
-    )
-    if not has_critical_or_high and not has_validated_medium:
-        if overall["score"] < VALIDATION_FLOOR_SCORE:
-            overall["score"] = VALIDATION_FLOOR_SCORE
-            overall["grade"] = _grade_for(overall["score"])
-            overall["color"] = _grade_color(overall["grade"])
-            overall["validation_floor_applied"] = True
-
-    # Exploitability gate — letter grade cannot exceed what the evidence
-    # supports. Toolkit-confirmed compromise (T1) or multiple validated
-    # critical/high findings force F regardless of math; a single
-    # validated critical/high or any validated medium caps at D. The
-    # score number is left as the demerit math produced it so the report
-    # still differentiates "F at 0/100" from "F at 60/100" — the letter
-    # alone is the categorical signal, the number is its severity within
-    # the letter.
-    exploit_cap = _exploitability_grade_cap(findings)
-    if exploit_cap is not None:
-        capped = _worst_grade(overall["grade"], exploit_cap["grade"])
-        if capped != overall["grade"]:
-            overall["grade"] = capped
-            overall["color"] = _grade_color(capped)
-            overall["exploit_cap_applied"] = exploit_cap["grade"]
-            overall["exploit_cap_reason"] = exploit_cap["reason"]
 
     return {
         "a": a,

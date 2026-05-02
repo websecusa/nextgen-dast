@@ -1253,6 +1253,16 @@ _ASSESSMENTS_SORT_COLUMNS: dict[str, str] = {
     "when": "COALESCE(finished_at, created_at)",
 }
 
+# Sort rank for letter grades. A is the best (highest rank); F is the
+# worst. Mirrors reports._GRADE_RANK but kept locally so we don't pull
+# a non-public name across module boundaries. Any letter outside this
+# map (e.g. a future "—" sentinel) sorts below every real grade in
+# ascending order via the -1 fallback in _assessments_table_data.
+_GRADE_RANK_FOR_SORT: dict[str, int] = {
+    "A": 4, "B": 3, "C": 2, "D": 1, "F": 0,
+}
+
+
 # Sortable columns that are computed AFTER the SQL fetch from the
 # per-assessment live finding aggregate. Sorting these in SQL would
 # require either correlated subqueries or denormalised cache columns;
@@ -1359,23 +1369,46 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
     # count, risk score, and grade dict. Two separate paths share the
     # same decoration code below; on the SQL-sort path we only fetched
     # one page, on the live-sort path we have the whole matched set.
+    #
+    # The grade comes from reports.compute_overall_grade, the same
+    # pipeline the PDF cover uses, so the letter shown next to a row
+    # on the dashboard matches the letter on that assessment's PDF.
+    # owasp_category and source_tool are pulled here because the
+    # grade pipeline needs them (per-category demerit cap and the
+    # exploitability tier classifier) -- the older live_risk path
+    # could get away with just severity + validation_status.
     if rows:
+        import reports as reports_mod
         ids = [r["id"] for r in rows]
         ph = ",".join(["%s"] * len(ids))
         findings_by_aid: dict[int, list[dict]] = {aid: [] for aid in ids}
         for f in db.query(
-                f"SELECT assessment_id, severity, status, validation_status "
+                f"SELECT assessment_id, severity, status, validation_status, "
+                f"       owasp_category, source_tool "
                 f"FROM findings WHERE assessment_id IN ({ph})", ids):
             findings_by_aid.setdefault(f["assessment_id"], []).append(f)
         for r in rows:
             fs = findings_by_aid.get(r["id"], [])
-            r["open_findings"] = sum(
-                1 for f in fs
-                if (f.get("status") or "open") not in EXCLUDED_FROM_SCORE)
+            # Filter out triaged-away findings before grading -- the
+            # PDF body does the same, so the grade input must match.
+            graded_set = [f for f in fs
+                          if (f.get("status") or "open")
+                              not in EXCLUDED_FROM_SCORE]
+            r["open_findings"] = len(graded_set)
             r["risk_score"] = (live_per_aid.get(r["id"])
                                if r["id"] in live_per_aid
                                else _live_risk_score(fs))
-            r["grade"] = _score_to_grade(r["risk_score"])
+            # Skip per-row PQC analysis on the dashboard (too
+            # expensive at table scale); PQC bonus only fires on the
+            # PDF cover. Everything else in the pipeline runs.
+            overall = reports_mod.compute_overall_grade(graded_set,
+                                                        scan_ids=None)
+            r["grade"] = {
+                "letter": overall["grade"],
+                "cls": overall["grade"].lower(),
+                "rank": _GRADE_RANK_FOR_SORT.get(overall["grade"], -1),
+                "score": overall["score"],
+            }
 
     if live_sort and rows:
         # Sort the decorated set on the chosen live column, then
@@ -2976,41 +3009,6 @@ _SEV_RISK_VALIDATED = {"critical": 15.0, "high": 8.0,
                        "medium": 3.0, "low": 1.0, "info": 0.0}
 _SEV_RISK_UNVALIDATED = {"critical": 8.0, "high": 4.0,
                          "medium": 1.5, "low": 0.5, "info": 0.0}
-
-
-# Letter-grade mapping for the dashboard / assessments tables. The
-# input is a 0-100 risk score where 0 = clean, 100 = max risk; the
-# output letter grade reads in the opposite direction (A = clean, F
-# = catastrophic). Each grade carries a numeric `rank` so Python can
-# sort rows by grade without re-deriving thresholds, plus its own CSS
-# class so the badge palette is decoupled from the severity color
-# scheme. The grade-* classes are defined in style.css and run from
-# green (A) through yellow (C) to red (F), an unambiguous traffic-
-# light gradient that doesn't depend on the operator remembering
-# which severity tier each grade maps to.
-def _score_to_grade(score: Optional[int]) -> dict:
-    """Translate a 0-100 risk score into an A-F letter grade plus a
-    rank int (used for sorting) and the dedicated grade-tier CSS
-    class. None / non-numeric scores fall back to a dash with rank
-    -1 so they sort below every real grade in ascending order
-    (and above every real grade in descending order — the analyst
-    sees missing-data rows clearly rather than scattered through the
-    page)."""
-    if score is None:
-        return {"letter": "—", "cls": "none", "rank": -1}
-    try:
-        s = int(score)
-    except (TypeError, ValueError):
-        return {"letter": "—", "cls": "none", "rank": -1}
-    if s >= 80:
-        return {"letter": "F", "cls": "f", "rank": 0}
-    if s >= 60:
-        return {"letter": "D", "cls": "d", "rank": 1}
-    if s >= 40:
-        return {"letter": "C", "cls": "c", "rank": 2}
-    if s >= 20:
-        return {"letter": "B", "cls": "b", "rank": 3}
-    return {"letter": "A", "cls": "a", "rank": 4}
 
 
 def _live_risk_score(findings: list[dict]) -> int:
