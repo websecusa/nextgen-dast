@@ -994,11 +994,25 @@
         } catch (_) {}
       }
 
+      // Banner when /run_probe auto-flipped the finding to FP. Same
+      // text as the detail-page modal — also triggers an aside
+      // refresh below so the workspace right rail updates.
+      const flipBanner = d.auto_flipped_fp
+        ? '<div style="margin:.6em 0; padding:.6em .85em; ' +
+          '    background:rgba(220,160,0,.15); ' +
+          '    border-left:3px solid #d4a300; border-radius:0 4px 4px 0">' +
+          '  <strong>⚠ Auto-marked as false positive.</strong> ' +
+          '  This URL matches the finding\'s evidence URL and the ' +
+          '  response is byte-identical to the host\'s echo signature.' +
+          '</div>'
+        : '';
+
       bodyEl.innerHTML =
         '<p>' + statusPill +
         '   <strong>Size:</strong> ' + (d.content_length || 0) + 'b' +
         '   <strong>Latency:</strong> ' + d.ms + 'ms' +
         '   ' + echoBadge + '</p>' +
+        flipBanner +
         (d.echo_signature
           ? '<p class="muted small" style="margin-top:-.5em">Host echo signature: ' +
             'status=' + d.echo_signature.status + ', size=' + d.echo_signature.size + 'b. ' +
@@ -1017,6 +1031,17 @@
         '<pre style="background:var(--panel-2,#0f1419); padding:.8em; border-radius:6px; ' +
         'margin:.5em 0; font-size:.85em">' +
         escapeHTML(JSON.stringify(d.headers, null, 2)) + '</pre></details>';
+      // Auto-refresh the workspace right rail so the FP badge / status
+      // pill reflects the in-database flip without a full page reload.
+      if (d.auto_flipped_fp) {
+        try {
+          const aside = await fetch(BASE + '/finding/' + fid + '/aside',
+                                     { credentials: 'same-origin' })
+                              .then(r => r.text());
+          const slot = document.getElementById('fw-aside');
+          if (slot) slot.innerHTML = aside;
+        } catch (_) { /* non-fatal */ }
+      }
     } catch (err) {
       bodyEl.innerHTML = '<p class="warn">Probe request failed: ' +
         escapeHTML(String(err)) + '</p>';

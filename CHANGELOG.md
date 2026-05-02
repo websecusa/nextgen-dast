@@ -248,6 +248,19 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Live probe auto-flip on echo match.** When the
+  workspace's "▶ Test METHOD /path" probe runs against a URL that
+  matches a finding's evidence URL AND the response is byte-identical
+  to the host's cached echo signature, the finding is now atomically
+  flipped to `status='false_positive'` /
+  `validation_status='false_positive'` server-side, with a
+  deterministic audit trail. Path equality is host+path (query string
+  ignored), so a curl with `?refresh=0` still matches. The modal shows
+  a yellow banner and the workspace right rail re-fetches the aside
+  so the FP badge updates without a full page reload. Idempotent: a
+  finding already in any non-`open` state is left alone (won't
+  clobber an explicit analyst override). Companion to the live-probe
+  runner shipped earlier today.
 - **2026-05-02** — **Enhanced-AI finding workflow: enriched detail page,
   prompt-preview Challenge, auto-FP, split reproduction/remediation,
   live probe runner.** Six paired changes addressing the analyst-side

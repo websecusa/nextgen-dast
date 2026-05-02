@@ -623,11 +623,29 @@ async function runProbe(fid, method, url) {
       } catch (_) { /* ignore bad regex */ }
     }
 
+    // When the probed URL matches the finding's evidence URL AND
+    // the response matches the host echo, the server already wrote
+    // status='false_positive' on the finding. Surface that as a
+    // banner so the analyst sees the action took place and they
+    // don't need to also click "Mark false positive".
+    const flipBanner = d.auto_flipped_fp
+      ? '<div style="margin:.6em 0; padding:.6em .85em; ' +
+        '    background:rgba(220,160,0,.15); ' +
+        '    border-left:3px solid #d4a300; border-radius:0 4px 4px 0">' +
+        '  <strong>⚠ Auto-marked as false positive.</strong> ' +
+        '  This URL matches the finding\'s evidence URL and the ' +
+        '  response is byte-identical to the host\'s echo signature ' +
+        '  — the path-existence claim is refuted. Reload the page ' +
+        '  to refresh the rest of the UI.' +
+        '</div>'
+      : '';
+
     bodyEl.innerHTML =
       '<p>' + statusPill +
       '   <strong>Size:</strong> ' + (d.content_length || 0) + 'b' +
       '   <strong>Latency:</strong> ' + d.ms + 'ms' +
       '   ' + echoBadge + '</p>' +
+      flipBanner +
       (d.echo_signature
         ? '<p class="muted small" style="margin-top:-.5em">Host echo signature: ' +
           'status=' + d.echo_signature.status + ', size=' + d.echo_signature.size + 'b. ' +
