@@ -3548,6 +3548,25 @@ def _finding_testable(finding: dict,
         # testssl findings only make sense to verify via a TLS probe.
         # Even when evidence_url is just `https://host`, the test runs
         # against the host:port directly.
+        #
+        # Exception: `overall_grade` is a letter-grade roll-up of
+        # every other testssl row in the report (weak ciphers, weak
+        # protocols, missing headers, expired certs). There is
+        # nothing to "re-test" — the constituent rows ARE the test.
+        # parse_testssl drops these at scan ingest now, but defend
+        # the UI in case a row pre-dates that filter. The Test
+        # button surfaces the refusal reason instead of running.
+        title = (finding.get("title") or "").strip().lower()
+        raw = finding.get("raw") or {}
+        raw_id = (raw.get("id") or "").strip().lower()
+        if title == "overall_grade" or raw_id == "overall_grade":
+            return (False,
+                    "overall_grade is a roll-up of the other TLS "
+                    "findings on this assessment — there's nothing "
+                    "to re-test on its own. Review the constituent "
+                    "rows (weak ciphers, weak protocols, missing "
+                    "headers).",
+                    "")
         return (True, "", "tls")
 
     if tool == "nuclei":
