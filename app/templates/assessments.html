@@ -45,14 +45,6 @@
       <input type="hidden" name="sort" value="{{ rs.sort }}">
       <input type="hidden" name="dir" value="{{ rs.dir }}">
 
-      <input type="search" name="q"
-             class="typeahead-input"
-             value="{{ rs.q or '' }}"
-             placeholder="Search by FQDN…"
-             autocomplete="off"
-             spellcheck="false">
-      <ul class="typeahead-suggest" role="listbox" hidden></ul>
-
       <select name="status" class="ghost"
               onchange="this.form.submit()" title="Status filter">
         <option value="">All statuses</option>
@@ -74,6 +66,21 @@
       {% if rs.q or rs.status %}
         <a href="?size={{ rs.size }}" class="muted small">clear</a>
       {% endif %}
+
+      {# Search input wrapped in its own positioning context so the
+         typeahead suggestion list anchors directly under the input
+         (not the form's left edge). The input sits last in the row
+         so dropdowns + Apply read left-to-right ahead of the long
+         FQDN field. #}
+      <span class="typeahead-wrap">
+        <input type="search" name="q"
+               class="typeahead-input"
+               value="{{ rs.q or '' }}"
+               placeholder="Search by FQDN…"
+               autocomplete="off"
+               spellcheck="false">
+        <ul class="typeahead-suggest" role="listbox" hidden></ul>
+      </span>
     </form>
   </div>
 

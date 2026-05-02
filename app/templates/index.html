@@ -294,14 +294,6 @@
       <input type="hidden" name="a_sort" value="{{ rs.sort }}">
       <input type="hidden" name="a_dir" value="{{ rs.dir }}">
 
-      <input type="search" name="a_q"
-             class="typeahead-input"
-             value="{{ rs.q or '' }}"
-             placeholder="Search by FQDN…"
-             autocomplete="off"
-             spellcheck="false">
-      <ul class="typeahead-suggest" role="listbox" hidden></ul>
-
       <select name="a_status" class="ghost"
               onchange="this.form.submit()" title="Status filter">
         <option value="">All statuses</option>
@@ -324,6 +316,21 @@
         <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}&a_size={{ rs.size }}"
            class="muted small">clear</a>
       {% endif %}
+
+      {# Search input is wrapped in its own positioning context so the
+         typeahead suggestion list anchors directly under the input
+         instead of the form's left edge. The input sits last in the
+         row so the dropdowns + Apply read left-to-right ahead of the
+         long FQDN field. #}
+      <span class="typeahead-wrap">
+        <input type="search" name="a_q"
+               class="typeahead-input"
+               value="{{ rs.q or '' }}"
+               placeholder="Search by FQDN…"
+               autocomplete="off"
+               spellcheck="false">
+        <ul class="typeahead-suggest" role="listbox" hidden></ul>
+      </span>
     </form>
   </div>
 

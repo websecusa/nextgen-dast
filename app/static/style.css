@@ -752,13 +752,25 @@ footer {
 .trend-tooltip .tt-label { color: var(--muted); }
 .trend-tooltip .tt-n { font-variant-numeric: tabular-nums; font-weight: 600; }
 
-/* ---- Custom typeahead (used by trend filter) ----------------------- */
+/* ---- Custom typeahead (used by trend filter and assessments table) -- */
 .typeahead {
   position: relative;
   display: flex; gap: .4em; align-items: center; flex-wrap: wrap;
 }
 .typeahead-input {
   width: 240px; font-size: .85em;
+}
+/* Wraps the search input + its suggestion <ul> in a dedicated
+   positioning context. Without this, the absolutely-positioned
+   suggestion popup anchors to the form (the closest positioned
+   ancestor), which was fine when the input sat at the form's left
+   edge but gives the wrong anchor now that the input lives at the
+   right edge after dropdowns + Apply. The popup needs to drop
+   directly under the input regardless of where the input sits in
+   the row. */
+.typeahead-wrap {
+  position: relative;
+  display: inline-block;
 }
 .typeahead-apply {
   padding: .35em .75em; font-size: .82em;
@@ -771,7 +783,12 @@ footer {
   background: var(--panel-2);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  min-width: 240px;
+  /* Match the input's actual rendered width (whatever the consuming
+     form sized it to) so the popup never looks narrower than its
+     anchor. The min-width keeps the popup readable when the input
+     itself is unusually narrow. */
+  width: 100%;
+  min-width: 220px;
   max-height: 240px;
   overflow-y: auto;
   z-index: 30;
@@ -799,9 +816,21 @@ footer {
 .assessments-filter.typeahead {
   flex-wrap: nowrap;
   gap: .5em;
+  /* Push the search wrap to the right so the dropdowns + Apply read
+     left-to-right ahead of the long FQDN field. Margin-left:auto on
+     the .typeahead-wrap absorbs whatever slack the row has, keeping
+     the controls visually grouped on the left and the search field
+     on the right. */
+}
+.assessments-filter .typeahead-wrap {
+  margin-left: auto;
 }
 .assessments-filter .typeahead-input {
-  width: 200px;
+  /* Wider than the trend-chart filter input because customer FQDNs
+     in the assessments table are routinely 30+ characters and were
+     getting truncated visually inside a 200-px field. */
+  width: 320px;
+  max-width: 100%;
 }
 /* select.ghost wasn't styled before -- the existing rule only covered
    button.ghost / .button.ghost. Match the visual weight (border,

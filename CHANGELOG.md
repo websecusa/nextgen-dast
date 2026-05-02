@@ -248,6 +248,25 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Filter-row layout: dropdowns left, search
+  right.** Two pieces of feedback on the previous Assessments
+  layout: (1) the status / page-size / Apply controls were
+  rendering *under* the search field on narrow viewports because
+  flex-wrap kicked in once the form's intrinsic width exceeded the
+  card-header's slack, and (2) the search field was too narrow for
+  customer FQDNs that routinely run 30+ characters. Reordered the
+  form children so the dropdowns + Apply sit first, with the search
+  input pushed to the right via `margin-left: auto` on its wrapper.
+  Wrapped the input in a new `.typeahead-wrap` span that owns its
+  own `position: relative`, so the typeahead suggestion popup
+  anchors directly under the input regardless of where the input
+  lives in the row (previously the popup anchored to the form's
+  left edge). Suggestion popup now also takes `width: 100%` of its
+  wrapper so it visually matches the input's footprint. Search
+  input widened from 200 px to 320 px in the Assessments filter
+  context; the trend-chart filter keeps its 240-px default. Cache
+  buster bumped to 20260502b.
+
 - **2026-05-02** — **Filter-row spacing + /assessments parity.**
   Two follow-ups to the dashboard overhaul. (1) The Assessments
   filter row (FQDN search, status dropdown, page-size dropdown,
