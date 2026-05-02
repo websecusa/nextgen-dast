@@ -367,6 +367,17 @@ def parse_testssl(scan_dir: Path) -> Iterable[dict]:
         # host). Drop these regardless of severity — they're not findings.
         if TESTSSL_NOT_APPLICABLE_RE.match(finding_text):
             continue
+        # `overall_grade` is testssl's letter-grade roll-up of every
+        # other row in the report (weak ciphers, weak protocols, missing
+        # headers, expired certs). Surfacing it as its own finding is
+        # pure duplication — the underlying issues are already in the
+        # row stream, the analyst sees them in the heatmap and the
+        # severity rollup, and the grade itself is not an actionable
+        # remediation target. Drop it at parse time so it never lands
+        # in the assessment view, the PDF report, or the heatmap.
+        if (entry.get("id") or "").lower() in ("overall_grade",
+                                                  "overall_grade_warn"):
+            continue
         sev = TESTSSL_SEV.get(sev_raw, "low")
         yield {
             "source_tool": "testssl",

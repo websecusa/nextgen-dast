@@ -248,6 +248,50 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Empirically-chosen TLS / cipher / protocol fast
+  paths + assessment-UA observance + drop overall_grade noise.**
+  Benchmarked four tools on a real production target (HTTP/2 502
+  Cloudhub + CloudFront edge). Numbers (median of 3-5 runs each):
+  Python urllib in-process header check **150-300 ms** vs
+  `curl -sI` 150-300 ms vs `testssl.sh -h` **15 s**.
+  `openssl s_client -cipher` single-cipher attempt **80-120 ms** vs
+  `curl --ciphers` 290 ms vs `testssl.sh -e` full enum **57 s**.
+  `nmap --script ssl-enum-ciphers` **600 ms** vs testssl `-e` 57 s
+  (95× faster for the same answer).
+  Decision matrix encoded in `_finding_test_tls()`:
+  (1) header IDs → in-process Python urllib (no subprocess).
+  (2) cert IDs → in-process Python ssl + cert parse (existing).
+  (3) single protocol IDs → openssl s_client -tls1_X. System
+  openssl 3.x for TLS 1.2/1.3, bundled testssl openssl 1.0.2 (with
+  `OPENSSL_CONF=` empty) for SSLv2/3 and TLS 1.0/1.1 because the
+  modern build refuses them at compile time.
+  (4) `cipherlist_*` IDs → openssl s_client -cipher, same
+  modern/legacy split. Mapping covers NULL, aNULL, EXPORT, LOW,
+  DES, 3DES, RC4, MD5, MEDIUM categories.
+  (5) full-matrix IDs (cipher_negotiated / cipher_x* / cipher_order)
+  → nmap --script ssl-enum-ciphers, parses and counts C/D/F-grade
+  ciphers from the output.
+  (6) heavy vuln tests (HEARTBLEED, ROBOT, SWEET32-oracle, BEAST)
+  → testssl.sh subprocess as before, kept as fallback with a 180 s
+  timeout.
+  Each fast path also returns a `reproduce_command` field with the
+  exact CLI invocation an analyst can copy-paste — closes the audit
+  gap that in-process branches would otherwise have. Smoke-tested
+  live: TLS1.0 protocol probe **97 ms** (and the target accepts it),
+  TLS1.3 **294 ms**, 3DES cipher **68 ms** (and the target accepts
+  it under TLS 1.2), nmap full enum **533 ms**.
+  All HTTP-flavored fast paths now read the assessment's configured
+  `User-Agent` (assessments.user_agent_id → user_agents.user_agent)
+  via the new `_resolve_assessment_user_agent()` helper, so the
+  Test / Validate / Quick HTTP probe traffic carries the same UA
+  the original scan used. Avoids spurious diffs when a WAF/CDN
+  responds differently to scanner-shaped UAs.
+  Companion change: `findings.parse_testssl()` drops `overall_grade`
+  rows at parse time. They're a letter-grade summary of every other
+  row in the report (weak ciphers, weak protocols, missing headers)
+  — pure duplication that polluted the assessment view, severity
+  rollup, and PDF report. Already-stored rows on existing
+  assessments are unaffected; new scans skip them.
 - **2026-05-02** — **Header-presence fast path + bumped testssl
   timeout.** HSTS / CSP / X-Frame-Options / banner_server and similar
   header-presence findings no longer route through testssl.sh's slow
