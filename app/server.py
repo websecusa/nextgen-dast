@@ -1137,9 +1137,14 @@ def _dashboard_data(trend_filter: Optional[str] = None,
 
     # Unresolved findings broken down by age bucket. Triaged rows
     # (false-positive, resolved, archived) are excluded so the matrix
-    # matches the actionable list.
+    # matches the actionable list. The `>N` buckets are cumulative
+    # (everything older than N days), while the `<30 days` bucket is
+    # the complement: findings created within the last 30 days. The
+    # fresh-bucket row sits at the top of the table so analysts see
+    # incoming work first, then the aging tail.
     sev_order = ("critical", "high", "medium", "low", "info")
-    ages = {">30 days": {s: 0 for s in sev_order},
+    ages = {"<30 days": {s: 0 for s in sev_order},
+            ">30 days": {s: 0 for s in sev_order},
             ">60 days": {s: 0 for s in sev_order},
             ">90 days": {s: 0 for s in sev_order}}
     for bucket, bound in (("90 days", 90), ("60 days", 60), ("30 days", 30)):
@@ -1151,6 +1156,16 @@ def _dashboard_data(trend_filter: Optional[str] = None,
             (bound,))
         for r in rows:
             ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
+    # `<30 days` complements the cumulative >N buckets: rows whose
+    # created_at falls within the last 30 days. Computed as a separate
+    # query rather than (total - >30) so the severity breakdown stays
+    # internally consistent (one query → one severity histogram).
+    for r in db.query(
+            f"SELECT severity, COUNT(*) AS n FROM findings "
+            f"WHERE {triage_clause} "
+            f"  AND created_at >= NOW() - INTERVAL 30 DAY "
+            f"GROUP BY severity"):
+        ages["<30 days"][r["severity"]] = int(r["n"] or 0)
 
     # Resolved findings broken down by age bucket. Counterpart to the
     # `ages` matrix: shows what the team has cleared (status fixed or
@@ -1158,7 +1173,8 @@ def _dashboard_data(trend_filter: Optional[str] = None,
     # for measuring backlog burndown -- "we resolved this many old
     # criticals." Aged on created_at because the schema doesn't track
     # status_changed_at.
-    resolved_ages = {">30 days": {s: 0 for s in sev_order},
+    resolved_ages = {"<30 days": {s: 0 for s in sev_order},
+                     ">30 days": {s: 0 for s in sev_order},
                      ">60 days": {s: 0 for s in sev_order},
                      ">90 days": {s: 0 for s in sev_order}}
     for bucket, bound in (("90 days", 90), ("60 days", 60), ("30 days", 30)):
@@ -1170,6 +1186,13 @@ def _dashboard_data(trend_filter: Optional[str] = None,
             (bound,))
         for r in rows:
             resolved_ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
+    # Recent-resolution counterpart to the unresolved <30 days row.
+    for r in db.query(
+            "SELECT severity, COUNT(*) AS n FROM findings "
+            "WHERE status IN ('fixed', 'accepted_risk') "
+            "  AND created_at >= NOW() - INTERVAL 30 DAY "
+            "GROUP BY severity"):
+        resolved_ages["<30 days"][r["severity"]] = int(r["n"] or 0)
 
     # Assessments table is empty here — the route handler resolves the
     # paginated query separately and merges it in. Keeping the heavy

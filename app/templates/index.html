@@ -205,7 +205,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+        {% for label in ['<30 days', '>30 days', '>60 days', '>90 days'] %}
           <tr>
             <td>{{ label }}</td>
             {% for sev in ['critical','high','medium','low','info'] %}
@@ -242,7 +242,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+        {% for label in ['<30 days', '>30 days', '>60 days', '>90 days'] %}
           <tr>
             <td>{{ label }}</td>
             {% for sev in ['critical','high','medium','low','info'] %}
