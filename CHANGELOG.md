@@ -248,6 +248,28 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Test button: progress feedback + Quick HTTP
+  probe.** The existing `Test` button on testssl/nuclei findings was
+  unusable in practice — it called a slow toolkit subprocess
+  (testssl.sh narrow runs on `--vulnerable` cost 60–90s against
+  HTTPS targets) and the modal showed "Sending request…" with no
+  elapsed-time feedback or cancel option. The page looked frozen.
+  Two paired changes:
+  (1) `runTest()` now takes a `kind` arg (passed in from the button
+  template — `tls`, `tls_info`, `nuclei`, or `http`) and renders a
+  kind-aware progress message ("Running testssl.sh narrow scan —
+  3s elapsed", "Running nuclei template — 7s elapsed", etc.) plus a
+  one-line honest expectation ("typically 30–90 seconds; the page is
+  not frozen") and a Cancel button wired to AbortController. Cancel
+  cleanly aborts the in-flight fetch and shows "Test cancelled."
+  (2) New `Quick HTTP probe` button renders alongside the slow Test
+  button for any finding with an evidence URL. Calls the existing
+  `/finding/<id>/run_probe` endpoint (sub-second, FQDN-scoped,
+  GET/HEAD only) so analysts have a fast option to verify URL
+  reachability and inspect the live response — same modal as the
+  AI live-probe buttons, including the echo-comparison badge and
+  auto-flip-to-FP behavior when the URL matches the finding's
+  evidence URL.
 - **2026-05-02** — **Live probe auto-flip on echo match.** When the
   workspace's "▶ Test METHOD /path" probe runs against a URL that
   matches a finding's evidence URL AND the response is byte-identical

@@ -71,11 +71,31 @@
         </button>
       {% endif %}
       {% if io.testable %}
+        {# Pass the finding's evidence_url as a third arg so the
+           "Quick HTTP probe" sibling button below can reuse it.
+           kind is the second arg so runTest can pick the right
+           progress message ("Running testssl.sh — typically 30-90
+           seconds" vs "Running nuclei template — typically 5-30
+           seconds" vs the generic "Sending request"). #}
         <button type="button" class="primary"
-                onclick="runTest({{ f.id }})"
-                title="{% if io.test_kind == 'tls' %}Re-run testssl.sh narrowly against this finding's host:port and show the matched rows.{% elif io.test_kind == 'tls_info' %}Open a TLS connection to the host, fetch the live certificate, and surface subject / issuer / SAN / validity / cipher / protocol.{% elif io.test_kind == 'nuclei' %}Re-run nuclei narrowly with this finding's template id against the URL and show whether the matcher still fires.{% else %}Send this exact request once from the server and show the live response. GET/HEAD only, scoped to the assessment FQDN.{% endif %}">
+                onclick="runTest({{ f.id }}, '{{ io.test_kind|default('http')|e }}')"
+                title="{% if io.test_kind == 'tls' %}Re-run testssl.sh narrowly against this finding's host:port and show the matched rows. Typically 30-90 seconds.{% elif io.test_kind == 'tls_info' %}Open a TLS connection to the host, fetch the live certificate, and surface subject / issuer / SAN / validity / cipher / protocol. Sub-second.{% elif io.test_kind == 'nuclei' %}Re-run nuclei narrowly with this finding's template id against the URL and show whether the matcher still fires. Typically 5-30 seconds.{% else %}Send this exact request once from the server and show the live response. GET/HEAD only, scoped to the assessment FQDN.{% endif %}">
           {% if io.test_kind == 'tls' %}Test (TLS){% elif io.test_kind == 'tls_info' %}Test (cert){% elif io.test_kind == 'nuclei' %}Test (nuclei){% else %}Test{% endif %}
         </button>
+        {# Companion "Quick HTTP probe" — same /run_probe endpoint the
+           AI findings' inline buttons use. Sub-second, FQDN-scoped,
+           GET/HEAD only. Shown when the finding has a URL we can hit
+           directly (i.e., not pure TLS). For TLS findings the URL is
+           still HTTPS so the probe is technically valid but the
+           toolkit Test answers the right question; we still render
+           the quick button so the analyst has the option. #}
+        {% if f.evidence_url %}
+          <button type="button" class="ghost"
+                  onclick="runProbe({{ f.id }}, '{{ (f.evidence_method or 'GET')|e }}', '{{ f.evidence_url|e }}')"
+                  title="Send a single GET/HEAD against this finding's URL and show the live response with an echo-comparison badge. Sub-second. If the URL is the finding's evidence URL and the response matches the host's echo signature, the finding is auto-marked as a false positive.">
+            Quick HTTP probe
+          </button>
+        {% endif %}
       {% endif %}
       {% if io.validatable %}
         <button type="button" class="primary"

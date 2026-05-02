@@ -1053,7 +1053,13 @@
   // are: GET/HEAD only, host inside assessment scope, no private IPs,
   // per-user 30/min rate limit. Highlights any indicator strings the
   // server told us to mark up.
-  async function runTest(fid) {
+  async function runTest(fid, kind) {
+    // kind=tls|tls_info|nuclei|http — drives the progress message and
+    // honest expectations text. testssl runs commonly cost 60-90s,
+    // and the previous "Sending request…" string with no elapsed
+    // timer made the page look frozen. Adds elapsed counter + Cancel
+    // button via AbortController.
+    kind = kind || 'http';
     const modal = document.getElementById("io-modal");
     const titleEl = document.getElementById("io-modal-title");
     const validateEl = document.getElementById("io-validate-body");
@@ -1063,18 +1069,57 @@
     ioBody.hidden = true;
     validateEl.hidden = false;
     document.getElementById("io-copy-btn").hidden = true;
-    validateEl.innerHTML = '<p class="muted">Sending request…</p>';
     if (typeof modal.showModal === "function") modal.showModal();
+
+    const KIND_HINTS = {
+      'tls':      { msg: 'Running testssl.sh narrow scan',
+                     warn: 'TLS vulnerability checks typically take 30–90 seconds. The page is not frozen.' },
+      'tls_info': { msg: 'Fetching live TLS certificate',
+                     warn: 'Sub-second.' },
+      'nuclei':   { msg: 'Running nuclei template',
+                     warn: 'Nuclei runs typically take 5–30 seconds.' },
+      'http':     { msg: 'Sending request',
+                     warn: '' },
+    };
+    const hint = KIND_HINTS[kind] || KIND_HINTS['http'];
+    const controller = new AbortController();
+    const t0 = Date.now();
+    let timer = null;
+
+    function paintWaitUI(elapsedSec) {
+      validateEl.innerHTML =
+        '<p class="muted">' + hint.msg + ' — <strong>' + elapsedSec + 's</strong> elapsed</p>' +
+        (hint.warn ? '<p class="muted small">' + hint.warn + '</p>' : '') +
+        '<button type="button" class="ghost" id="test-cancel-btn" ' +
+        '        style="margin-top:.4em">Cancel</button>';
+      const cb = document.getElementById('test-cancel-btn');
+      if (cb) cb.onclick = function() {
+        controller.abort();
+        if (timer) { clearInterval(timer); timer = null; }
+      };
+    }
+    paintWaitUI(0);
+    timer = setInterval(function() {
+      paintWaitUI(Math.floor((Date.now() - t0) / 1000));
+    }, 1000);
+
     try {
       const r = await fetch(BASE + "/finding/" + fid + "/test", {
         method: "POST", credentials: "same-origin",
+        signal: controller.signal,
       });
+      if (timer) { clearInterval(timer); timer = null; }
       const data = await r.json();
       titleEl.textContent = "Live test · finding #" + fid;
       validateEl.innerHTML = renderTestBody(data);
     } catch (err) {
-      validateEl.innerHTML = '<p class="warn">Test request failed: ' +
-                              escapeHTML(String(err)) + '</p>';
+      if (timer) { clearInterval(timer); timer = null; }
+      if (err && err.name === 'AbortError') {
+        validateEl.innerHTML = '<p class="muted">Test cancelled.</p>';
+      } else {
+        validateEl.innerHTML = '<p class="warn">Test request failed: ' +
+                                escapeHTML(String(err)) + '</p>';
+      }
     }
   }
 
