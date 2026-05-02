@@ -151,25 +151,23 @@
   </button>
 </form>
 {% else %}
-<form method="post" action="{{ base }}/finding/{{ f.id }}/challenge_llm"
-      onsubmit="return runChallengeAsideLLM(event, {{ f.id }})">
-  <button type="submit" class="action-btn"
-          {% if not is_admin %}disabled title="Read-only account"{% endif %}>
-    {{ scale_balanced_svg }}
-    Challenge with LLM
-    {% if f.validation_run_at %}
-      {% if f.validation_status == 'validated' %}
-        <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
-      {% elif f.validation_status == 'false_positive' %}
-        <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
-      {% elif f.validation_status == 'errored' %}
-        <span class="badge error" style="margin-left:auto">⚠ Errored</span>
-      {% elif f.validation_status == 'inconclusive' %}
-        <span class="badge" style="margin-left:auto">— Inconclusive</span>
-      {% endif %}
+<button type="button" class="action-btn"
+        onclick="runChallengeLLM({{ f.id }})"
+        {% if not is_admin %}disabled title="Read-only account"{% endif %}>
+  {{ scale_balanced_svg }}
+  Challenge with LLM
+  {% if f.validation_run_at %}
+    {% if f.validation_status == 'validated' %}
+      <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
+    {% elif f.validation_status == 'false_positive' %}
+      <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
+    {% elif f.validation_status == 'errored' %}
+      <span class="badge error" style="margin-left:auto">⚠ Errored</span>
+    {% elif f.validation_status == 'inconclusive' %}
+      <span class="badge" style="margin-left:auto">— Inconclusive</span>
     {% endif %}
-  </button>
-</form>
+  {% endif %}
+</button>
 {% endif %}
 
 {% if f.status == 'false_positive' %}

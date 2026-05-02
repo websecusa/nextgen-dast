@@ -84,7 +84,19 @@
     <code>{{ f.evidence_url }}</code>
   </p>
 {% endif %}
-{% if e and e.remediation_long %}
+{# Output-schema v2: AI findings carry the test plan in
+   raw_data.llm_reproduction and the fix guide in the remediation
+   column. Render both as separate sub-sections so the analyst sees
+   "To Reproduce" before "Remediation". Non-AI findings fall through
+   to the static enrichment catalog or the legacy single-block path. #}
+{% if f.raw and f.raw.llm_reproduction %}
+  <h4 style="margin-bottom:.4em">To Reproduce</h4>
+  <div class="markdown-body">{{ f.raw.llm_reproduction | md }}</div>
+  {% if f.remediation %}
+    <h4 style="margin:.9em 0 .4em">Remediation</h4>
+    <div class="markdown-body">{{ f.remediation | md }}</div>
+  {% endif %}
+{% elif e and e.remediation_long %}
   <h4 style="margin-bottom:.4em">Remediation</h4>
   <div class="markdown-body">{{ e.remediation_long | md }}</div>
 {% elif f.remediation %}

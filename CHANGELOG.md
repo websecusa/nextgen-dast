@@ -248,6 +248,62 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Enhanced-AI finding workflow: enriched detail page,
+  prompt-preview Challenge, auto-FP, split reproduction/remediation,
+  live probe runner.** Six paired changes addressing the analyst-side
+  experience for `enhanced_ai_testing` rows:
+  (1) **Enriched detail page.** `/finding/<id>` for AI rows now renders
+  an "AI Analysis" card with the scenario name, prompt id, source
+  signal cited by the model, evidence type, and a prominent
+  G3-auto-downgrade audit block when applicable. Description and
+  remediation render through the new Jinja `md` filter so fenced
+  code blocks come out as styled monospace blocks. Includes
+  `_finding_reproduce.html` so the Challenge-with-LLM button has a
+  home on the standalone page.
+  (2) **Two-step Challenge with LLM.** New
+  `GET /finding/<id>/challenge_llm/preview` returns the rendered
+  system + user prompts without sending them. The button now opens a
+  modal that shows the prompt text (system read-only in a
+  collapsible details, user editable in a textarea) so the analyst
+  can review and tweak before paying for the call. Run posts the
+  edited user prompt; verdict + confidence + reasoning render in
+  the same modal.
+  (3) **Auto-mark false positives.** `_apply_fidelity_verdicts` now
+  also sets `findings.status='false_positive'` (in addition to
+  `validation_status`) when the LLM verdict is `false_positive` with
+  confidence >= 0.8. Mirrors the existing toolkit-probe
+  /challenge_inline behavior so a high-confidence FP verdict
+  immediately drops the row out of the severity rollup, the heatmap,
+  and the PDF report. Validated/inconclusive verdicts only touch
+  validation_status (no auto-promotion).
+  (4) **Output schema v2: split reproduction from remediation.**
+  FOOTER_TEMPLATE in `enhanced_ai_prompts.py` now requires the LLM
+  to emit two separate fields: `reproduction` (curl probes / PoC
+  scaffolding to validate the finding) and `remediation` (concrete
+  fix guidance an engineer can apply without breaking the app). The
+  detail page renders these as two distinct cards, "To Reproduce"
+  and "Remediation". `_insert_weakness_findings` stores reproduction
+  in `raw_data.llm_reproduction` and remediation in the existing
+  `remediation` column. Backward compat: legacy `recommendation`
+  field (single combined block) is still accepted and routed to the
+  reproduction slot. Server boot auto-restores any seeded weakness
+  prompts whose stored FOOTER predates the v2 split.
+  (5) **Live probe runner.** New `POST /finding/<id>/run_probe` runs
+  ONE read-only HTTP request (GET / HEAD only) against ONE URL
+  scoped strictly to the assessment's fqdn, with a 10-second
+  timeout, no cookies, no auth. Returns status, headers, body
+  excerpt (first 4 KB), and an echo-comparison badge that fingerprints
+  the response against `spa_fallback`'s host signature. The detail
+  page and workspace now scan every `.markdown-body pre code` block
+  for curl URLs and inject a "▶ Test METHOD /path" button row after
+  each block; clicking opens a probe modal with the live response,
+  an "ECHO — likely FP" or "DIFFERENT — review" badge, and
+  highlighted matches against the LLM's evidence quote when the
+  finding's evidence is a body string rather than a URL.
+  (6) **Workspace consistency.** Right-rail "Challenge with LLM"
+  button now opens the same prompt-preview modal as the detail
+  page (replaces the old runChallengeAsideLLM inline flow);
+  `loadFinding()` re-wires probe buttons after each panel swap.
 - **2026-05-02** — **Enhanced-AI fidelity hardening: dead-host echo
   detection + G3 enforcement + Challenge with LLM.** Concrete fixes
   in response to a real false-positive cluster on a Cloudhub-broken
