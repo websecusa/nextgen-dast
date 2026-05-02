@@ -51,16 +51,21 @@
    enrichment text (no point printing the same paragraph twice). #}
 {% set fdesc = (f.description or "").strip() %}
 {% set edesc = ((e and e.description_long) or "").strip() %}
+{# `f.description` from enhanced_ai_testing is markdown — render via
+   the `md` filter so fenced code blocks, lists, and headings come out
+   as proper HTML. Other scanners emit plain text which markdown will
+   pass through unchanged. The .markdown-body wrapper scopes any
+   default markdown CSS rules (lists, code blocks) to this region. #}
 {% if fdesc and fdesc != edesc %}
 <h3 class="section">What was detected</h3>
-<p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
+<div class="markdown-body" style="margin-top:0">{{ fdesc | md }}</div>
 {% endif %}
 
 <h3 class="section">Overview</h3>
 {% if edesc %}
-  <p style="white-space:pre-wrap; margin-top:0">{{ edesc }}</p>
+  <div class="markdown-body" style="margin-top:0">{{ edesc | md }}</div>
 {% elif fdesc %}
-  <p style="white-space:pre-wrap; margin-top:0">{{ fdesc }}</p>
+  <div class="markdown-body" style="margin-top:0">{{ fdesc | md }}</div>
 {% else %}
   <p class="muted small">No description was attached to this finding by the
     source scanner.</p>
@@ -80,9 +85,11 @@
   </p>
 {% endif %}
 {% if e and e.remediation_long %}
-  <p><strong>Remediation:</strong> {{ e.remediation_long }}</p>
+  <h4 style="margin-bottom:.4em">Remediation</h4>
+  <div class="markdown-body">{{ e.remediation_long | md }}</div>
 {% elif f.remediation %}
-  <p><strong>Remediation:</strong> {{ f.remediation }}</p>
+  <h4 style="margin-bottom:.4em">Remediation</h4>
+  <div class="markdown-body">{{ f.remediation | md }}</div>
 {% endif %}
 {% if e and e.steps %}
   <ol>

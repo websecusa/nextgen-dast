@@ -1059,3 +1059,60 @@ table.sortable-table th .sort-arrow {
 }
 .pagination .pager a:hover { border-color: var(--accent); color: var(--accent); }
 .pagination .pager .disabled { opacity: .35; }
+
+/* Markdown rendering for LLM-emitted finding description / remediation.
+   Scoped to .markdown-body so it doesn't collide with the rest of the
+   app, where <code> in flowing prose has different styling needs. The
+   target audience is a security analyst reading a PoC — readability of
+   curl/bash blocks and bullet lists is the priority. */
+.markdown-body { line-height: 1.55; }
+.markdown-body p { margin: 0 0 .7em; }
+.markdown-body p:last-child { margin-bottom: 0; }
+.markdown-body ul, .markdown-body ol { margin: .3em 0 .8em 1.4em; padding: 0; }
+.markdown-body li { margin: .15em 0; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  margin: 1em 0 .35em;
+  line-height: 1.25;
+}
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .92em;
+  padding: .12em .35em;
+  background: var(--panel-2, #f4f5f7);
+  border: 1px solid var(--border, #d8dadd);
+  border-radius: 3px;
+}
+.markdown-body pre {
+  margin: .5em 0 .9em;
+  padding: .85em 1em;
+  background: var(--panel-2, #f4f5f7);
+  border: 1px solid var(--border, #d8dadd);
+  border-left: 3px solid var(--accent, #2266cc);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: .92em;
+  line-height: 1.45;
+}
+.markdown-body pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-size: 1em;
+}
+.markdown-body blockquote {
+  margin: .6em 0;
+  padding: .3em .9em;
+  color: var(--muted, #555);
+  border-left: 3px solid var(--border, #d8dadd);
+  background: transparent;
+}
+.markdown-body table { border-collapse: collapse; margin: .6em 0; }
+.markdown-body th, .markdown-body td {
+  border: 1px solid var(--border, #d8dadd);
+  padding: .35em .6em;
+  text-align: left;
+}
+.markdown-body th { background: var(--panel-2, #f4f5f7); }

@@ -118,7 +118,19 @@
    appears once a probe has actually run (validation_run_at is set);
    on first load before any challenge it stays hidden so the button is
    visually clean. #}
-{% if probe %}
+{# Two paths for the Challenge button:
+   - Toolkit-probe Challenge (the original): live HTTP probe matched by
+     finding signature. Fast, deterministic, no LLM cost.
+   - Challenge with LLM: ask the configured fidelity model to re-grade
+     the finding from its raw_data and existing evidence. Used for
+     enhanced_ai_testing rows (toolkit probes don't match those) and
+     as a fallback for any finding where no probe is mapped.
+   We render whichever path is available; if both are technically
+   possible (a non-AI finding with a probe), the toolkit probe wins
+   because it's more deterministic. The result badge below reads off
+   f.validation_status either way. #}
+{% set is_ai_finding = (f.source_tool == 'enhanced_ai_testing') %}
+{% if probe and not is_ai_finding %}
 <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
       onsubmit="return runChallengeAside(event, {{ f.id }})">
   <button type="submit" class="action-btn"
@@ -139,11 +151,25 @@
   </button>
 </form>
 {% else %}
-<button class="action-btn" disabled
-        title="No toolkit probe is mapped to this finding's signature.">
-  {{ scale_balanced_svg }}
-  Challenge
-</button>
+<form method="post" action="{{ base }}/finding/{{ f.id }}/challenge_llm"
+      onsubmit="return runChallengeAsideLLM(event, {{ f.id }})">
+  <button type="submit" class="action-btn"
+          {% if not is_admin %}disabled title="Read-only account"{% endif %}>
+    {{ scale_balanced_svg }}
+    Challenge with LLM
+    {% if f.validation_run_at %}
+      {% if f.validation_status == 'validated' %}
+        <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
+      {% elif f.validation_status == 'false_positive' %}
+        <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
+      {% elif f.validation_status == 'errored' %}
+        <span class="badge error" style="margin-left:auto">⚠ Errored</span>
+      {% elif f.validation_status == 'inconclusive' %}
+        <span class="badge" style="margin-left:auto">— Inconclusive</span>
+      {% endif %}
+    {% endif %}
+  </button>
+</form>
 {% endif %}
 
 {% if f.status == 'false_positive' %}

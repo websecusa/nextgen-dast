@@ -474,18 +474,25 @@ def _render_endpoints_by_methods(parsed: list[dict],
         m = (f.get("evidence_method") or "GET").upper()
         if m not in methods:
             continue
+        # Echo-host pre-filter: this renderer emits URL+method only,
+        # with no captured response body to ground the LLM's reasoning.
+        # If the URL sits on a host that returns a path-agnostic body
+        # (SPA fallback or dead-upstream gateway echo), the URL line
+        # itself carries zero technology-presence signal, and inlining
+        # an `[SPA-FALLBACK ECHO]` tag has historically not been enough
+        # to stop the model from speculating off it. Drop the line
+        # entirely so the model literally cannot cite a path that is
+        # just the host's default echo. (Body-bearing renderers like
+        # _render_response_samples keep their entries because the body
+        # is itself useful telemetry.)
+        if f.get("_spa_fallback"):
+            continue
         url = f.get("evidence_url") or ""
         key = f"{m} {url}"
         if key in seen:
             continue
         seen.add(key)
-        # Inline SPA-fallback tag when we know this URL is just the
-        # SPA index echo — keeps the warning attached to the URL line
-        # the LLM is most likely to lift verbatim into an evidence
-        # quote.
-        spa_tag = ("   [SPA-FALLBACK ECHO]"
-                   if f.get("_spa_fallback") else "")
-        out.append(f"  {m} {url}{spa_tag}")
+        out.append(f"  {m} {url}")
         if len(out) >= 80:
             break
     return "\n".join(out) or "(none observed)"
@@ -509,6 +516,11 @@ def _render_auth_redirect_chain(parsed: list[dict]) -> str:
 def _render_oauth_endpoints(parsed: list[dict]) -> str:
     found: set[str] = set()
     for f in parsed:
+        # Same echo-host pre-filter as _render_endpoints_by_methods: a
+        # URL on a host that echoes the same body for every path
+        # carries no signal that an OAuth/OIDC route is genuinely there.
+        if f.get("_spa_fallback"):
+            continue
         u = f.get("evidence_url") or ""
         if re.search(r"\.well-known/openid-configuration|/authorize|/token|"
                      r"/userinfo|/jwks|/introspect|/saml/metadata", u, re.I):
@@ -519,6 +531,12 @@ def _render_oauth_endpoints(parsed: list[dict]) -> str:
 def _render_url_processing(parsed: list[dict]) -> str:
     out: list[str] = []
     for f in parsed:
+        # Echo-host pre-filter: same rationale as the path-only
+        # renderers — a URL-with-param on a host that echoes its
+        # default body regardless of input is not actually accepting a
+        # URL parameter, just being requested with one.
+        if f.get("_spa_fallback"):
+            continue
         rd_str = f.get("_raw_str") or ""
         if _url_param_present(f.get("_raw") or {}) or "ssrf" in (
                 f.get("title") or "").lower():
@@ -988,6 +1006,108 @@ def _resolve_budget(aid: int) -> Optional[float]:
 
 # ---- public entry point -----------------------------------------------------
 
+def run_single_finding_fidelity(fid: int,
+                                  endpoint: Optional[dict]) -> dict:
+    """Run the fidelity prompt against ONE finding, regardless of source
+    tool or current validation status. Used by the per-finding "Challenge
+    with LLM" button in the assessment workspace, which needs an
+    on-demand re-grade for a row the analyst is questioning.
+    Bypasses the bulk-pass exclusions (the source_tool != 'enhanced_ai_testing'
+    skip and the validation_status filter) so an analyst can re-evaluate
+    even an LLM-emitted row, with the model effectively grading its own
+    earlier work in a single-row batch the analyst can review.
+
+    Returns a result dict the HTTP handler renders as JSON:
+        {ok, verdict, confidence, severity_adjustment, suggested_severity,
+         reasoning, error}
+    On any error the function returns {ok=False, error=...} rather than
+    raising — the handler turns that into a 4xx/5xx and the caller's
+    button shows the failure inline."""
+    if not endpoint:
+        return {"ok": False, "error": "no_endpoint",
+                "message": "No LLM endpoint is configured."}
+    f = db.query_one(
+        "SELECT id, assessment_id, source_tool, severity, owasp_category, "
+        "cwe, title, description, evidence_url, evidence_method, raw_data, "
+        "validation_status, validation_probe, validation_evidence "
+        "FROM findings WHERE id=%s", (fid,))
+    if not f:
+        return {"ok": False, "error": "not_found",
+                "message": f"finding {fid} does not exist"}
+    aid = f["assessment_id"]
+    a = db.query_one(
+        "SELECT id, fqdn, llm_debug FROM assessments WHERE id=%s", (aid,))
+    if not a:
+        return {"ok": False, "error": "no_assessment"}
+    fqdn = a.get("fqdn") or ""
+    debug_on = bool(a.get("llm_debug"))
+
+    prompt_row = db.query_one(
+        "SELECT id, system_prompt, user_template, batch_size "
+        "FROM ai_prompts WHERE slot=%s AND is_active=1 "
+        "ORDER BY sort_order LIMIT 1",
+        ("advanced_ai_testing.fidelity",))
+    if not prompt_row:
+        return {"ok": False, "error": "no_fidelity_prompt"}
+
+    batch_text = _render_fidelity_batch([f])
+    sys_prompt = (prompt_row["system_prompt"] or "")
+    user = render_user_prompt(prompt_row["user_template"], {
+        "fqdn": fqdn,
+        "findings_batch": batch_text,
+    })
+    call_started = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = _call_llm(endpoint, sys_prompt, user,
+                        max_tokens=FIDELITY_MAX_OUTPUT_TOKENS,
+                        cache_system=True)
+    in_tokens = int(result.get("in_tokens") or 0)
+    out_tokens = int(result.get("out_tokens") or 0)
+
+    if not result.get("ok"):
+        err = result.get("error") or "LLM call failed"
+        _record_analysis(
+            aid=aid, target_type="enhanced_ai_fidelity",
+            target_id=f"single:{fid}", endpoint=endpoint,
+            status="error", in_tokens=in_tokens, out_tokens=out_tokens,
+            payload=None, raw=result.get("raw"),
+            request_prompt=user if debug_on else None,
+            error_text=err, started_at=call_started)
+        return {"ok": False, "error": "llm_call_failed", "message": err}
+
+    verdicts = llm_mod.parse_findings(result.get("content") or "") or []
+    applied = _apply_fidelity_verdicts([f], verdicts)
+    _record_analysis(
+        aid=aid, target_type="enhanced_ai_fidelity",
+        target_id=f"single:{fid}", endpoint=endpoint,
+        status="done", in_tokens=in_tokens, out_tokens=out_tokens,
+        payload={"finding_id": fid, "verdicts": verdicts,
+                  "evaluated": applied["evaluated"],
+                  "auto_flipped": applied["auto_flipped"]},
+        raw=result.get("raw") if debug_on else None,
+        request_prompt=user if debug_on else None,
+        error_text=None, started_at=call_started)
+
+    # Verdicts from the LLM are an array; we sent one finding so we
+    # expect one element. Pluck it out so the handler can render it as
+    # a single object — easier on the JS than indexing a list.
+    v = (verdicts[0] if verdicts and isinstance(verdicts, list) else
+         {}) if isinstance(verdicts, list) else {}
+    if not isinstance(v, dict):
+        v = {}
+    return {
+        "ok": True,
+        "finding_id": fid,
+        "verdict": v.get("verdict") or "inconclusive",
+        "confidence": v.get("confidence"),
+        "severity_adjustment": v.get("severity_adjustment") or "none",
+        "suggested_severity": v.get("suggested_severity"),
+        "reasoning": v.get("reasoning") or "",
+        "auto_flipped": bool(applied.get("auto_flipped")),
+        "in_tokens": in_tokens,
+        "out_tokens": out_tokens,
+    }
+
+
 def run(aid: int, endpoint: Optional[dict]) -> dict:
     """Top-level pass invoked by the orchestrator. Returns a summary
     dict for logging; never raises."""
@@ -1336,6 +1456,87 @@ def _scenario_to_owasp(scenario: str) -> str:
         scenario.strip().lower(), "A04:2021-Insecure_Design")
 
 
+# Patterns that indicate a finding's `evidence` field is just another
+# scanner's URL-line claim — i.e. the LLM read a Nikto/Wapiti output
+# line and asserted it as evidence without independent grounding.
+# Examples seen in the wild on dead-vhost telemetry:
+#     "1x  GET https://target/scripts/proxy/w3proxy.dll"
+#     "GET https://target/server-status"
+#     "https://target/some/path"
+#     "/scripts/proxy/w3proxy.dll: MSProxy v1.0 installed."
+# Each is just a path assertion. Per the HEADER's G3 grounding rule,
+# a finding whose only support is a path-existence claim from another
+# scanner must NOT be high/critical. We enforce that mechanically here
+# so a model that drifts past the prompt-level rule still produces a
+# correct row. Body-bearing evidence (quoted error envelopes, version
+# banners, response excerpts) does NOT match — those have braces,
+# angle brackets, newlines, or longer quoted text.
+_SCANNER_CLAIM_PATTERNS = (
+    # nikto-style "<count>x GET <url>"
+    re.compile(r"^\s*\d+x?\s+(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s+https?://\S+\s*$",
+                re.I),
+    # bare "<METHOD> <url>"
+    re.compile(r"^\s*(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s+https?://\S+\s*$",
+                re.I),
+    # bare URL
+    re.compile(r"^\s*https?://\S+\s*$", re.I),
+    # nikto descriptor line: "/path: <description>" with no quoted body
+    re.compile(r"^\s*/\S+\s*:\s*[^{<>\"'\n]+$"),
+)
+
+
+def _g3_downgrade_if_scanner_only(item: dict) -> dict | None:
+    """Mechanical enforcement of HEADER rule G3: a finding whose only
+    grounding is another scanner's path-existence claim cannot ride at
+    high or critical severity. Returns a small audit dict describing
+    the action taken (None if no action needed) — caller stamps it
+    into raw_data so a downstream reviewer can see the row was
+    auto-touched and why."""
+    sev = (item.get("severity") or "").lower()
+    if sev not in ("high", "critical"):
+        return None
+    evidence = (item.get("evidence") or "").strip()
+    if not evidence:
+        # No evidence at all is its own G1 violation; let the caller
+        # filter the row, this function only handles the scanner-claim
+        # subcase.
+        return None
+    # Reject body-bearing evidence early — anything with a quoted
+    # response body, JSON envelope, or HTML snippet is not a scanner-
+    # only claim. Length > 240 also indicates the LLM pasted real
+    # content, not a one-line URL.
+    if len(evidence) > 240:
+        return None
+    if any(ch in evidence for ch in ("{", "}", "<", ">", "\"", "\n")):
+        return None
+    matched = next((p for p in _SCANNER_CLAIM_PATTERNS
+                    if p.match(evidence)), None)
+    if not matched:
+        return None
+    # Record the downgrade and rewrite the item in place. Title is
+    # prefixed (not replaced) so the downstream UI surfaces the caveat
+    # next to the original assertion.
+    audit = {
+        "g3_auto_downgraded": True,
+        "g3_original_severity": sev,
+        "g3_match_pattern": matched.pattern,
+        "g3_reason": ("evidence is a scanner path-existence line with "
+                      "no independent body/banner support"),
+    }
+    item["severity"] = "low"
+    title = (item.get("title") or "").strip()
+    if not title.upper().startswith("REQUIRES MANUAL VERIFICATION"):
+        item["title"] = ("REQUIRES MANUAL VERIFICATION: " + title)[:500]
+    rec = (item.get("recommendation") or "").strip()
+    note = ("\n\n_Auto-downgraded by G3 enforcement: this finding was "
+            "emitted at " + sev + " severity but its only evidence is "
+            "another scanner's path-existence line. Severity reset to "
+            "`low` until an analyst quotes a verbatim body, banner, or "
+            "error envelope from the response._")
+    item["recommendation"] = (rec + note)[:8000]
+    return audit
+
+
 def _insert_weakness_findings(aid: int, prompt_row: dict,
                                 items: list) -> int:
     """Validate + insert LLM-emitted findings as source_tool=
@@ -1343,13 +1544,23 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
     fail the schema check (severity / title) — the LLM occasionally
     emits a stray comment row that would crash the strict NOT NULL
     constraints, and a strict caller would lose every other finding in
-    the batch as collateral."""
+    the batch as collateral.
+
+    Runs the mechanical G3 post-processor (`_g3_downgrade_if_scanner_only`)
+    before insert so a finding whose only evidence is a scanner URL
+    line cannot be persisted at high/critical."""
     if not items or not isinstance(items, list):
         return 0
     n = 0
     for item in items:
         if not isinstance(item, dict):
             continue
+        # Mechanical G3 enforcement runs BEFORE schema validation so
+        # the post-processor sees the model-emitted severity, not a
+        # default. The function rewrites the dict in place when a
+        # downgrade fires; we stash the audit trail on the row so a
+        # human reviewer can inspect why a finding ended up at low.
+        g3_audit = _g3_downgrade_if_scanner_only(item)
         sev = (item.get("severity") or "").lower()
         if sev not in _SEV_ALLOWED:
             continue
@@ -1376,6 +1587,8 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
                 "llm_category": category,
                 "llm_evidence": evidence,
                 "llm_location": location}
+        if g3_audit:
+            raw.update(g3_audit)
         db.execute("""
             INSERT INTO findings
                 (assessment_id, source_tool, source_scan_id, severity,
