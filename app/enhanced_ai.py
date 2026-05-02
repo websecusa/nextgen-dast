@@ -1020,6 +1020,56 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
 _SEV_ALLOWED = {"critical", "high", "medium", "low", "info"}
 
 
+# Map an AI weakness-discovery scenario name (the `category` field the
+# LLM echoes back per the FOOTER_TEMPLATE in enhanced_ai_prompts.py) to
+# an OWASP Top 10 (2021) code. The downstream report pipeline groups
+# findings on the OWASP code: per-category demerit math, the heat-map
+# rows, the cover scorecard, and the new shared compute_overall_grade()
+# pipeline all key off it. Until this map existed the AI was writing
+# its scenario label ('bola_idor', 'rate_limit_evasion', etc.) directly
+# into `owasp_category`, so AI findings sat in an "Other" bucket and
+# never rolled into the right OWASP row.
+#
+# The fidelity-prompt scenario doesn't appear here because that pass
+# regrades EXISTING findings (it doesn't insert new ones), so its
+# category never reaches `owasp_category`.
+_SCENARIO_TO_OWASP: dict[str, str] = {
+    # Authorization failures — direct/function-level access checks.
+    "bola_idor":              "A01:2021-Broken_Access_Control",
+    "bfla":                   "A01:2021-Broken_Access_Control",
+    "tenant_isolation":       "A01:2021-Broken_Access_Control",
+    # Injection variants. Second-order injection is still injection
+    # for OWASP grouping purposes; the "second-order" twist matters
+    # for triage but not for the per-category bucket.
+    "second_order_injection": "A03:2021-Injection",
+    # Insecure design covers business logic, mass assignment, race
+    # conditions, and rate-limit evasion: each is a logic-level flaw
+    # rather than an implementation bug, which is the OWASP A04
+    # bucket's intent.
+    "business_logic":         "A04:2021-Insecure_Design",
+    "mass_assignment":        "A04:2021-Insecure_Design",
+    "race_condition":         "A04:2021-Insecure_Design",
+    "rate_limit_evasion":     "A04:2021-Insecure_Design",
+    # Authentication / OAuth flaws.
+    "oauth_oidc_flaw":        "A07:2021-Identification_and_Authentication_Failures",
+    # SSRF has its own dedicated A10 bucket.
+    "ssrf":                   "A10:2021-Server-Side_Request_Forgery",
+}
+
+
+def _scenario_to_owasp(scenario: str) -> str:
+    """Translate an AI weakness-discovery scenario name into the OWASP
+    Top 10 code the rest of the pipeline expects. Unknown scenarios
+    fall back to A04 ('Insecure Design') because every weakness-
+    discovery scenario shipped today is fundamentally a design-level
+    issue rather than a configuration one — that's the closest
+    correct bucket if a future scenario lands without a map entry."""
+    if not scenario:
+        return ""
+    return _SCENARIO_TO_OWASP.get(
+        scenario.strip().lower(), "A04:2021-Insecure_Design")
+
+
 def _insert_weakness_findings(aid: int, prompt_row: dict,
                                 items: list) -> int:
     """Validate + insert LLM-emitted findings as source_tool=
@@ -1049,9 +1099,12 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
         # row passable for the analyst page even on terse output.
         if not description and evidence:
             description = f"Evidence: {evidence}"
-        # raw_data is JSON-encoded LLM output preserved verbatim, plus
-        # the prompt-row id so the analyst can trace back which scenario
-        # produced this finding without re-parsing the description.
+        # owasp_category gets the OWASP Top 10 code so downstream
+        # pipelines (per-category demerit math, heat map, cover
+        # scorecard, compute_overall_grade) bucket the row correctly.
+        # The original scenario label is preserved in raw_data.
+        # llm_category for traceability.
+        owasp_code = _scenario_to_owasp(category)
         raw = {"llm_scenario": prompt_row.get("name"),
                 "llm_prompt_id": prompt_row.get("id"),
                 "llm_category": category,
@@ -1067,7 +1120,7 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
                     %s, %s, NULL, NULL, %s, %s, 1)
         """, (
             aid, f"llm:{prompt_row.get('id')}", sev,
-            (category or "")[:64],
+            owasp_code[:64],
             title[:500], description, recommendation,
             json.dumps(raw, default=str),
         ))
