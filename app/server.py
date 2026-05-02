@@ -4324,17 +4324,244 @@ _HEADER_TITLE_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-def _detect_header_check_target(finding: dict) -> Optional[str]:
-    """If the finding's title indicates a missing/weak HTTP response
-    header (regardless of source tool), return the response header
-    name to inspect. Otherwise None. Lets the Test-button dispatch
-    route nikto / wapiti / nuclei / enhanced_testing / LLM
-    header-missing findings through the same verdict-producing fast
-    path that testssl HSTS findings already use."""
+# Cookie-attribute findings work the same way as header-missing
+# findings — nuclei, nikto, and the LLM all phrase them slightly
+# differently but they all reduce to "fetch the URL once, parse
+# Set-Cookie, check the named flag." Pattern → which attribute to
+# verify (httponly / secure / samesite). First match wins.
+# Permissive on purpose: testssl is last resort, so any plausible
+# cookie-attribute phrasing should route here. Each pattern fires on
+# the cookie attribute keyword (httponly / secure / samesite) appearing
+# anywhere in a title that mentions cookies.
+_COOKIE_TITLE_PATTERNS: list[tuple[str, str]] = [
+    # SameSite: nuclei "Missing Cookie SameSite Strict",
+    #          "Cookies SameSite=Lax warning", LLM "missing samesite", etc.
+    (r"\bsamesite\b", "samesite"),
+    # HttpOnly: nikto "Cookie X created without the httponly flag",
+    #          LLM "session cookie without HttpOnly", etc.
+    (r"\b(httponly|http[-_ ]only)\b", "httponly"),
+    # Secure: nuclei "Cookies without Secure attribute - Detect",
+    #         LLM "session cookie missing Secure flag", etc.
+    (r"cookie[s]?[^\n]*\bsecure\b|\bsecure\b[^\n]*cookie", "secure"),
+]
+
+
+def _detect_cookie_check_target(finding: dict) -> Optional[str]:
+    """If the finding's title is about a missing cookie attribute
+    (HttpOnly / Secure / SameSite), return the attribute name to
+    inspect. Tool-agnostic — works for nuclei "Missing Cookie SameSite
+    Strict", nikto "Cookie X created without the httponly flag", and
+    the LLM. Returns None for non-cookie findings.
+
+    Lightly gated on the title containing "cookie" or "samesite" so we
+    don't false-fire on findings that mention "secure" in another
+    context (HSTS preload, secure transport, etc.)."""
     title = (finding.get("title") or "").strip().lower()
     if not title:
         return None
+    if "cookie" not in title and "samesite" not in title:
+        return None
+    for pat, attr in _COOKIE_TITLE_PATTERNS:
+        if re.search(pat, title, re.IGNORECASE):
+            return attr
+    return None
+
+
+def _finding_test_cookie_fast(host: str, port: int, attribute: str,
+                                finding: dict) -> JSONResponse:
+    """Cookie-attribute fast path. One HTTPS GET, parse Set-Cookie
+    response headers, check whether each cookie carries the named
+    attribute. Sub-second. Returns the same JSON envelope as
+    _finding_test_header_fast so the modal renders identically."""
+    import time as _time
+    import ssl as _ssl
+    import urllib.error as _urlerr
+    import urllib.request as _urlreq
+
+    aid = finding.get("assessment_id")
+    ua_string = _resolve_assessment_user_agent(aid)
+    url = f"https://{host}:{port}/"
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+
+    class _NoRedirect(_urlreq.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    opener = _urlreq.build_opener(
+        _urlreq.HTTPSHandler(context=ctx),
+        _NoRedirect(),
+    )
+    req = _urlreq.Request(url, method="GET", headers={
+        "User-Agent": ua_string,
+        "Accept": "*/*",
+    })
+
+    t_start = _time.monotonic()
+    set_cookies: list[str] = []
+    status = 0
+    err_text = None
+    try:
+        with opener.open(req, timeout=10) as resp:
+            status = resp.status
+            # get_all preserves multiple Set-Cookie headers (Python's
+            # dict-style headers collapses duplicates).
+            set_cookies = resp.headers.get_all("set-cookie") or []
+    except _urlerr.HTTPError as he:
+        status = he.code
+        try:
+            set_cookies = (he.headers or {}).get_all("set-cookie") or []
+        except Exception:
+            pass
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((_time.monotonic() - t_start) * 1000)
+
+    reproduce_curl = f"curl -s -kI -A {ua_string!r} {url}"
+    cmd_label = (f"GET {url} (cookie-attribute fast path: {attribute})")
+
+    if err_text:
+        return JSONResponse({
+            "ok": True, "kind": "tls",
+            "host": host, "port": port,
+            "command": cmd_label, "reproduce_command": reproduce_curl,
+            "elapsed_ms": elapsed_ms, "exit_code": -1,
+            "flag": "fast-path", "flag_label": cmd_label,
+            "testssl_id": f"cookie:{attribute}",
+            "verdict": "inconclusive",
+            "matched_rows": [{
+                "id": f"cookie:{attribute}", "severity": "INFO",
+                "finding": (f"HTTPS request failed: {err_text}. "
+                            f"Re-test from a browser the analyst trusts."),
+            }],
+            "stdout_excerpt": "", "stderr_excerpt": err_text,
+        })
+
+    if not set_cookies:
+        return JSONResponse({
+            "ok": True, "kind": "tls",
+            "host": host, "port": port,
+            "command": cmd_label, "reproduce_command": reproduce_curl,
+            "elapsed_ms": elapsed_ms, "exit_code": 0,
+            "flag": "fast-path", "flag_label": cmd_label,
+            "testssl_id": f"cookie:{attribute}",
+            "verdict": "inconclusive",
+            "matched_rows": [{
+                "id": f"cookie:{attribute}", "severity": "INFO",
+                "finding": (f"GET {url} returned no Set-Cookie headers "
+                            f"(HTTP {status}). The original finding may "
+                            f"have come from a different path — try "
+                            f"the manual Challenge form."),
+            }],
+            "stdout_excerpt": "", "stderr_excerpt": "",
+            "response_status": status,
+        })
+
+    # Inspect each Set-Cookie value for the named attribute. Tolerant
+    # of casing and ordering: `; SameSite=Strict`, `;samesite=lax`,
+    # `;HttpOnly`, etc.
+    cookie_rows: list[dict] = []
+    bad = 0
+    for sc in set_cookies:
+        # Cookie name is everything before the first '='.
+        name = sc.split("=", 1)[0].strip()
+        attrs_lower = sc.lower()
+        present = False
+        if attribute == "httponly":
+            present = "httponly" in attrs_lower
+        elif attribute == "secure":
+            # Secure must be its own attribute, not part of a value
+            # like Domain=secure.example. Match `; secure` or
+            # `; Secure;`.
+            present = bool(re.search(r";\s*secure(\s*;|\s*$)",
+                                       attrs_lower))
+        elif attribute == "samesite":
+            present = "samesite=" in attrs_lower
+        if not present:
+            bad += 1
+        cookie_rows.append({
+            "id": f"cookie:{name}",
+            "severity": "MEDIUM" if not present else "INFO",
+            "finding": (f"Set-Cookie {name!r}: {attribute} "
+                         f"{'present' if present else 'MISSING'}. "
+                         f"Full value: {sc}"),
+        })
+
+    if bad > 0:
+        verdict = "reproduced"
+        finding_text = (f"{bad} of {len(set_cookies)} cookie(s) "
+                        f"lack the {attribute} attribute. The "
+                        f"original cookie-{attribute} finding still "
+                        f"applies.")
+    else:
+        verdict = "not_reproduced"
+        finding_text = (f"All {len(set_cookies)} cookie(s) carry the "
+                        f"{attribute} attribute. The original "
+                        f"cookie-{attribute} finding looks remediated.")
+
+    return JSONResponse({
+        "ok": True, "kind": "tls",
+        "host": host, "port": port,
+        "command": cmd_label, "reproduce_command": reproduce_curl,
+        "elapsed_ms": elapsed_ms, "exit_code": 0,
+        "flag": "fast-path", "flag_label": cmd_label,
+        "testssl_id": f"cookie:{attribute}",
+        "verdict": verdict,
+        "matched_rows": cookie_rows or [{
+            "id": f"cookie:{attribute}",
+            "severity": "MEDIUM" if bad else "INFO",
+            "finding": finding_text,
+        }],
+        "stdout_excerpt": "", "stderr_excerpt": "",
+        "response_status": status,
+        "summary": finding_text,
+    })
+
+
+def _detect_header_check_target(finding: dict) -> Optional[str]:
+    """If the finding's title indicates a missing/weak/misconfigured
+    HTTP response header (regardless of source tool), return the
+    response header name to inspect. Otherwise None.
+
+    Strategy: testssl is last resort, so we cast a WIDE net for
+    header findings. Two passes:
+      (1) the existing _HEADER_TITLE_PATTERNS catalog (specific
+          phrasings like "missing HSTS", "Clickjacking Protection")
+      (2) a fallback that matches a known header NAME anywhere in
+          the title — covers nuclei "Weak HTTP Strict-Transport-
+          Security", wapiti "Content Security Policy Configuration",
+          and any future scanner phrasing that just names the header.
+    """
+    title = (finding.get("title") or "").strip().lower()
+    if not title:
+        return None
+    # Pass 1: specific phrasings (more precise mappings).
     for pat, header_name in _HEADER_TITLE_PATTERNS:
+        if re.search(pat, title, re.IGNORECASE):
+            return header_name
+    # Pass 2: the response header name appears anywhere in the title.
+    # This catches "Content Security Policy Configuration", "Weak
+    # HTTP Strict-Transport-Security - Detect", "X-Frame-Options
+    # missing", etc. — all of which reduce to "fetch URL, look at
+    # header X". Order matters here too: put longer/more-specific
+    # names first so e.g. "x-content-type-options" beats "x-frame-
+    # options" if a title mentioned both (unlikely but defensive).
+    for pat, header_name in [
+        (r"\bstrict[-_ ]transport[-_ ]security\b", "strict-transport-security"),
+        (r"\bcontent[-_ ]security[-_ ]policy\b",   "content-security-policy"),
+        (r"\bx[-_ ]content[-_ ]type[-_ ]options\b", "x-content-type-options"),
+        (r"\bx[-_ ]xss[-_ ]protection\b",          "x-xss-protection"),
+        (r"\bx[-_ ]frame[-_ ]options\b",           "x-frame-options"),
+        (r"\breferrer[-_ ]policy\b",               "referrer-policy"),
+        (r"\bpermissions[-_ ]policy\b",            "permissions-policy"),
+        (r"\bfeature[-_ ]policy\b",                "feature-policy"),
+        (r"\bpublic[-_ ]key[-_ ]pins\b",           "public-key-pins"),
+        # CORS / Access-Control headers — analyst usually wants to
+        # see the full ACAO/ACAC pair; default to ACAO.
+        (r"\baccess[-_ ]control[-_ ]allow[-_ ]origin\b|\bacao\b|\bcors\b",
+         "access-control-allow-origin"),
+    ]:
         if re.search(pat, title, re.IGNORECASE):
             return header_name
     return None
@@ -4401,6 +4628,16 @@ _HEADER_FAST_ID_TO_HEADER: dict[str, str] = {
     "config_referrer_policy_missing": "referrer-policy",
     "config_permissions_policy_missing": "permissions-policy",
     "config_xss_protection_missing":  "x-xss-protection",
+    # testssl `security_headers` is a multi-header check ("are any of the
+    # common ones present"). The header-fast renderer reports
+    # whichever single header it's keyed on, plus the full Set-Cookie
+    # / response-header dump in matched_rows so the analyst still sees
+    # the other headers. Default the check to HSTS as the most asked-
+    # for; the response-headers list in the modal answers the rest.
+    "security_headers":               "strict-transport-security",
+    # IP address leak in response headers — same urllib fetch surfaces
+    # the headers; the analyst spots the IP in the rendered table.
+    "ipv4_in_header":                 "server",
 }
 _HEADER_FAST_TESTSSL_IDS = set(_HEADER_FAST_ID_TO_HEADER.keys())
 
@@ -4448,15 +4685,24 @@ _PROTOCOL_TESTSSL_TO_OPENSSL_FLAG: dict[str, str] = {
 # string proves the server still offers at least one cipher in the
 # category, which is the same claim the testssl row makes.
 _CIPHERLIST_OPENSSL_NAME: dict[str, str] = {
-    "NULL":   "NULL:eNULL",
-    "aNULL":  "aNULL",
-    "EXPORT": "EXPORT",
-    "LOW":    "LOW",
-    "DES":    "DES:!eDES",
-    "3DES":   "3DES",
-    "RC4":    "RC4",
-    "MD5":    "MD5",
-    "MEDIUM": "MEDIUM",
+    "NULL":      "NULL:eNULL",
+    "aNULL":     "aNULL",
+    "EXPORT":    "EXPORT",
+    "LOW":       "LOW",
+    "DES":       "DES:!eDES",
+    "3DES":      "3DES",
+    "RC4":       "RC4",
+    "MD5":       "MD5",
+    "MEDIUM":    "MEDIUM",
+    # testssl `cipherlist_OBSOLETED` rolls up SSLv2/3 + RC4 + EXPORT
+    # + NULL + LOW into one row. The OpenSSL "obsolete" alias is the
+    # closest single string; if any handshake under that succeeds,
+    # the server still offers something in the obsolete bucket.
+    "OBSOLETED": "DEFAULT:!HIGH:!MEDIUM:!ECDH:!DH",
+    # `cipherlist_3DES_IDEA` is a combined check; either offered =
+    # finding reproduced. IDEA is rarely shipped in modern openssl
+    # so the check effectively reduces to 3DES, but try both.
+    "3DES_IDEA": "3DES:IDEA",
 }
 
 
@@ -4965,10 +5211,29 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
 
     # Fast path: full cipher-suite enumeration via nmap. ~600 ms vs
     # ~57 s for testssl.sh -e. Used when the testssl row is about the
-    # overall cipher matrix (cipher_negotiated, cipher_x*, cipher_order)
-    # rather than a single category.
-    if (testssl_id in {"cipher_negotiated", "cipher_order"}
-            or testssl_id.startswith("cipher_x")):
+    # overall cipher matrix. testssl IDs in this class:
+    #   cipher_negotiated, cipher_order, cipher_order-tls1,
+    #   cipher_order-tls1_1, cipher_order-tls1_2, cipher_order-tls1_3
+    # The earlier `startswith("cipher_x")` check was dead — actual IDs
+    # use `cipher-tls1_2_x35` (hyphen + protocol + suffix), not
+    # `cipher_x*`. Those individual-cipher IDs go to the single-cipher
+    # path further down (regex match on the protocol-aware shape).
+    if (testssl_id == "cipher_negotiated"
+            or testssl_id == "cipher_order"
+            or testssl_id.startswith("cipher_order-tls1")):
+        return _finding_test_cipher_enum_fast(host, port, testssl_id, finding)
+
+    # Fast path: single-cipher availability via openssl s_client. testssl
+    # emits per-cipher IDs of shape `cipher-tls1_X_x<HEX>` (or
+    # `cipher-tls1_x<HEX>` for TLS 1.0); each one asks "is this exact
+    # cipher offered?" Matching by regex instead of an explicit table
+    # because there are ~50 cipher IDs and they evolve with each
+    # testssl release. The hex suffix is the IANA cipher-id which we
+    # could decode to a name, but openssl's name strings are easier
+    # to drive and a successful handshake on the protocol alone is
+    # enough to reproduce the original finding (the cipher is offered
+    # on that protocol — what testssl was claiming).
+    if re.match(r"^cipher-tls1(?:_[123])?_x[0-9a-fA-F]+$", testssl_id):
         return _finding_test_cipher_enum_fast(host, port, testssl_id, finding)
 
     # Fast path: vulnerability-class IDs whose verification reduces to
@@ -5490,6 +5755,18 @@ def finding_test(request: Request, fid: int):
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         return _finding_test_header_fast(
             host, port, detected_header, f)
+
+    # Same idea for cookie-attribute findings — nuclei "Missing
+    # Cookie SameSite", nikto "Cookie X without httponly flag", and
+    # the LLM all reduce to "fetch URL, parse Set-Cookie, check the
+    # attribute on each cookie." Sub-second urllib path with a
+    # cookie-by-cookie verdict table.
+    detected_cookie = _detect_cookie_check_target(f)
+    if detected_cookie:
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return _finding_test_cookie_fast(
+            host, port, detected_cookie, f)
 
     # Nuclei test: re-run nuclei narrowly with the original template-id
     # so the matcher logic actually executes against the live target.
