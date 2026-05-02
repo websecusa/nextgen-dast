@@ -788,3 +788,49 @@ footer {
   background: var(--panel);
   color: var(--text);
 }
+
+/* ---- Sortable column headers (Assessments table) ------------------- */
+/* Header cells become inline-block links so the arrow indicator and
+   the label sit on the same baseline; hover lights up the muted
+   arrow so the user can see which columns are clickable. */
+table.sortable-table th .col-sort {
+  color: var(--text);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: .35em;
+  white-space: nowrap;
+}
+table.sortable-table th .col-sort:hover {
+  color: var(--accent);
+}
+table.sortable-table th .col-sort.active .sort-arrow {
+  color: var(--accent);
+}
+table.sortable-table th .sort-arrow {
+  font-size: .78em;
+  line-height: 1;
+}
+
+/* ---- Pagination footer (Assessments table) ------------------------- */
+.pagination {
+  margin-top: .85em;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pagination .pager {
+  display: inline-flex; gap: .15em;
+}
+.pagination .pager a,
+.pagination .pager .disabled {
+  padding: .15em .55em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 1em;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--panel-2);
+}
+.pagination .pager a:hover { border-color: var(--accent); color: var(--accent); }
+.pagination .pager .disabled { opacity: .35; }

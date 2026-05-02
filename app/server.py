@@ -875,24 +875,34 @@ def ctx(request: Request, **extra) -> dict:
     }
 
 
-def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
+def _dashboard_data(trend_filter: Optional[str] = None,
+                    trend_days: int = 30) -> dict:
     """Aggregate the metrics shown on the / overview page.
 
     Returns a dict with severity counts, finished-assessment metrics, a
-    findings-by-day series for the trend chart (last 30 days), the
-    top-risk targets, the unresolved-by-age breakdown, the resolved-by-
-    age breakdown, and a recent-activity list. All queries skip
-    triaged findings (false-positive, fixed, accepted_risk) so the
-    dashboard mirrors what's actually actionable.
+    findings-by-day series for the trend chart, the unresolved-by-age
+    breakdown, the resolved-by-age breakdown, and a recent-activity
+    list. All queries skip triaged findings (false-positive, fixed,
+    accepted_risk) so the dashboard mirrors what's actually actionable.
 
     `trend_filter`, when set, restricts JUST the trend chart's series
     to assessments whose fqdn or application_id matches the substring.
     The filter intentionally does not propagate to the KPI strip /
-    targets / age matrices -- the typeahead is a per-card lens, not a
-    global filter.
+    age matrices -- the typeahead is a per-card lens, not a global
+    filter.
+
+    `trend_days` controls the trend chart window (allowed: 7, 14, 21,
+    30). Out-of-range values clamp to 30 so a tampered query string
+    cannot cause the SQL to scan an unbounded history.
 
     Falls back to a zeroed-out dict when the DB isn't reachable so the
     page still renders during a database outage."""
+    # Whitelist + clamp the trend window. The route handler should
+    # already constrain this, but keep a defensive copy so any internal
+    # caller that builds the dashboard data directly cannot trigger an
+    # unbounded INTERVAL.
+    if trend_days not in (7, 14, 21, 30):
+        trend_days = 30
     from datetime import date, timedelta
     # Trend chart deliberately omits 'info' (high-volume, low-signal
     # noise that flattens the more interesting bands). Other UI
@@ -983,12 +993,13 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
     if live_per_aid:
         overall_risk = round(sum(live_per_aid.values()) / len(live_per_aid))
 
-    # Findings-by-day for the last 30 days, broken down by severity.
-    # Info severity is excluded from the chart series (high-volume /
-    # low-signal noise that flattens the criticals visually). The other
-    # dashboard surfaces still surface info totals.
+    # Findings-by-day for the selected trend window (7/14/21/30 days),
+    # broken down by severity. Info severity is excluded from the chart
+    # series (high-volume / low-signal noise that flattens the
+    # criticals visually). The other dashboard surfaces still surface
+    # info totals.
     days = [(date.today() - timedelta(days=i)).isoformat()
-            for i in range(29, -1, -1)]
+            for i in range(trend_days - 1, -1, -1)]
     sev_chart_order = ("critical", "high", "medium", "low")
     series = {s: [0] * len(days) for s in sev_chart_order}
     day_idx = {d: i for i, d in enumerate(days)}
@@ -1017,7 +1028,7 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
         f"SELECT DATE(created_at) AS d, severity, COUNT(*) AS n "
         f"FROM findings WHERE {triage_clause} "
         f"  AND severity != 'info' "
-        f"  AND created_at > NOW() - INTERVAL 30 DAY "
+        f"  AND created_at > NOW() - INTERVAL {int(trend_days)} DAY "
     )
     trend_params: list = []
     if matched_aids is not None:
@@ -1136,31 +1147,15 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
         for r in rows:
             resolved_ages[f">{bucket}"][r["severity"]] = int(r["n"] or 0)
 
-    recent = db.query(
-        "SELECT id, fqdn, application_id, status, total_findings, "
-        "       profile, created_at, finished_at "
-        "FROM assessments ORDER BY id DESC LIMIT 6")
-    # Decorate recent rows with live open-findings count + risk score
-    # so the dashboard matches the /assessments listing. total_findings
-    # on the row is the orchestrator's scan-time count and goes stale
-    # the moment the analyst triages anything.
-    if recent:
-        rec_ids = [r["id"] for r in recent]
-        ph = ",".join(["%s"] * len(rec_ids))
-        rec_findings: dict[int, list[dict]] = {aid: [] for aid in rec_ids}
-        for f in db.query(
-                f"SELECT assessment_id, severity, status, validation_status "
-                f"FROM findings WHERE assessment_id IN ({ph})",
-                rec_ids):
-            rec_findings.setdefault(f["assessment_id"], []).append(f)
-        for r in recent:
-            fs = rec_findings.get(r["id"], [])
-            r["open_findings"] = sum(
-                1 for f in fs
-                if (f.get("status") or "open") not in EXCLUDED_FROM_SCORE)
-            r["risk_score"] = (live_per_aid.get(r["id"])
-                               if r["id"] in live_per_aid
-                               else _live_risk_score(fs))
+    # Assessments table is empty here — the route handler resolves the
+    # paginated query separately and merges it in. Keeping the heavy
+    # /assessment-list logic out of _dashboard_data avoids re-running
+    # the per-finding aggregation for the 25 displayed rows when the
+    # user is just toggling the trend window.
+    recent: list[dict] = []
+    recent_total = 0
+    recent_status_options: list[str] = []
+    recent_fqdn_suggest: list[str] = []
 
     return {
         "kpi": {
@@ -1180,19 +1175,168 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
                   "w": chart_w, "h": chart_h,
                   "filter": trend_filter,
                   "filter_targets": filter_targets,
-                  "filter_matched": filter_matched},
+                  "filter_matched": filter_matched,
+                  "window_days": trend_days,
+                  "window_options": [7, 14, 21, 30]},
         "ages": ages,
         "resolved_ages": resolved_ages,
         "recent": recent,
+        "recent_total": recent_total,
+        "recent_status_options": recent_status_options,
+        "recent_fqdn_suggest": recent_fqdn_suggest,
+        # Internal pass-through so the route handler's table helper
+        # can reuse the per-assessment live risk scores already
+        # computed for the KPI strip. Stripped before the dict is
+        # rendered; templates do not see this key.
+        "_live_per_aid": live_per_aid,
     }
 
 
+# Whitelist of sortable columns on the dashboard's Assessments table.
+# Maps the URL `a_sort` value to a real SQL fragment so the route
+# handler never interpolates user input into ORDER BY. The "when"
+# alias resolves to COALESCE(finished_at, created_at) so a still-
+# running assessment sorts by its start instead of NULL-tail.
+_ASSESSMENTS_SORT_COLUMNS: dict[str, str] = {
+    "id": "id",
+    "fqdn": "fqdn",
+    "application_id": "COALESCE(application_id, '')",
+    "profile": "profile",
+    "status": "status",
+    "when": "COALESCE(finished_at, created_at)",
+}
+
+
+def _assessments_table_data(*, q: str, status: str, size: int, page: int,
+                            sort: str, direction: str,
+                            live_per_aid: dict) -> dict:
+    """Resolve the dashboard's Assessments table from the query string.
+
+    `q` matches against fqdn or application_id (case-insensitive
+    substring), `status` filters to a single status enum value, `size`
+    and `page` paginate, `sort` and `direction` order. Sortable columns
+    are whitelisted in `_ASSESSMENTS_SORT_COLUMNS`; an unknown value
+    falls back to id-desc, matching the prior default.
+
+    Returns rows for the current page plus the total row count (for
+    pagination), the list of distinct fqdns (for typeahead), and the
+    status options the dropdown should expose. live_per_aid is reused
+    when present so the table's risk score matches what the KPI strip
+    already computed for the same assessment ids.
+    """
+    if not db.healthy():
+        return {"rows": [], "total": 0,
+                "status_options": [], "fqdn_suggest": []}
+
+    size = max(1, min(100, int(size or 25)))
+    page = max(1, int(page or 1))
+    sort_key = sort if sort in _ASSESSMENTS_SORT_COLUMNS else "id"
+    direction_sql = "ASC" if (direction or "").lower() == "asc" else "DESC"
+    order_sql = f"{_ASSESSMENTS_SORT_COLUMNS[sort_key]} {direction_sql}"
+
+    where_parts: list[str] = []
+    params: list = []
+    q = (q or "").strip()
+    if q:
+        like = f"%{q[:128].lower()}%"
+        where_parts.append(
+            "(LOWER(fqdn) LIKE %s OR "
+            "LOWER(COALESCE(application_id, '')) LIKE %s)")
+        params.extend([like, like])
+    status = (status or "").strip()
+    # Validate status against the enum so a tampered query doesn't
+    # produce a malformed query. Empty string means "any status".
+    valid_status = {"queued", "running", "consolidating", "done",
+                    "error", "cancelled", "deleting"}
+    if status and status in valid_status:
+        where_parts.append("status = %s")
+        params.append(status)
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+    total_row = db.query_one(
+        f"SELECT COUNT(*) AS n FROM assessments {where_sql}", params)
+    total = int((total_row or {}).get("n") or 0)
+    offset = (page - 1) * size
+
+    rows = db.query(
+        f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
+        f"       total_findings, created_at, finished_at "
+        f"FROM assessments {where_sql} "
+        f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
+        params + [size, offset])
+
+    # Decorate the page with live open-findings count and risk score so
+    # the values match the assessment-detail view rather than the
+    # frozen orchestrator-time totals on the row.
+    if rows:
+        ids = [r["id"] for r in rows]
+        ph = ",".join(["%s"] * len(ids))
+        findings_by_aid: dict[int, list[dict]] = {aid: [] for aid in ids}
+        for f in db.query(
+                f"SELECT assessment_id, severity, status, validation_status "
+                f"FROM findings WHERE assessment_id IN ({ph})", ids):
+            findings_by_aid.setdefault(f["assessment_id"], []).append(f)
+        for r in rows:
+            fs = findings_by_aid.get(r["id"], [])
+            r["open_findings"] = sum(
+                1 for f in fs
+                if (f.get("status") or "open") not in EXCLUDED_FROM_SCORE)
+            r["risk_score"] = (live_per_aid.get(r["id"])
+                               if r["id"] in live_per_aid
+                               else _live_risk_score(fs))
+
+    # Distinct fqdns drive the typeahead. Cap at 200 so the page weight
+    # stays reasonable on installs with thousands of assessments.
+    suggest = [r["fqdn"] for r in db.query(
+        "SELECT DISTINCT fqdn FROM assessments "
+        "WHERE fqdn IS NOT NULL AND fqdn != '' "
+        "ORDER BY fqdn LIMIT 200")]
+
+    # Status options come from the enum order to keep the dropdown
+    # stable across DB states (a fresh install has no rows yet but
+    # should still expose every status value).
+    status_options = ["queued", "running", "consolidating",
+                       "done", "error", "cancelled", "deleting"]
+
+    return {"rows": rows, "total": total,
+            "status_options": status_options,
+            "fqdn_suggest": suggest}
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, trend: str = ""):
-    """Overview dashboard. `trend` query-param filters the trend chart's
-    series by FQDN or application_id substring; the rest of the
-    dashboard ignores it."""
-    data = _dashboard_data(trend_filter=trend)
+def index(request: Request,
+          trend: str = "", trend_days: int = 30,
+          a_q: str = "", a_status: str = "",
+          a_size: int = 25, a_page: int = 1,
+          a_sort: str = "id", a_dir: str = "desc"):
+    """Dashboard. `trend` and `trend_days` drive the Risk Trending
+    chart; `a_*` parameters drive the Assessments table (search,
+    status filter, page size, page index, sort column + direction).
+    All Assessments query params are namespaced with `a_` so the chart
+    typeahead form and the table form can coexist in the same URL."""
+    data = _dashboard_data(trend_filter=trend, trend_days=trend_days)
+    table = _assessments_table_data(
+        q=a_q, status=a_status, size=a_size, page=a_page,
+        sort=a_sort, direction=a_dir,
+        live_per_aid=data.pop("_live_per_aid", {}))
+    data["recent"] = table["rows"]
+    data["recent_total"] = table["total"]
+    data["recent_status_options"] = table["status_options"]
+    data["recent_fqdn_suggest"] = table["fqdn_suggest"]
+    # Echo the resolved table-state back so the template can render
+    # the active sort indicator, page-size dropdown, and pagination
+    # bar without re-deriving anything from request.query_params.
+    page_size = max(1, min(100, int(a_size or 25)))
+    page = max(1, int(a_page or 1))
+    total_pages = max(1, (table["total"] + page_size - 1) // page_size)
+    data["recent_state"] = {
+        "q": a_q, "status": a_status,
+        "size": page_size, "page": min(page, total_pages),
+        "sort": a_sort if a_sort in _ASSESSMENTS_SORT_COLUMNS else "id",
+        "dir": "asc" if (a_dir or "").lower() == "asc" else "desc",
+        "total_pages": total_pages,
+        "size_options": [25, 50, 100],
+    }
     return templates.TemplateResponse("index.html", ctx(request, **data))
 
 

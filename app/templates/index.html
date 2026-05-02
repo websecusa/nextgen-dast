@@ -2,15 +2,18 @@
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
 
-  Overview dashboard. Layout (top → bottom):
+  Dashboard. Layout (top → bottom):
     1. Page heading + greeting
     2. KPI strip (overall score, open findings + 7d delta, severity dots,
        targets / assessments / last-scan totals)
-    3. Findings trend (30-day stacked-area sparkline, drawn inline as SVG
-       so we don't ship a charting library)
-    4. Unresolved findings by age (severity matrix)
-    5. Resolved findings by age (severity matrix)
-    6. Recent activity table
+    3. Risk Trending (selectable 7/14/21/30-day stacked-area sparkline,
+       drawn inline as SVG so we don't ship a charting library)
+    4. Two-column row: Unresolved + Resolved findings by age (severity
+       matrix)
+    5. Assessments table: typeahead search by FQDN, status filter,
+       page-size selector (25/50/100), sortable columns, pagination.
+       All Assessments-table query params are namespaced with `a_` so
+       the trend form's params don't clobber the table's state.
 
   All data is gathered server-side in server._dashboard_data().
 #}
@@ -59,14 +62,15 @@
   {% endif %}
 </div>
 
-{# ---- Findings trend (30-day SVG stacked area) -------------------- #}
-{# We render as a stacked area inline so the dashboard has zero JS
-   dependencies. The SVG path is computed in Jinja from the trend
-   data; height is fixed at 200px and the X-axis is the 30-day window. #}
+{# ---- Risk Trending (selectable-window SVG stacked area) ---------- #}
+{# Stacked area rendered inline so the dashboard ships zero JS
+   dependencies for charting. Window selector (7/14/21/30 days) sits
+   alongside the FQDN typeahead; both submit through the same form so
+   one Apply press updates both. #}
 <section>
   <div class="card-header">
     <div>
-      <h2>Findings trend (last 30 days)</h2>
+      <h2>Risk Trending (last {{ trend.window_days }} days)</h2>
       <div class="muted small">
         Stacked by severity. Triaged + info-severity excluded.
         {% if trend.filter %}
@@ -82,6 +86,15 @@
        trend.filter_targets. #}
     <form method="get" action="" class="trend-filter typeahead"
           data-targets='{{ trend.filter_targets | tojson }}'>
+      <select name="trend_days" class="ghost"
+              onchange="this.form.submit()" title="Window">
+        {% for d in trend.window_options %}
+          <option value="{{ d }}"
+                  {% if d == trend.window_days %}selected{% endif %}>
+            {{ d }} days
+          </option>
+        {% endfor %}
+      </select>
       <input type="search" name="trend"
              class="typeahead-input"
              value="{{ trend.filter or '' }}"
@@ -91,7 +104,7 @@
       <ul class="typeahead-suggest" role="listbox" hidden></ul>
       <button type="submit" class="ghost typeahead-apply">Apply</button>
       {% if trend.filter %}
-        <a href="?" class="muted small">clear</a>
+        <a href="?trend_days={{ trend.window_days }}" class="muted small">clear</a>
       {% endif %}
     </form>
   </div>
@@ -105,7 +118,7 @@
     </p>
   {% elif trend.max_total == 0 %}
     <p class="muted small" style="margin: 1.4em 0 .4em">
-      No findings in the last 30 days{% if trend.filter %} for that filter{% endif %}.
+      No findings in the last {{ trend.window_days }} days{% if trend.filter %} for that filter{% endif %}.
     </p>
   {% else %}
   {# Chart layout:
@@ -173,87 +186,162 @@
   {% endif %}
 </section>
 
-{# ---- Unresolved findings by age (severity matrix) ----------------- #}
-<section>
-  <div class="card-header">
-    <h2>Unresolved findings by age</h2>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Age</th>
-        {% for sev in ['critical','high','medium','low','info'] %}
-          <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
-        {% endfor %}
-      </tr>
-    </thead>
-    <tbody>
-      {% for label in ['>30 days', '>60 days', '>90 days'] %}
+{# ---- Two-column row: Unresolved + Resolved age matrices ---------- #}
+{# Both severity-by-age tables sit in a 2-col grid so they share a
+   row instead of stacking. Columns drop to 1 on narrow viewports
+   via the existing .grid responsive rule in style.css. #}
+<div class="grid">
+  <section>
+    <div class="card-header">
+      <h2>Unresolved findings by age</h2>
+    </div>
+    <table>
+      <thead>
         <tr>
-          <td>{{ label }}</td>
+          <th>Age</th>
           {% for sev in ['critical','high','medium','low','info'] %}
-            <td>
-              {% if ages[label][sev] %}
-                <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
-              {% else %}<span class="muted">—</span>{% endif %}
-            </td>
+            <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
           {% endfor %}
         </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
+      </thead>
+      <tbody>
+        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+          <tr>
+            <td>{{ label }}</td>
+            {% for sev in ['critical','high','medium','low','info'] %}
+              <td>
+                {% if ages[label][sev] %}
+                  <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
+                {% else %}<span class="muted">—</span>{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
 
 {# Resolved counterpart to the Unresolved-by-age card. Counts findings
    marked as fixed or accepted_risk, bucketed by the original
    finding's created_at (the schema doesn't track when an analyst
    changed status, so age-since-resolution is not available). #}
-<section>
-  <div class="card-header">
-    <h2>Resolved findings by age</h2>
-    <div class="muted small">
-      Fixed + archived (accepted_risk). Bucketed by the original finding's age.
+  <section>
+    <div class="card-header">
+      <h2>Resolved findings by age</h2>
+      <div class="muted small">
+        Fixed + archived (accepted_risk). Bucketed by the original finding's age.
+      </div>
     </div>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Age</th>
-        {% for sev in ['critical','high','medium','low','info'] %}
-          <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
-        {% endfor %}
-      </tr>
-    </thead>
-    <tbody>
-      {% for label in ['>30 days', '>60 days', '>90 days'] %}
+    <table>
+      <thead>
         <tr>
-          <td>{{ label }}</td>
+          <th>Age</th>
           {% for sev in ['critical','high','medium','low','info'] %}
-            <td>
-              {% if resolved_ages[label][sev] %}
-                <span class="sev sev-{{ sev }}">{{ resolved_ages[label][sev] }}</span>
-              {% else %}<span class="muted">—</span>{% endif %}
-            </td>
+            <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
           {% endfor %}
         </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
+      </thead>
+      <tbody>
+        {% for label in ['>30 days', '>60 days', '>90 days'] %}
+          <tr>
+            <td>{{ label }}</td>
+            {% for sev in ['critical','high','medium','low','info'] %}
+              <td>
+                {% if resolved_ages[label][sev] %}
+                  <span class="sev sev-{{ sev }}">{{ resolved_ages[label][sev] }}</span>
+                {% else %}<span class="muted">—</span>{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
 
-{# ---- Recent activity ----------------------------------------------- #}
+{# ---- Assessments table -------------------------------------------- #}
+{# Filters (search + status + page size) and sort live in the URL so
+   the page is bookmarkable. All Assessments-table query params are
+   namespaced with `a_` so the trend form and the table form can
+   coexist in the same URL without clobbering each other. #}
+{% set rs = recent_state %}
+{% macro col_link(label, key, hint='') %}
+  {# Render a sortable column header. Clicking toggles direction on
+     the active column; clicking a different column starts at desc. #}
+  {% set is_active = (rs.sort == key) %}
+  {% set next_dir = 'asc' if (is_active and rs.dir == 'desc') else 'desc' %}
+  {% set arrow = ('▼' if rs.dir == 'desc' else '▲') if is_active else '' %}
+  <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}&a_q={{ rs.q | urlencode }}&a_status={{ rs.status | urlencode }}&a_size={{ rs.size }}&a_page=1&a_sort={{ key }}&a_dir={{ next_dir }}"
+     class="col-sort {{ 'active' if is_active }}"
+     {% if hint %}title="{{ hint }}"{% endif %}>
+    {{ label }} <span class="sort-arrow muted small">{{ arrow }}</span>
+  </a>
+{% endmacro %}
 <section>
   <div class="card-header">
-    <h2>Recent assessments</h2>
-    <a href="{{ base }}/assessments" class="muted small">All assessments →</a>
+    <h2>Assessments</h2>
+    <form method="get" action="" class="assessments-filter typeahead"
+          data-targets='{{ recent_fqdn_suggest | tojson }}'>
+      {# Carry trend-form state so submitting this form doesn't reset
+         the chart window or its filter. #}
+      <input type="hidden" name="trend_days" value="{{ trend.window_days }}">
+      {% if trend.filter %}
+        <input type="hidden" name="trend" value="{{ trend.filter }}">
+      {% endif %}
+      {# Reset to page 1 on any filter change so the user doesn't end
+         up looking at "page 7" of a freshly narrowed result set. #}
+      <input type="hidden" name="a_page" value="1">
+      <input type="hidden" name="a_sort" value="{{ rs.sort }}">
+      <input type="hidden" name="a_dir" value="{{ rs.dir }}">
+
+      <input type="search" name="a_q"
+             class="typeahead-input"
+             value="{{ rs.q or '' }}"
+             placeholder="Search by FQDN…"
+             autocomplete="off"
+             spellcheck="false">
+      <ul class="typeahead-suggest" role="listbox" hidden></ul>
+
+      <select name="a_status" class="ghost"
+              onchange="this.form.submit()" title="Status filter">
+        <option value="">All statuses</option>
+        {% for s in recent_status_options %}
+          <option value="{{ s }}"
+                  {% if rs.status == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="a_size" class="ghost"
+              onchange="this.form.submit()" title="Rows per page">
+        {% for n in rs.size_options %}
+          <option value="{{ n }}"
+                  {% if rs.size == n %}selected{% endif %}>{{ n }} / page</option>
+        {% endfor %}
+      </select>
+
+      <button type="submit" class="ghost typeahead-apply">Apply</button>
+      {% if rs.q or rs.status %}
+        <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}&a_size={{ rs.size }}"
+           class="muted small">clear</a>
+      {% endif %}
+    </form>
   </div>
+
   {% if recent %}
-  <table>
+  <table class="sortable-table">
     <thead><tr>
-      <th>ID</th><th>Target</th><th>App</th><th>Profile</th>
-      <th>Status</th>
+      <th>{{ col_link('ID', 'id') }}</th>
+      <th>{{ col_link('Target', 'fqdn') }}</th>
+      <th>{{ col_link('App', 'application_id') }}</th>
+      <th>{{ col_link('Profile', 'profile') }}</th>
+      <th>{{ col_link('Status', 'status') }}</th>
+      {# "Open" and "Risk" are aggregated post-fetch from the live
+         findings rows, so server-side ORDER BY can't sort them
+         consistently across pages. Keep the headers static for now;
+         the displayed values stay accurate. #}
       <th title="Open findings, post-triage. Excludes false-positive, resolved, archived.">Open</th>
-      <th>Risk</th><th>When</th>
+      <th>Risk</th>
+      <th>{{ col_link('When', 'when') }}</th>
     </tr></thead>
     <tbody>
     {% for a in recent %}
@@ -285,10 +373,39 @@
     {% endfor %}
     </tbody>
   </table>
+
+  {# Pagination footer. Hidden when the result set fits in one page so
+     the dashboard stays clean for small installs. #}
+  {% if rs.total_pages > 1 %}
+  {% set pg_base = '?trend_days=' ~ trend.window_days ~ ('&trend=' ~ (trend.filter | urlencode) if trend.filter else '') ~ '&a_q=' ~ (rs.q | urlencode) ~ '&a_status=' ~ (rs.status | urlencode) ~ '&a_size=' ~ rs.size ~ '&a_sort=' ~ rs.sort ~ '&a_dir=' ~ rs.dir %}
+  <div class="pagination muted small">
+    Page {{ rs.page }} of {{ rs.total_pages }} · {{ recent_total }} total
+    <span class="pager">
+      {% if rs.page > 1 %}
+        <a href="{{ pg_base }}&a_page=1">«</a>
+        <a href="{{ pg_base }}&a_page={{ rs.page - 1 }}">‹</a>
+      {% else %}
+        <span class="disabled">«</span><span class="disabled">‹</span>
+      {% endif %}
+      {% if rs.page < rs.total_pages %}
+        <a href="{{ pg_base }}&a_page={{ rs.page + 1 }}">›</a>
+        <a href="{{ pg_base }}&a_page={{ rs.total_pages }}">»</a>
+      {% else %}
+        <span class="disabled">›</span><span class="disabled">»</span>
+      {% endif %}
+    </span>
+  </div>
+  {% endif %}
+
   {% else %}
   <p class="muted">
-    No assessments yet.
-    <a href="{{ base }}/assess">Start your first assessment →</a>
+    {% if rs.q or rs.status %}
+      No assessments match those filters.
+      <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}">Clear filters →</a>
+    {% else %}
+      No assessments yet.
+      <a href="{{ base }}/assess">Start your first assessment →</a>
+    {% endif %}
   </p>
   {% endif %}
 </section>
