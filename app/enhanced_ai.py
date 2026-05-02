@@ -1006,8 +1006,58 @@ def _resolve_budget(aid: int) -> Optional[float]:
 
 # ---- public entry point -----------------------------------------------------
 
+def build_single_finding_fidelity_prompt(fid: int) -> dict:
+    """Render — but do NOT send — the fidelity prompt for a single
+    finding. Used by the workspace's "Challenge with LLM" preview step:
+    the analyst sees the resolved system + user prompts, optionally
+    edits the user prompt, then submits to actually run the call.
+
+    Returns:
+        {ok: True, system_prompt, user_prompt, prompt_id, finding_id, fqdn}
+    or:
+        {ok: False, error, message}
+    """
+    f = db.query_one(
+        "SELECT id, assessment_id, source_tool, severity, owasp_category, "
+        "cwe, title, description, evidence_url, evidence_method, raw_data, "
+        "validation_status, validation_probe, validation_evidence "
+        "FROM findings WHERE id=%s", (fid,))
+    if not f:
+        return {"ok": False, "error": "not_found",
+                "message": f"finding {fid} does not exist"}
+    a = db.query_one(
+        "SELECT id, fqdn FROM assessments WHERE id=%s",
+        (f["assessment_id"],))
+    if not a:
+        return {"ok": False, "error": "no_assessment"}
+    prompt_row = db.query_one(
+        "SELECT id, system_prompt, user_template, batch_size "
+        "FROM ai_prompts WHERE slot=%s AND is_active=1 "
+        "ORDER BY sort_order LIMIT 1",
+        ("advanced_ai_testing.fidelity",))
+    if not prompt_row:
+        return {"ok": False, "error": "no_fidelity_prompt"}
+    fqdn = a.get("fqdn") or ""
+    batch_text = _render_fidelity_batch([f])
+    sys_prompt = (prompt_row["system_prompt"] or "")
+    user = render_user_prompt(prompt_row["user_template"], {
+        "fqdn": fqdn,
+        "findings_batch": batch_text,
+    })
+    return {
+        "ok": True,
+        "finding_id": fid,
+        "prompt_id": prompt_row["id"],
+        "fqdn": fqdn,
+        "system_prompt": sys_prompt,
+        "user_prompt": user,
+    }
+
+
 def run_single_finding_fidelity(fid: int,
-                                  endpoint: Optional[dict]) -> dict:
+                                  endpoint: Optional[dict],
+                                  *,
+                                  user_prompt_override: Optional[str] = None) -> dict:
     """Run the fidelity prompt against ONE finding, regardless of source
     tool or current validation status. Used by the per-finding "Challenge
     with LLM" button in the assessment workspace, which needs an
@@ -1052,10 +1102,18 @@ def run_single_finding_fidelity(fid: int,
 
     batch_text = _render_fidelity_batch([f])
     sys_prompt = (prompt_row["system_prompt"] or "")
-    user = render_user_prompt(prompt_row["user_template"], {
-        "fqdn": fqdn,
-        "findings_batch": batch_text,
-    })
+    # If the analyst hand-edited the user prompt in the preview modal,
+    # use that verbatim — the system prompt is still the seeded one
+    # because allowing edits there would change the output schema and
+    # break verdict parsing. Truncated to a sane upper bound so a
+    # paste-bomb doesn't blow the model's context.
+    if user_prompt_override and user_prompt_override.strip():
+        user = user_prompt_override.strip()[:48000]
+    else:
+        user = render_user_prompt(prompt_row["user_template"], {
+            "fqdn": fqdn,
+            "findings_batch": batch_text,
+        })
     call_started = datetime.now(timezone.utc).replace(tzinfo=None)
     result = _call_llm(endpoint, sys_prompt, user,
                         max_tokens=FIDELITY_MAX_OUTPUT_TOKENS,
@@ -1569,7 +1627,23 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
             continue
         category = item.get("category") or prompt_row.get("category") or ""
         description = (item.get("description") or "").strip()
-        recommendation = (item.get("recommendation") or "").strip()
+        # Output-schema v2: reproduction (test plan) and remediation
+        # (fix guide) are now separate fields. Backward compat: if the
+        # LLM emitted only the legacy `recommendation` field (operator
+        # editing an old prompt body, or a prompt that hasn't been
+        # restored yet), treat it as a test plan and leave the
+        # remediation column empty so the new "Remediation" UI card
+        # simply doesn't render. Reproduction lives in raw_data so it
+        # doesn't fight with the existing `remediation` column's
+        # historical content; the column is now reserved for the fix
+        # guide.
+        reproduction = (item.get("reproduction") or "").strip()
+        remediation = (item.get("remediation") or "").strip()
+        legacy_rec = (item.get("recommendation") or "").strip()
+        if legacy_rec and not reproduction:
+            reproduction = legacy_rec
+            # If `remediation` was also missing, we have no fix guide
+            # — leave it empty rather than duplicate the test plan.
         evidence = (item.get("evidence") or "").strip()
         location = (item.get("location") or "").strip().lower()
         # Synthesise a description if the LLM omitted it; keeps the
@@ -1586,7 +1660,12 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
                 "llm_prompt_id": prompt_row.get("id"),
                 "llm_category": category,
                 "llm_evidence": evidence,
-                "llm_location": location}
+                "llm_location": location,
+                # Reproduction (test plan) lives in raw_data so the
+                # `remediation` column can hold the fix guide without
+                # ambiguity. The detail page reads both and renders
+                # two separate cards: "To Reproduce" and "Remediation".
+                "llm_reproduction": reproduction}
         if g3_audit:
             raw.update(g3_audit)
         db.execute("""
@@ -1600,7 +1679,7 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
         """, (
             aid, f"llm:{prompt_row.get('id')}", sev,
             owasp_code[:64],
-            title[:500], description, recommendation,
+            title[:500], description, remediation,
             json.dumps(raw, default=str),
         ))
         n += 1
@@ -1780,14 +1859,32 @@ def _apply_fidelity_verdicts(batch: list[dict],
         # Always record the LLM's reasoning, regardless of auto-flip.
         if (verdict in ("validated", "false_positive")
                 and confidence >= 0.8):
-            db.execute(
-                "UPDATE findings SET validation_status=%s, "
-                "validation_probe='enhanced_ai_testing', "
-                "validation_run_at=%s, validation_evidence=%s "
-                "WHERE id=%s",
-                (_VERDICT_TO_STATUS[verdict],
-                  datetime.now(timezone.utc).replace(tzinfo=None),
-                  evidence_blob[:65000], fid))
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            # On a high-confidence false_positive verdict, ALSO update
+            # the finding's overall `status` to 'false_positive' — same
+            # action the toolkit-probe /challenge_inline endpoint takes
+            # when its probe refutes a finding. This removes the row
+            # from severity rollups, the heatmap, and the PDF report
+            # without an analyst having to click "Mark false positive"
+            # by hand. validated/inconclusive verdicts do NOT touch
+            # `status` (we only auto-suppress, never auto-promote).
+            if verdict == "false_positive":
+                db.execute(
+                    "UPDATE findings SET validation_status=%s, "
+                    "validation_probe='enhanced_ai_testing', "
+                    "validation_run_at=%s, validation_evidence=%s, "
+                    "status='false_positive' "
+                    "WHERE id=%s",
+                    (_VERDICT_TO_STATUS[verdict], now,
+                      evidence_blob[:65000], fid))
+            else:
+                db.execute(
+                    "UPDATE findings SET validation_status=%s, "
+                    "validation_probe='enhanced_ai_testing', "
+                    "validation_run_at=%s, validation_evidence=%s "
+                    "WHERE id=%s",
+                    (_VERDICT_TO_STATUS[verdict], now,
+                      evidence_blob[:65000], fid))
             out["auto_flipped"] += 1
         else:
             # Annotate-only path: leave validation_status, but record

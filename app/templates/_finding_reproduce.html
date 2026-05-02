@@ -26,7 +26,12 @@
     * finding_panel.html  — the assessment-workspace middle pane
     * finding_detail.html — the standalone /finding/<id> page
 #}
-{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.challengeable or io.testable)) %}
+{# Render when ANY of: repro carries a curl recipe, io carries a probe
+   match / captured request / captured response / indicator, or this is
+   an enhanced_ai_testing finding (which has no toolkit probe but still
+   needs the Challenge with LLM button surfaced). #}
+{% set is_ai_finding = (f.source_tool == 'enhanced_ai_testing') %}
+{% if (repro and repro.curl) or (io and (io.indicator or io.request or io.response or io.validatable or io.challengeable or io.testable)) or is_ai_finding %}
 <h3 class="section">Reproduce &amp; verify</h3>
 {# list-style:none + zero left margin/padding so the contained buttons
    sit flush with the surrounding section content. The earlier 1.2em
@@ -45,9 +50,9 @@
   {% if io and io.indicator %}
   <li><strong>Look for:</strong> {{ io.indicator }}</li>
   {% endif %}
-  {% if io and (io.request or io.response or io.validatable or io.challengeable or io.testable) %}
+  {% if (io and (io.request or io.response or io.validatable or io.challengeable or io.testable)) or is_ai_finding %}
   <li>
-    {% if io.request or io.response %}
+    {% if io and (io.request or io.response) %}
       <span>Compare against the captured round-trip from the scan:</span>
     {% endif %}
     <div style="display:flex; gap:.5em; flex-wrap:wrap; margin-top:.4em">
@@ -120,13 +125,37 @@
 {% if io and io.request %}<template id="io-data-request">{{ io.request }}</template>{% endif %}
 {% if io and io.response %}<template id="io-data-response">{{ io.response }}</template>{% endif %}
 
-{% if io and (io.request or io.response or io.validatable or io.testable) %}
+{% if (io and (io.request or io.response or io.validatable or io.testable)) or is_ai_finding %}
 <style>
   /* The native ::backdrop pseudo-element can't be set inline, so we
      scope it on the io-modal id. Slightly darker than the default
      so the modal reads as visually separated from the workspace
      behind it. */
-  #io-modal::backdrop { background: rgba(0,0,0,0.55); }
+  #io-modal::backdrop, #probe-modal::backdrop { background: rgba(0,0,0,0.55); }
+  /* Inline "Test [METHOD] /path" buttons we inject below each fenced
+     code block on AI findings. .probe-btn is local to this partial so
+     it doesn't collide with .action-btn / .ghost. */
+  .probe-btn-row {
+    display:flex; flex-wrap:wrap; gap:.4em;
+    margin:-.4em 0 .9em 0; padding:.4em .85em;
+    border-left:3px solid var(--accent, #5d8aa8);
+    background:rgba(93,138,168,.08);
+    border-radius:0 4px 4px 0;
+    font-size:.88em;
+  }
+  .probe-btn-row > .probe-label { color:var(--muted); margin-right:.3em; }
+  .probe-btn {
+    font-family:ui-monospace,Menlo,monospace; font-size:.92em;
+    padding:.2em .55em; border-radius:3px; cursor:pointer;
+    background:var(--panel-2,#0f1419); color:var(--text);
+    border:1px solid var(--border,#444);
+  }
+  .probe-btn:hover { border-color:var(--accent, #5d8aa8); }
+  .probe-btn[disabled] { opacity:.55; cursor:not-allowed; }
+  .markdown-body mark {
+    background:rgba(255,200,0,.4); color:inherit; padding:.05em .15em;
+    border-radius:2px;
+  }
 </style>
 <dialog id="io-modal" class="io-modal"
         style="max-width:min(90vw, 900px); width:80vw; padding:0;

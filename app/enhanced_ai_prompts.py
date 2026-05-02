@@ -64,6 +64,20 @@ NON-DESTRUCTIVE CONSTRAINTS (hard requirements on every recommendation you produ
 # `<CATEGORY>` is replaced per-scenario by the row's category column at
 # build time. We keep one copy of the FOOTER and inline the category so a
 # scenario rename only touches the row, not the boilerplate.
+#
+# Output schema note (v2 — split reproduction from remediation):
+#   - `reproduction` is the analyst-facing test plan: the exact curl
+#     probes, payloads, and PoC scaffolding that, when run, would
+#     PROVE the finding. Goes into the "To Reproduce" UI card.
+#   - `remediation` is the engineering fix guide: the smallest set of
+#     concrete config / code / library changes that close the issue
+#     WITHOUT breaking working functionality. Goes into the "Remediation"
+#     UI card. Must NOT repeat the test plan; if there is no
+#     defensible fix beyond "verify reachability first", return an
+#     empty string.
+# The legacy `recommendation` field is no longer emitted; old rows in
+# the DB retain it in their schema but new finds use the two-field
+# split for clearer UI separation.
 FOOTER_TEMPLATE = """\
 
 Respond with a JSON array of findings. Each element:
@@ -73,8 +87,9 @@ Respond with a JSON array of findings. Each element:
   "title": "one-line summary, <=120 chars",
   "evidence": "exact quote/URL/value from input that motivates this finding, <=500 chars",
   "location": "request|response|headers|body|url|cookie|workflow",
-  "description": "your analytical reasoning",
-  "recommendation": "concrete remediation, including any test payloads, curl scripts, or PoC scaffolding (use fenced code blocks)"
+  "description": "your analytical reasoning — what was detected and why it matters",
+  "reproduction": "step-by-step proof: curl probes, payloads, or PoC scaffolding that an analyst will run to confirm the finding (use fenced code blocks for every command). Tag any state-mutating step STAGING ONLY.",
+  "remediation": "concrete fix guidance an engineer can apply without breaking working functionality. Include the specific config flag / header value / library upgrade / code snippet (use fenced code blocks). DO NOT repeat the reproduction commands here. If no reliable fix is possible until the analyst confirms reachability, return an empty string."
 }}
 
 Limit to 10 findings. If nothing is exploitable, return []. Do not output anything outside the JSON array. Do not wrap in markdown fences.

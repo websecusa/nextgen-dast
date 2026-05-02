@@ -532,6 +532,30 @@ async def lifespan(app):
         if n_seeded:
             print(f"[startup] seeded {n_seeded} default Enhanced-AI prompt(s)",
                   flush=True)
+        # FOOTER schema bump (v2 split reproduction/remediation):
+        # auto-restore seeded weakness rows whose system_prompt still
+        # carries the old single-`recommendation` field. Operator-edited
+        # rows (is_seeded=0) are NOT touched — those are someone's
+        # custom work and should keep whatever schema they were
+        # written with. Idempotent on subsequent boots once the in-DB
+        # FOOTER includes the new "reproduction" string.
+        try:
+            stale = db.query_all(
+                "SELECT id FROM ai_prompts "
+                "WHERE slot=%s AND is_seeded=1 "
+                "  AND system_prompt NOT LIKE '%%\"reproduction\"%%'",
+                ("advanced_ai_testing.weakness_discovery",))
+            if stale:
+                result = _eap_mod.restore_defaults(
+                    db, only_slot="advanced_ai_testing.weakness_discovery")
+                print(f"[startup] FOOTER schema bumped — restored "
+                      f"{len(result.get('restored') or [])} seeded "
+                      f"weakness prompts to v2 (reproduction + remediation)",
+                      flush=True)
+        except Exception as e2:
+            print(f"[startup] FOOTER schema restore failed: {e2!r} — "
+                  f"existing prompts will keep emitting legacy schema",
+                  flush=True)
     except Exception as e:
         print(f"[startup] enhanced_ai_prompts seed failed: {e!r} — "
               f"defaults can be reseeded from /admin/ai-prompts",
@@ -6136,8 +6160,32 @@ def finding_challenge_inline(request: Request, fid: int):
     })
 
 
+@app.get("/finding/{fid}/challenge_llm/preview")
+def finding_challenge_llm_preview(request: Request, fid: int):
+    """Preview step of the Challenge-with-LLM flow. Returns the
+    resolved fidelity prompt (system + user) for the named finding,
+    without sending it to the model. The workspace modal renders the
+    user prompt in an editable textarea so the analyst can review (and
+    optionally tweak) the exact text the model will see before paying
+    for a real call. Admin-gated to mirror the POST handler."""
+    user = current_user(request) or {}
+    if user.get("role") not in ("admin", "superadmin"):
+        return JSONResponse(
+            {"ok": False, "error": "forbidden",
+             "message": "Challenge with LLM requires admin role."},
+            status_code=403)
+    f = db.query_one("SELECT id FROM findings WHERE id=%s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    import enhanced_ai as _eai
+    result = _eai.build_single_finding_fidelity_prompt(fid)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=409)
+    return JSONResponse(result)
+
+
 @app.post("/finding/{fid}/challenge_llm")
-def finding_challenge_llm(request: Request, fid: int):
+async def finding_challenge_llm(request: Request, fid: int):
     """LLM-driven re-grade of a single finding, used by the workspace
     'Challenge with LLM' button on enhanced_ai_testing rows (and any
     other source_tool the analyst wants the model to re-evaluate).
@@ -6149,7 +6197,12 @@ def finding_challenge_llm(request: Request, fid: int):
     button. Admin role required because each call spends LLM budget;
     the assessment's enhanced_ai_budget cap is NOT consulted here
     (single-finding cost is a few cents at most, and the analyst
-    explicitly initiated it)."""
+    explicitly initiated it).
+
+    Optional JSON body field `user_prompt` overrides the rendered user
+    prompt — the workspace modal sends back the (possibly edited) text
+    from the preview step. The system prompt is NOT overrideable
+    because changing it would break verdict-schema parsing."""
     user = current_user(request) or {}
     if user.get("role") not in ("admin", "superadmin"):
         return JSONResponse(
@@ -6184,11 +6237,218 @@ def finding_challenge_llm(request: Request, fid: int):
             {"ok": False, "error": "no_endpoint",
              "message": "No LLM endpoint configured."}, status_code=409)
 
+    # Optional user_prompt override carried in the JSON body. The
+    # modal preview step shows the analyst the rendered prompt and
+    # lets them edit before clicking Run; the edited text comes back
+    # here. application/x-www-form-urlencoded isn't supported because
+    # FastAPI's request.form() parses the whole body and we need to
+    # be tolerant of empty bodies (button click without preview).
+    user_prompt_override = None
+    try:
+        ctype = (request.headers.get("content-type") or "").lower()
+        if "application/json" in ctype:
+            payload = await request.json()
+            user_prompt_override = (payload or {}).get("user_prompt")
+    except Exception:
+        user_prompt_override = None
+
     import enhanced_ai as _eai
-    result = _eai.run_single_finding_fidelity(fid, ep)
+    result = _eai.run_single_finding_fidelity(
+        fid, ep, user_prompt_override=user_prompt_override)
     if not result.get("ok"):
         return JSONResponse(result, status_code=409)
     return JSONResponse(result)
+
+
+@app.post("/finding/{fid}/run_probe")
+async def finding_run_probe(request: Request, fid: int):
+    """Live HTTP probe used by the 'Test' buttons that the workspace
+    injects next to each curl command in an AI finding's "To Reproduce"
+    block. Sends ONE read-only request against ONE URL and returns the
+    response (status, headers, body excerpt) plus a host-echo comparison
+    badge so the analyst sees immediately whether the probe hit a real
+    endpoint or just the host's default error envelope.
+
+    Hard safety guards:
+      - admin role required
+      - method MUST be GET or HEAD; anything else is rejected
+      - URL host MUST match the assessment's fqdn (no scope creep)
+      - request runs with no cookies, no auth, no custom headers
+      - 10-second timeout
+      - 4 KB body excerpt cap
+
+    The echo comparison reuses spa_fallback.Fingerprinter against the
+    same host signature the orchestrator's enhanced_ai pass would have
+    populated — so a 502 + 11 755-byte body that matches the host's
+    cached echo is flagged as 'ECHO — likely FP' before the analyst
+    has to eyeball it."""
+    user = current_user(request) or {}
+    if user.get("role") not in ("admin", "superadmin"):
+        return JSONResponse(
+            {"ok": False, "error": "forbidden",
+             "message": "Live probe requires admin role."},
+            status_code=403)
+    f = db.query_one("SELECT id, assessment_id FROM findings WHERE id=%s",
+                       (fid,))
+    if not f:
+        raise HTTPException(404)
+    a = db.query_one("SELECT fqdn FROM assessments WHERE id=%s",
+                       (f["assessment_id"],))
+    if not a:
+        return JSONResponse(
+            {"ok": False, "error": "no_assessment"}, status_code=404)
+    fqdn = (a.get("fqdn") or "").strip().lower()
+
+    # Parse the JSON body. Reject anything malformed; the frontend
+    # always sends application/json with method + url keys.
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "bad_json"}, status_code=400)
+    method = (payload.get("method") or "GET").upper().strip()
+    url = (payload.get("url") or "").strip()
+
+    if method not in ("GET", "HEAD"):
+        return JSONResponse(
+            {"ok": False, "error": "method_not_allowed",
+             "message": f"Only GET and HEAD are allowed; got {method}."},
+            status_code=400)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return JSONResponse(
+            {"ok": False, "error": "bad_url",
+             "message": "URL must start with http:// or https://"},
+            status_code=400)
+
+    # Scope check. Strict equality against the assessment's fqdn (with
+    # an optional port stripped) — no subdomain wildcards, no bare-IP
+    # bypass. The fqdn column is the single source of truth for scope.
+    from urllib.parse import urlsplit
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if host != fqdn:
+        return JSONResponse(
+            {"ok": False, "error": "out_of_scope",
+             "message": f"URL host '{host}' is outside this assessment's "
+                         f"scope (fqdn='{fqdn}'). Only the captured FQDN "
+                         f"can be probed live."},
+            status_code=400)
+
+    # Run the probe. urllib.request, no redirects, self-signed certs
+    # tolerated, 10s ceiling. The probe sends NO cookies, NO auth, NO
+    # custom headers other than UA — anything else would be implicit
+    # state injection that an analyst hasn't asked for.
+    import time as _time
+    import ssl as _ssl
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+
+    class _NoRedirect(_urlreq.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    opener = _urlreq.build_opener(
+        _urlreq.HTTPSHandler(context=ctx),
+        _NoRedirect(),
+    )
+    req = _urlreq.Request(
+        url, method=method,
+        headers={"User-Agent": "nextgen-dast/probe (+https://hackrange.com)",
+                  "Accept": "*/*"})
+    t0 = _time.monotonic()
+    status = 0
+    body = b""
+    headers_out: dict[str, str] = {}
+    err_text = None
+    try:
+        with opener.open(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read(4096)
+            headers_out = {k: v for k, v in resp.headers.items()}
+    except _urlerr.HTTPError as he:
+        status = he.code
+        try:
+            body = he.read(4096) or b""
+        except Exception:
+            body = b""
+        try:
+            headers_out = {k: v for k, v in (he.headers or {}).items()}
+        except Exception:
+            headers_out = {}
+    except Exception as e:
+        err_text = f"{e!r}"
+    ms = round((_time.monotonic() - t0) * 1000)
+
+    if err_text:
+        return JSONResponse({
+            "ok": False, "error": "transport_failed",
+            "message": err_text, "ms": ms,
+        }, status_code=502)
+
+    # Decode body for the response. Don't crash on binary — escape and
+    # truncate. The first 4 KB is enough to spot the host echo or a
+    # real banner; anything larger goes to a "see full response" link
+    # the analyst can copy out of the curl invocation.
+    try:
+        body_text = body.decode("utf-8", errors="replace")
+    except Exception:
+        body_text = "<binary response, %d bytes>" % len(body)
+
+    # Echo comparison. Probe the host once (cached for the request
+    # process lifetime), look up the signature, compare status + body
+    # hash against the cached echo. Robust to a freshly-booted process
+    # that hasn't seen this host before.
+    import spa_fallback
+    import hashlib as _hash
+    fp = spa_fallback.Fingerprinter()
+    fp.probe_host(f"{parsed.scheme}://{host}")
+    sig = fp.host_signature(host) or fp.host_signature(
+        f"{parsed.scheme}://{host}")
+    echo_match = False
+    if sig:
+        body_hash = _hash.sha256(body).hexdigest()
+        echo_match = (status == sig.get("status")
+                      and body_hash in set(sig.get("signatures") or []))
+
+    # Best-effort highlight: if the finding's llm_evidence looks like a
+    # quoted body string (long, contains characters typical of HTML /
+    # JSON / banners), grep for it in the body. The frontend wraps any
+    # match with a <mark> tag. URL-only evidence (just a path) gets
+    # skipped to avoid a tautological match.
+    raw = {}
+    f_full = db.query_one(
+        "SELECT raw_data, evidence_url FROM findings WHERE id=%s", (fid,))
+    if f_full and f_full.get("raw_data"):
+        try:
+            raw = json.loads(f_full["raw_data"])
+        except Exception:
+            raw = {}
+    evidence_str = (raw.get("llm_evidence") or "").strip()
+    highlight = None
+    if (evidence_str and len(evidence_str) >= 30
+            and not evidence_str.startswith(("GET ", "HEAD ", "POST "))
+            and "://" not in evidence_str):
+        # Looks like a body / banner / envelope quote, not a URL line.
+        highlight = evidence_str[:200]
+
+    return JSONResponse({
+        "ok": True,
+        "status": status,
+        "content_length": int(headers_out.get("Content-Length") or len(body)),
+        "ms": ms,
+        "headers": headers_out,
+        "body_excerpt": body_text,
+        "body_truncated": len(body) >= 4096,
+        "echo_match": echo_match,
+        "echo_signature": (
+            {"status": sig.get("status"), "size": sig.get("size")}
+            if sig else None),
+        "highlight": highlight,
+        "scope": {"fqdn": fqdn, "method": method, "url": url},
+    })
 
 
 @app.post("/finding/{fid}/false_positive")

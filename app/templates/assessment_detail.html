@@ -432,55 +432,147 @@
     return false;
   }
 
-  // Sibling of runChallengeAside for enhanced_ai_testing rows. Hits
-  // /challenge_llm instead of /challenge_inline; same UX (transient
-  // Running… badge → re-fetch aside on success → inline error
-  // message on failure). The endpoint is admin-gated server-side; the
-  // template disables the button for read-only accounts.
-  async function runChallengeAsideLLM(event, fid) {
-    event.preventDefault();
-    const form = event.target.closest("form");
-    if (!form) return false;
-    const btn = form.querySelector("button[type=submit]");
-    const originalHTML = btn ? btn.innerHTML : "";
-    if (btn) {
-      btn.disabled = true;
-      const existingBadge = btn.querySelector(".badge");
-      if (existingBadge) existingBadge.remove();
-      const running = document.createElement("span");
-      running.className = "badge running";
-      running.style.marginLeft = "auto";
-      running.textContent = "LLM grading…";
-      btn.appendChild(running);
-    }
+  // Two-step Challenge-with-LLM flow:
+  //   1. GET /challenge_llm/preview — pull the rendered system + user
+  //      prompts. The system prompt renders in a collapsible details
+  //      block (read-only, editing it would break verdict-schema
+  //      parsing). The user prompt renders in an editable textarea so
+  //      the analyst can tweak before paying for the call.
+  //   2. On Run, POST /challenge_llm with the (possibly edited)
+  //      user prompt. The modal switches to the verdict view.
+  // Shared between the workspace right-rail "Challenge with LLM"
+  // button and the standalone /finding/<id> page (same function name
+  // there too — duplicated copy on each page since fragment-swapped
+  // <script> blocks don't execute).
+  async function runChallengeLLM(fid) {
+    const modal = document.getElementById('io-modal');
+    const titleEl = document.getElementById('io-modal-title');
+    const validateEl = document.getElementById('io-validate-body');
+    const ioBody = document.getElementById('io-modal-body');
+    if (!modal || !validateEl) return;
+    titleEl.textContent = "Challenge with LLM · finding #" + fid;
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    const copyBtn = document.getElementById('io-copy-btn');
+    if (copyBtn) copyBtn.hidden = true;
+    validateEl.innerHTML = '<p class="muted">Loading prompt…</p>';
+    if (typeof modal.showModal === 'function') modal.showModal();
+
+    let preview;
     try {
-      const r = await fetch(BASE + "/finding/" + fid + "/challenge_llm", {
-        method: "POST", credentials: "same-origin",
-      });
-      let data = {};
-      try { data = await r.json(); } catch (_) {}
-      if (!r.ok) {
-        if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
-        let errSpan = form.querySelector(".challenge-inline-msg");
-        if (!errSpan) {
-          errSpan = document.createElement("div");
-          errSpan.className = "challenge-inline-msg warn";
-          errSpan.style.cssText =
-            "font-size:.85em; margin-top:.3em; color:var(--yellow, #e0a000)";
-          form.appendChild(errSpan);
-        }
-        errSpan.textContent = data.message || data.error || "Challenge with LLM failed.";
-        return false;
+      const r = await fetch(BASE + '/finding/' + fid + '/challenge_llm/preview',
+                            { credentials: 'same-origin' });
+      preview = await r.json();
+      if (!r.ok || !preview.ok) {
+        validateEl.innerHTML =
+          '<p class="warn">' +
+          (preview.message || preview.error || "Could not load the prompt.") +
+          '</p>';
+        return;
       }
-      const aside = await fetch(BASE + "/finding/" + fid + "/aside",
-                                { credentials: "same-origin" })
-                          .then(r => r.text());
-      document.getElementById("fw-aside").innerHTML = aside;
     } catch (err) {
-      console.error("runChallengeAsideLLM failed", err);
-      if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+      validateEl.innerHTML =
+        '<p class="warn">Prompt preview failed: ' +
+        String(err) + '</p>';
+      return;
     }
-    return false;
+
+    validateEl.innerHTML =
+      '<p class="muted small" style="margin-top:0">' +
+      'Review the prompt below. The <strong>user prompt</strong> is ' +
+      'editable — add context, narrow the question, paste a specific ' +
+      'response excerpt — then click <strong>Run LLM</strong> to grade. ' +
+      'Cost is typically a few cents.' +
+      '</p>' +
+      '<details style="margin:.6em 0">' +
+      '  <summary class="muted" style="cursor:pointer">' +
+      '    System prompt (read-only, ' + (preview.system_prompt || '').length + ' chars)' +
+      '  </summary>' +
+      '  <pre id="cllm-sys" style="white-space:pre-wrap; background:var(--panel-2,#0f1419); ' +
+      '       padding:.8em; border-radius:6px; max-height:30vh; overflow:auto; font-size:.88em"></pre>' +
+      '</details>' +
+      '<label class="muted small" for="cllm-user">User prompt (editable)</label>' +
+      '<textarea id="cllm-user" rows="14" ' +
+      '          style="width:100%; font-family:ui-monospace,Menlo,monospace; ' +
+      '                 font-size:.88em; padding:.6em; ' +
+      '                 background:var(--panel-2,#0f1419); color:var(--text); ' +
+      '                 border:1px solid var(--border,#444); border-radius:6px; ' +
+      '                 white-space:pre"></textarea>' +
+      '<div style="display:flex; gap:.5em; margin-top:.6em; align-items:center">' +
+      '  <button type="button" id="cllm-run" class="primary">Run LLM</button>' +
+      '  <button type="button" class="ghost" ' +
+      '          onclick="document.getElementById(\'io-modal\').close()">Cancel</button>' +
+      '  <span id="cllm-status" class="muted small" style="margin-left:auto"></span>' +
+      '</div>' +
+      '<div id="cllm-result" style="margin-top:1em"></div>';
+    // Inject text via .textContent / .value to avoid HTML-entity
+    // round-trips that would corrupt the prompt's verbatim formatting.
+    document.getElementById('cllm-sys').textContent = preview.system_prompt || '';
+    document.getElementById('cllm-user').value = preview.user_prompt || '';
+
+    document.getElementById('cllm-run').addEventListener('click', async function() {
+      const userPrompt = document.getElementById('cllm-user').value;
+      const runBtn = document.getElementById('cllm-run');
+      const statusEl = document.getElementById('cllm-status');
+      const resultEl = document.getElementById('cllm-result');
+      runBtn.disabled = true;
+      statusEl.textContent = 'LLM grading…';
+      resultEl.innerHTML = '';
+      try {
+        const r = await fetch(BASE + '/finding/' + fid + '/challenge_llm', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_prompt: userPrompt }),
+        });
+        const data = await r.json();
+        runBtn.disabled = false;
+        statusEl.textContent = '';
+        if (!r.ok || !data.ok) {
+          resultEl.innerHTML =
+            '<p class="warn">' +
+            (data.message || data.error || "LLM grading failed.") +
+            '</p>';
+          return;
+        }
+        const verdict = data.verdict || 'inconclusive';
+        const conf = (data.confidence != null) ? data.confidence : '—';
+        const sev = data.suggested_severity || '—';
+        let badgeClass = 'badge';
+        if (verdict === 'validated') badgeClass = 'badge done';
+        if (verdict === 'false_positive') badgeClass = 'badge warn';
+        const badge = '<span class="' + badgeClass + '">' + verdict + '</span>';
+        resultEl.innerHTML =
+          '<h3 style="margin-top:0">Verdict</h3>' +
+          '<p><strong>Result:</strong> ' + badge +
+          '   <strong>Confidence:</strong> ' + String(conf) +
+          '   <strong>Suggested severity:</strong> ' + String(sev) +
+          (data.auto_flipped ? '   <span class="badge done">auto-applied to finding</span>' : '') +
+          '</p>' +
+          '<p style="white-space:pre-wrap"><strong>Reasoning:</strong> ' +
+          (data.reasoning || '') + '</p>' +
+          '<p class="muted small">Tokens: in=' + String(data.in_tokens || 0) +
+          ', out=' + String(data.out_tokens || 0) +
+          (data.auto_flipped ? ' · the aside will refresh on close' : '') +
+          '</p>';
+        // If we auto-applied a verdict, refresh the aside so the
+        // status/validation badges update without a full page reload.
+        if (data.auto_flipped) {
+          try {
+            const aside = await fetch(BASE + "/finding/" + fid + "/aside",
+                                      { credentials: "same-origin" })
+                                .then(r => r.text());
+            const slot = document.getElementById("fw-aside");
+            if (slot) slot.innerHTML = aside;
+          } catch (e) { /* non-fatal — page reload still works */ }
+        }
+      } catch (err) {
+        runBtn.disabled = false;
+        statusEl.textContent = '';
+        resultEl.innerHTML =
+          '<p class="warn">Challenge with LLM failed: ' +
+          String(err) + '</p>';
+      }
+    });
   }
 
   function loadFinding(id, item, ev) {
@@ -504,6 +596,14 @@
     ]).then(([detail, aside]) => {
       document.getElementById("fw-detail").innerHTML = detail;
       document.getElementById("fw-aside").innerHTML = aside;
+      // Re-wire the live "Test [METHOD] /path" buttons after the new
+      // panel HTML has landed. The function lives in this same page;
+      // it walks .markdown-body pre code blocks, finds curl URLs, and
+      // injects a button row after each block. No-op when there are
+      // no AI findings or no curl commands.
+      if (typeof wireProbeButtons === 'function') {
+        wireProbeButtons(id);
+      }
     }).catch(err => console.error("loadFinding failed", err));
   }
 
@@ -761,6 +861,166 @@
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  // ---------------------------------------------------------------------
+  // Live probe runner. Mirror of the function in finding_detail.html —
+  // duplicated because <script> tags inside a fragment swapped via
+  // innerHTML do not execute, so loadFinding() can't pull this in from
+  // the panel partial. Called by loadFinding after the new finding HTML
+  // is in place; scans .markdown-body pre code blocks for curl URLs and
+  // injects a "▶ Test METHOD /path" button row after each block.
+  // ---------------------------------------------------------------------
+  function wireProbeButtons(fid) {
+    document.querySelectorAll('.markdown-body pre code').forEach(function(block) {
+      // Skip blocks we already wired (loadFinding can re-run, and
+      // re-injecting the button row would double up).
+      if (block.dataset.probeWired === '1') return;
+      const text = block.textContent || '';
+      const urls = new Map();
+      const lineRe = /^[^\n]*\bcurl\b[^\n]*$/gm;
+      let lm;
+      while ((lm = lineRe.exec(text)) !== null) {
+        const line = lm[0];
+        const urlM = line.match(/https?:\/\/[^\s'"`)<>|]+/);
+        if (!urlM) continue;
+        let url = urlM[0].replace(/[)\]>,;'"`]+$/, '');
+        const xM = line.match(/-X\s+(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)/i);
+        let method = (xM ? xM[1] : 'GET').toUpperCase();
+        const safe = (method === 'GET' || method === 'HEAD');
+        const key = method + ' ' + url;
+        if (!urls.has(key)) urls.set(key, { method, url, safe });
+      }
+      if (urls.size === 0) return;
+      block.dataset.probeWired = '1';
+      const wrap = document.createElement('div');
+      wrap.className = 'probe-btn-row';
+      const lbl = document.createElement('span');
+      lbl.className = 'probe-label';
+      lbl.textContent = '▶ Live test:';
+      wrap.appendChild(lbl);
+      urls.forEach(function(entry) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'probe-btn';
+        let pathPart = entry.url;
+        try { pathPart = (new URL(entry.url)).pathname || '/'; } catch (_) {}
+        btn.textContent = entry.method + ' ' + pathPart;
+        btn.title = (entry.safe
+          ? ('Run ' + entry.method + ' against ' + entry.url +
+             '. Read-only, no cookies, FQDN-scoped, 10s timeout.')
+          : (entry.method + ' is not allowed by the live-probe endpoint. '
+             + 'Run this command yourself if needed.'));
+        btn.disabled = !entry.safe;
+        btn.addEventListener('click', function() {
+          runProbe(fid, entry.method, entry.url);
+        });
+        wrap.appendChild(btn);
+      });
+      block.parentElement.insertAdjacentElement('afterend', wrap);
+    });
+  }
+
+  function ensureProbeModal() {
+    let modal = document.getElementById('probe-modal');
+    if (modal) return modal;
+    modal = document.createElement('dialog');
+    modal.id = 'probe-modal';
+    modal.style.cssText =
+      'max-width:min(90vw,900px); width:80vw; padding:0; ' +
+      'background:var(--panel); color:var(--text); ' +
+      'border:2px solid var(--accent, #5d8aa8); border-radius:10px; ' +
+      'box-shadow:0 0 0 1px rgba(0,0,0,0.55), 0 18px 48px rgba(0,0,0,0.55)';
+    modal.innerHTML =
+      '<div style="display:flex; align-items:center; justify-content:space-between;' +
+      '            padding:.7em 1em; border-bottom:2px solid var(--accent, #5d8aa8);' +
+      '            background:rgba(255,255,255,0.02)">' +
+      '  <strong id="probe-modal-title">Live probe</strong>' +
+      '  <button type="button" class="ghost small" ' +
+      '          onclick="document.getElementById(\'probe-modal\').close()">Close</button>' +
+      '</div>' +
+      '<div id="probe-modal-body" style="padding:1em; max-height:75vh; overflow:auto"></div>';
+    document.body.appendChild(modal);
+    return modal;
+  }
+
+  async function runProbe(fid, method, url) {
+    const modal = ensureProbeModal();
+    const titleEl = modal.querySelector('#probe-modal-title');
+    const bodyEl = modal.querySelector('#probe-modal-body');
+    titleEl.textContent = 'Probe ' + method + ' ' + url;
+    bodyEl.innerHTML = '<p class="muted">Running…</p>';
+    if (typeof modal.showModal === 'function') modal.showModal();
+    try {
+      const r = await fetch(BASE + '/finding/' + fid + '/run_probe', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: method, url: url }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        bodyEl.innerHTML = '<p class="warn">' +
+          escapeHTML(d.message || d.error || 'Probe failed.') + '</p>';
+        return;
+      }
+      let pillBg = '#5d8aa8';
+      if (d.status >= 500) pillBg = '#c44';
+      else if (d.status >= 400) pillBg = '#e0a000';
+      else if (d.status >= 300) pillBg = '#5d8aa8';
+      else if (d.status >= 200) pillBg = '#2a8a3a';
+      const statusPill = '<span style="display:inline-block; padding:.15em .55em; ' +
+        'border-radius:4px; background:' + pillBg + '; color:#fff; ' +
+        'font-weight:600">HTTP ' + d.status + '</span>';
+
+      let echoBadge = '';
+      if (d.echo_match) {
+        echoBadge = '<span class="badge warn" ' +
+          'title="Response is byte-identical to the host\'s default echo for unmatched paths — likely false positive">' +
+          '⚠ ECHO — likely FP</span>';
+      } else if (d.echo_signature) {
+        echoBadge = '<span class="badge done" ' +
+          'title="Response differs from the host echo signature — possible real signal">' +
+          '✓ DIFFERENT — review</span>';
+      }
+
+      let bodyDisplay = escapeHTML(d.body_excerpt || '');
+      if (d.highlight) {
+        const pat = d.highlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        try {
+          const re = new RegExp(pat, 'gi');
+          bodyDisplay = bodyDisplay.replace(re, function(m) {
+            return '<mark>' + m + '</mark>';
+          });
+        } catch (_) {}
+      }
+
+      bodyEl.innerHTML =
+        '<p>' + statusPill +
+        '   <strong>Size:</strong> ' + (d.content_length || 0) + 'b' +
+        '   <strong>Latency:</strong> ' + d.ms + 'ms' +
+        '   ' + echoBadge + '</p>' +
+        (d.echo_signature
+          ? '<p class="muted small" style="margin-top:-.5em">Host echo signature: ' +
+            'status=' + d.echo_signature.status + ', size=' + d.echo_signature.size + 'b. ' +
+            'Probes that match this signature are returning the host\'s default ' +
+            'error/SPA envelope, not real endpoint content.</p>'
+          : '<p class="muted small" style="margin-top:-.5em">No host-echo signature ' +
+            'cached for this run — analyst must judge the response on its own.</p>') +
+        '<details open><summary class="muted" style="cursor:pointer">Body excerpt' +
+        (d.body_truncated ? ' (truncated to first 4 KB)' : '') + '</summary>' +
+        '<pre style="white-space:pre-wrap; word-break:break-word; ' +
+        'background:var(--panel-2,#0f1419); padding:.8em; border-radius:6px; ' +
+        'margin:.5em 0; max-height:40vh; overflow:auto; font-size:.88em">' +
+        bodyDisplay + '</pre></details>' +
+        '<details><summary class="muted" style="cursor:pointer">Response headers (' +
+        Object.keys(d.headers || {}).length + ')</summary>' +
+        '<pre style="background:var(--panel-2,#0f1419); padding:.8em; border-radius:6px; ' +
+        'margin:.5em 0; font-size:.85em">' +
+        escapeHTML(JSON.stringify(d.headers, null, 2)) + '</pre></details>';
+    } catch (err) {
+      bodyEl.innerHTML = '<p class="warn">Probe request failed: ' +
+        escapeHTML(String(err)) + '</p>';
+    }
   }
 
   // Inline "Test" — sends the finding's reproduction request once,
