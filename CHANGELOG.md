@@ -248,6 +248,36 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Enhanced-AI weakness-discovery: 10 additional
+  scenarios.** Doubled the seeded weakness-discovery roster from 10
+  to 20 to cover attack classes off-the-shelf DAST engines either
+  skip outright or score one finding at a time. New scenarios:
+  Sensitive File and Backup Artifact Exposure (stack-aware: AEM
+  `?.json`, `wp-config.php.bak`, `.git/`, `dump.sql`, etc.); Exposed
+  Admin Panels and Management Consoles (cPanel, WHM, Plesk, Webmin,
+  Tomcat Manager, JBoss, phpMyAdmin, Adminer, Spring Actuator,
+  Jenkins, Solr, Kibana, PgAdmin, RabbitMQ, Consul, k8s Dashboard,
+  with default-credential analysis); Hardcoded Secrets and Tokens in
+  Captured Responses (greps Wapiti / Nikto / Nuclei response bodies
+  for AWS/GCP/Azure keys, SaaS tokens, JWTs with alg/iss decode,
+  DSNs, private keys, PII — redacts the secret in the stored finding
+  so we don't leak it twice); Verbose Error and Debug-Mode Disclosure
+  (Werkzeug, Symfony profiler, Rails, Django, ASP.NET YSOD, Spring
+  whitelabel, AEM Sling, GraphQL stack traces); HTTP Cache Poisoning
+  and Web Cache Deception; Holistic Cookie / CORS / CSP Architecture
+  (scores headers as a system, escalates when combinations enable
+  chains); Subdomain Takeover and Dangling DNS Resources; HTTP
+  Request Smuggling, Desync, and Header Trust Boundary; Insecure
+  Deserialization Surface Detection (Java rO0AB, .NET ViewState,
+  PHP `O:`, Python pickle, Ruby Marshal, Node node-serialize, YAML);
+  CMS and Off-the-Shelf Stack Anti-Patterns with explicit AEM
+  coverage. All 10 fire unconditionally on every scan; operators can
+  disable individual rows in /admin/ai-prompts when token cost
+  matters. No schema change — existing 2.1.1 databases pick up the
+  new rows automatically via `seed_defaults_if_empty` on next boot
+  (matched by slot+name, missing rows inserted, existing untouched).
+  Doc comment in `db/schema.sql` updated from "11 default rows" to
+  "21 default rows" (20 weakness + 1 fidelity).
 - **2026-05-02** — **Enhanced-AI anti-hallucination guard +
   SPA-fallback fingerprinter.** Two paired guards on the
   `enhanced_ai_testing` weakness-discovery pass to suppress the

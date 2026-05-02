@@ -496,7 +496,8 @@ CREATE TABLE IF NOT EXISTS llm_analyses (
 --   advanced_ai_testing.fidelity — per-finding fidelity evaluator; one row
 --       expected (the default), but multiple are supported for A/B work.
 --
--- The 11 default rows ship pre-seeded by app/enhanced_ai_prompts.py. is_seeded
+-- The 21 default rows ship pre-seeded by app/enhanced_ai_prompts.py (20
+-- weakness-discovery scenarios + 1 fidelity evaluator). is_seeded
 -- marks "shipped with the product" so the AI-Prompts admin page can render a
 -- "Restore to default" button for those slots — restore reads the in-code
 -- defaults, not a DB row, so a deleted seeded prompt can always be brought
