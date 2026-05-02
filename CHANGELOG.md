@@ -248,6 +248,32 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Header-presence fast path + bumped testssl
+  timeout.** HSTS / CSP / X-Frame-Options / banner_server and similar
+  header-presence findings no longer route through testssl.sh's slow
+  `-h` flag (30-60 seconds per check). Both the server-side
+  `_finding_test_tls()` fast-path table and the `testssl_recheck`
+  toolkit probe now detect header-class IDs and answer them with a
+  single in-process HTTPS GET. Sub-second instead of 30-60 seconds —
+  smoke-tested at **305 ms** for `config_hsts_missing` on a live
+  target where the testssl.sh path was hitting the 90-second
+  timeout. The mapping (`_HEADER_FAST_ID_TO_HEADER`) covers the
+  testssl native IDs (HSTS, HSTS_subdomains, HSTS_preload, HSTS_time,
+  HPKP, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection,
+  Content-Security-Policy, Referrer-Policy, Permissions-Policy,
+  Feature-Policy, banner_server, banner_application) AND the
+  `enhanced_testing` `config_*_missing` aliases (config_hsts_missing,
+  config_csp_missing, config_xfo_missing, config_xcto_missing,
+  config_referrer_policy_missing, config_permissions_policy_missing,
+  config_xss_protection_missing). HSTS gets a richer verdict path:
+  presence is necessary but max-age must be ≥ 180 days
+  (`_HSTS_MIN_MAX_AGE = 15552000`) to flip the finding to
+  `not_reproduced`; below that, the header is present but vulnerable
+  to first-visit downgrade and the finding stays reproduced at LOW.
+  Companion change: testssl.sh subprocess timeout bumped from 90s to
+  180s for the cases that genuinely need a deep run (vulnerability
+  suite -U on slow targets), and the kind-aware UI hint updated to
+  reflect the realistic 60–180 second range.
 - **2026-05-02** — **Test button: progress feedback + Quick HTTP
   probe.** The existing `Test` button on testssl/nuclei findings was
   unusable in practice — it called a slow toolkit subprocess

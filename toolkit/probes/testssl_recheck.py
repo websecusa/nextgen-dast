@@ -74,6 +74,171 @@ _DISPATCH: list[tuple[object, str, str]] = [
     ({"overall_grade"},                 "-g",  "grading"),
 ]
 
+
+# Header-presence testssl IDs (and enhanced_testing aliases) that can
+# be answered from a single HTTPS GET. Routing through testssl.sh -h
+# costs 30-60s for what `curl -I` answers in <200 ms. The fast path
+# in _header_fast_recheck() returns the same Verdict shape as the
+# subprocess path, so the orchestrator's UI can't tell which branch
+# ran. Keys are lowercased for case-insensitive matching.
+_HEADER_FAST_ID_TO_HEADER: dict[str, str] = {
+    # testssl native IDs
+    "hsts":                    "strict-transport-security",
+    "hsts_subdomains":         "strict-transport-security",
+    "hsts_preload":            "strict-transport-security",
+    "hsts_time":               "strict-transport-security",
+    "hpkp":                    "public-key-pins",
+    "x-frame-options":         "x-frame-options",
+    "xfo":                     "x-frame-options",
+    "x-content-type-options":  "x-content-type-options",
+    "xcto":                    "x-content-type-options",
+    "x-xss-protection":        "x-xss-protection",
+    "content-security-policy": "content-security-policy",
+    "csp":                     "content-security-policy",
+    "referrer-policy":         "referrer-policy",
+    "permissions-policy":      "permissions-policy",
+    "feature-policy":          "feature-policy",
+    "banner_server":           "server",
+    "banner_application":      "x-powered-by",
+    # enhanced_testing aliases (Challenge button matches title which
+    # is the probe name like config_hsts_missing).
+    "config_hsts_missing":            "strict-transport-security",
+    "config_csp_missing":             "content-security-policy",
+    "config_xfo_missing":             "x-frame-options",
+    "config_xcto_missing":            "x-content-type-options",
+    "config_referrer_policy_missing": "referrer-policy",
+    "config_permissions_policy_missing": "permissions-policy",
+    "config_xss_protection_missing":  "x-xss-protection",
+}
+_HSTS_MIN_MAX_AGE = 15552000   # 180 days, conventional remediation threshold
+
+
+def _header_fast_recheck(host: str, port: int, testssl_id: str,
+                          target_header: str) -> Verdict:
+    """Single HTTPS GET to verify a header-presence finding. Returns a
+    Verdict with the same shape the testssl-subprocess path produces:
+      validated=True  → header still missing / policy still weak
+      validated=False → header present and policy reasonable
+      validated=None  → request failed (network / TLS), treat as
+                        inconclusive so the analyst re-runs from the
+                        full Challenge form if they need a deeper look.
+    """
+    import ssl as _ssl
+    import time as _time
+    import urllib.error as _urlerr
+    import urllib.request as _urlreq
+
+    url = f"https://{host}:{port}/"
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+
+    class _NoRedirect(_urlreq.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    opener = _urlreq.build_opener(
+        _urlreq.HTTPSHandler(context=ctx),
+        _NoRedirect(),
+    )
+    req = _urlreq.Request(url, method="GET", headers={
+        "User-Agent": "nextgen-dast/2.1.1 (testssl_recheck header fast path)",
+        "Accept": "*/*",
+    })
+    t0 = _time.monotonic()
+    headers_lower: dict[str, str] = {}
+    status = 0
+    err_text = None
+    try:
+        with opener.open(req, timeout=10) as resp:
+            status = resp.status
+            for k, v in resp.headers.items():
+                headers_lower[k.lower()] = v
+    except _urlerr.HTTPError as he:
+        status = he.code
+        try:
+            for k, v in (he.headers or {}).items():
+                headers_lower[k.lower()] = v
+        except Exception:
+            pass
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    cmd_label = (f"GET {url} (header-presence fast path: "
+                 f"{testssl_id} → {target_header})")
+
+    if err_text:
+        return Verdict(
+            ok=False, validated=None,
+            summary=(f"HTTPS request failed: {err_text}. "
+                     f"Run the full testssl.sh Challenge for a "
+                     f"deeper check."),
+            error="header-fast-failed",
+            evidence={
+                "command": cmd_label, "elapsed_ms": elapsed_ms,
+                "status": status,
+            })
+
+    header_value = headers_lower.get(target_header)
+    if header_value is None:
+        # The *_missing finding still applies.
+        return Verdict(
+            ok=True, validated=True, confidence=0.95,
+            summary=(f"Confirmed: GET {url} returned HTTP {status} "
+                     f"with NO {target_header!r} header. The "
+                     f"missing-header finding is still reproduced."),
+            evidence={
+                "command": cmd_label, "elapsed_ms": elapsed_ms,
+                "status": status, "header": target_header,
+                "header_value": None,
+                "all_headers": dict(headers_lower),
+            })
+
+    if target_header == "strict-transport-security":
+        # Parse max-age=N; below the recommended threshold = still
+        # vulnerable to first-visit downgrade attacks.
+        m = re.search(r"max-age\s*=\s*(\d+)", header_value, re.I)
+        max_age = int(m.group(1)) if m else 0
+        if max_age >= _HSTS_MIN_MAX_AGE:
+            return Verdict(
+                ok=True, validated=False, confidence=0.95,
+                summary=(f"HSTS header present and policy is "
+                         f"reasonable: {header_value!r} "
+                         f"(max-age={max_age} ≥ recommended "
+                         f"{_HSTS_MIN_MAX_AGE}). The "
+                         f"missing-HSTS finding looks remediated."),
+                evidence={
+                    "command": cmd_label, "elapsed_ms": elapsed_ms,
+                    "status": status, "header": target_header,
+                    "header_value": header_value,
+                    "max_age": max_age,
+                })
+        return Verdict(
+            ok=True, validated=True, confidence=0.85,
+            summary=(f"HSTS header present but max-age={max_age} "
+                     f"is below the recommended {_HSTS_MIN_MAX_AGE} "
+                     f"(180 days). Browsers may still be vulnerable "
+                     f"to first-visit downgrade attacks. Header value: "
+                     f"{header_value!r}"),
+            evidence={
+                "command": cmd_label, "elapsed_ms": elapsed_ms,
+                "status": status, "header": target_header,
+                "header_value": header_value, "max_age": max_age,
+            })
+
+    # Generic header — presence flips verdict to not-reproduced.
+    return Verdict(
+        ok=True, validated=False, confidence=0.95,
+        summary=(f"Header {target_header!r} is now present: "
+                 f"{header_value!r}. The original missing-header "
+                 f"finding is no longer reproduced."),
+        evidence={
+            "command": cmd_label, "elapsed_ms": elapsed_ms,
+            "status": status, "header": target_header,
+            "header_value": header_value,
+        })
+
 # testssl severities that count as "still vulnerable". OK / INFO / WARN
 # rows are not enough on their own — many testssl WARN rows are
 # "INFO-ish" hints rather than confirmations, so we want HIGH/CRITICAL/
@@ -161,6 +326,17 @@ class TestsslRecheckProbe(Probe):
                 testssl_id = (raw.get("id") or "").strip()
         if not testssl_id:
             testssl_id = (extra.get("title") or "").strip()
+
+        # Header-presence fast path. Header-class IDs (HSTS, CSP,
+        # X-Frame-Options, security headers, server banners, plus
+        # enhanced_testing's config_*_missing aliases) get answered
+        # by a single HTTPS GET instead of a 30-60s testssl.sh -h
+        # subprocess. Same Verdict shape on the way out, so the
+        # orchestrator UI is identical.
+        target_header = _HEADER_FAST_ID_TO_HEADER.get(testssl_id.lower())
+        if target_header:
+            return _header_fast_recheck(host, port, testssl_id,
+                                          target_header)
 
         flag, flag_label = _pick_flag(testssl_id)
         target = f"{host}:{port}"

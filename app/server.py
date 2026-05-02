@@ -3695,6 +3695,180 @@ def _pick_testssl_flag(testssl_id: str) -> tuple[str, str]:
     return ("-s", "standard cipher categories")
 
 
+def _finding_test_header_fast(host: str, port: int,
+                                testssl_id: str,
+                                finding: dict) -> JSONResponse:
+    """Fast verification for header-presence findings (HSTS, CSP,
+    X-Frame-Options, security headers, server/X-Powered-By banners).
+    One HTTPS GET, parse headers, decide. Sub-second instead of the
+    30-60 seconds testssl.sh -h would take to ask the same question.
+
+    Returns the same JSON envelope as _finding_test_tls so the modal
+    renders identically. The `command` field documents that this run
+    used a single HTTP request instead of testssl.sh, and
+    `matched_rows` is synthesized from the parsed headers so the
+    existing table renderer keeps working.
+
+    Verdicts:
+      reproduced     — finding's `_missing` claim still holds (header
+                       absent or, for HSTS time, max-age below threshold)
+      not_reproduced — header is now present (and policy is reasonable
+                       for HSTS — max-age >= 6 months)
+      inconclusive   — request failed (DNS / TLS / network)
+    """
+    import time as _time
+    import ssl as _ssl
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+
+    target_header = _HEADER_FAST_ID_TO_HEADER.get(testssl_id.lower())
+    if not target_header:
+        # Defensive — caller should have gated on _HEADER_FAST_TESTSSL_IDS.
+        return JSONResponse({
+            "ok": False, "error": "no_header_for_id",
+            "message": f"testssl id {testssl_id!r} is not in the "
+                        "header-fast map.",
+        }, status_code=500)
+
+    url = f"https://{host}:{port}/"
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+
+    class _NoRedirect(_urlreq.HTTPRedirectHandler):
+        def redirect_request(self, *_a, **_kw):
+            return None
+
+    opener = _urlreq.build_opener(
+        _urlreq.HTTPSHandler(context=ctx),
+        _NoRedirect(),
+    )
+    req = _urlreq.Request(url, method="GET", headers={
+        "User-Agent": "nextgen-dast/2.1.1 (header recheck)",
+        "Accept": "*/*",
+    })
+
+    t_start = _time.monotonic()
+    status = 0
+    headers_lower: dict[str, str] = {}
+    err_text: str | None = None
+    try:
+        with opener.open(req, timeout=10) as resp:
+            status = resp.status
+            for k, v in resp.headers.items():
+                # Lowercase keys for match; keep ORIGINAL value so an
+                # analyst sees casing artifacts (e.g. "max-age=15552000;
+                # includeSubDomains") in the rendered row.
+                headers_lower[k.lower()] = v
+    except _urlerr.HTTPError as he:
+        status = he.code
+        try:
+            for k, v in (he.headers or {}).items():
+                headers_lower[k.lower()] = v
+        except Exception:
+            pass
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((_time.monotonic() - t_start) * 1000)
+
+    cmd_label = (f"single HTTPS GET to {url} "
+                 f"(header-presence fast path: {testssl_id} → {target_header})")
+
+    if err_text:
+        return JSONResponse({
+            "ok": True, "kind": "tls",
+            "host": host, "port": port,
+            "command": cmd_label,
+            "elapsed_ms": elapsed_ms, "exit_code": -1,
+            "flag": "fast-path",
+            "flag_label": cmd_label,
+            "testssl_id": testssl_id,
+            "verdict": "inconclusive",
+            "matched_rows": [{
+                "id": testssl_id,
+                "severity": "INFO",
+                "finding": (f"HTTPS request failed: {err_text}. Run "
+                            "the full testssl.sh suite from the "
+                            "Challenge form for a deeper check."),
+            }],
+            "stdout_excerpt": "", "stderr_excerpt": err_text,
+        })
+
+    header_value = headers_lower.get(target_header)
+    verdict = "inconclusive"
+    severity_out = "INFO"
+    finding_text = ""
+
+    # HSTS-specific policy assessment: presence alone isn't enough —
+    # the spec requires max-age >= 6 months for "preload" eligibility,
+    # and most browsers ignore HSTS with max-age < 1 minute. We treat
+    # max-age < 15552000 (180 days) as "still problematic, finding
+    # still reproduced" because that's the conventional remediation
+    # threshold the original finding would have wanted.
+    is_hsts = (target_header == "strict-transport-security")
+    HSTS_MIN_MAX_AGE = 15552000   # 180 days
+
+    if header_value is None:
+        # Header is absent — the *_missing finding is reproduced.
+        verdict = "reproduced"
+        severity_out = "MEDIUM"
+        finding_text = (f"Response header {target_header!r} is absent "
+                        f"from GET {url} (HTTP {status}). The original "
+                        f"missing-header finding still applies.")
+    else:
+        if is_hsts:
+            # Parse max-age=N out of the header value. Tolerant of
+            # whitespace and ordering; any non-numeric or missing
+            # max-age = browsers ignore the header, so still vulnerable.
+            import re as _re
+            m = _re.search(r"max-age\s*=\s*(\d+)", header_value, _re.I)
+            max_age = int(m.group(1)) if m else 0
+            if max_age >= HSTS_MIN_MAX_AGE:
+                verdict = "not_reproduced"
+                finding_text = (f"HSTS header is present and policy is "
+                                f"reasonable: {header_value!r} (max-age="
+                                f"{max_age}, ≥ recommended "
+                                f"{HSTS_MIN_MAX_AGE}). Finding looks "
+                                f"remediated.")
+            else:
+                verdict = "reproduced"
+                severity_out = "LOW"
+                finding_text = (f"HSTS header is present but max-age="
+                                f"{max_age} is below the recommended "
+                                f"{HSTS_MIN_MAX_AGE} (180 days). "
+                                f"Browsers may still be vulnerable to "
+                                f"first-visit downgrade attacks.")
+        else:
+            # Generic header — presence flips verdict to not-reproduced.
+            verdict = "not_reproduced"
+            finding_text = (f"Response header {target_header!r} is "
+                            f"present: {header_value!r}. The original "
+                            f"missing-header finding is no longer "
+                            f"reproduced.")
+
+    return JSONResponse({
+        "ok": True, "kind": "tls",
+        "host": host, "port": port,
+        "command": cmd_label,
+        "elapsed_ms": elapsed_ms, "exit_code": 0,
+        "flag": "fast-path",
+        "flag_label": cmd_label,
+        "testssl_id": testssl_id,
+        "verdict": verdict,
+        "matched_rows": [{
+            "id": testssl_id,
+            "severity": severity_out,
+            "finding": finding_text,
+        }],
+        "stdout_excerpt": "",
+        "stderr_excerpt": "",
+        # Surface the actual response headers so the analyst can copy
+        # the live values into a ticket without leaving the modal.
+        "response_status": status,
+        "response_headers": list(headers_lower.items()),
+    })
+
+
 def _finding_test_cert_fast(host: str, port: int,
                             testssl_id: str,
                             finding: dict) -> JSONResponse:
@@ -3959,6 +4133,46 @@ def _san_matches_host(san: str, host: str) -> bool:
     return False
 
 
+# Header-shape testssl IDs (HSTS / security headers / Server banner)
+# that can be answered from one HTTPS request. Same idea as
+# _CERT_FAST_TESTSSL_IDS — testssl.sh -h takes 30-60s to do what
+# `curl -I` does in <200 ms. Each id maps to the response header that
+# determines the verdict; "presence" alone flips a *_missing finding to
+# not_reproduced. Aliases for enhanced_testing's `config_*_missing`
+# probe IDs are included so the same fast path works for findings that
+# came from that source tool too. Lowercase keys: matched
+# case-insensitively.
+_HEADER_FAST_ID_TO_HEADER: dict[str, str] = {
+    # testssl native IDs
+    "hsts":                    "strict-transport-security",
+    "hsts_subdomains":         "strict-transport-security",
+    "hsts_preload":            "strict-transport-security",
+    "hsts_time":               "strict-transport-security",
+    "hpkp":                    "public-key-pins",
+    "x-frame-options":         "x-frame-options",
+    "xfo":                     "x-frame-options",
+    "x-content-type-options":  "x-content-type-options",
+    "xcto":                    "x-content-type-options",
+    "x-xss-protection":        "x-xss-protection",
+    "content-security-policy": "content-security-policy",
+    "csp":                     "content-security-policy",
+    "referrer-policy":         "referrer-policy",
+    "permissions-policy":      "permissions-policy",
+    "feature-policy":          "feature-policy",
+    "banner_server":           "server",
+    "banner_application":      "x-powered-by",
+    # enhanced_testing aliases (config_*_missing)
+    "config_hsts_missing":            "strict-transport-security",
+    "config_csp_missing":             "content-security-policy",
+    "config_xfo_missing":             "x-frame-options",
+    "config_xcto_missing":            "x-content-type-options",
+    "config_referrer_policy_missing": "referrer-policy",
+    "config_permissions_policy_missing": "permissions-policy",
+    "config_xss_protection_missing":  "x-xss-protection",
+}
+_HEADER_FAST_TESTSSL_IDS = set(_HEADER_FAST_ID_TO_HEADER.keys())
+
+
 # Cert-shape testssl IDs that can be answered from a single TLS handshake
 # + leaf-cert parse. Routing through testssl.sh for these would take ~30s
 # for a question that's actually <200 ms when we just open a TLS socket
@@ -3994,7 +4208,10 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     falls through to the existing testssl.sh path below.
 
     The testssl.sh path is bounded by:
-      * subprocess timeout (90s — narrow flags finish in <30s typical),
+      * subprocess timeout (180s — narrow flags finish in <30s typical
+        for ciphers/cert work, but the vulnerability suite (-U) on a
+        slow target can hit 90-120s; the previous 90s cap was too
+        tight and caused intermittent timeouts on real workloads),
       * single testssl invocation per click (rate-limited by caller),
       * jsonfile-pretty output captured to a tmp path under /tmp,
         cleaned up regardless of exit code.
@@ -4008,6 +4225,11 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
 
     host = (parsed.hostname or "").lower()
     port = parsed.port or 443
+
+    # Fast path: header-presence IDs answered from a single HTTPS GET.
+    # Lowercased lookup so variants like "HSTS" and "hsts" both match.
+    if testssl_id and testssl_id.lower() in _HEADER_FAST_TESTSSL_IDS:
+        return _finding_test_header_fast(host, port, testssl_id, finding)
 
     # Fast path: cert-shape IDs answered from the leaf cert.
     if testssl_id in _CERT_FAST_TESTSSL_IDS:
@@ -4036,7 +4258,7 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     try:
         proc = _subprocess.run(
             cmd, capture_output=True, text=True,
-            timeout=90.0, check=False,
+            timeout=180.0, check=False,
         )
         proc_stdout = proc.stdout or ""
         proc_stderr = proc.stderr or ""
@@ -4044,9 +4266,10 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     except _subprocess.TimeoutExpired:
         return JSONResponse({
             "ok": False, "error": "tls_timeout",
-            "message": ("testssl.sh timed out after 90s. Try the manual "
+            "message": ("testssl.sh timed out after 180s. Try the manual "
                         "Challenge form on the full detail page if you "
-                        "need a deeper run."),
+                        "need a deeper run, or use the Quick HTTP probe "
+                        "button for a fast sanity check."),
         }, status_code=504)
     except Exception as e:
         return JSONResponse({
