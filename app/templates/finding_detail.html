@@ -1007,7 +1007,7 @@ async function runTest(fid, kind) {
 
   const KIND_HINTS = {
     'tls':      { msg: 'Running testssl.sh narrow scan',
-                   warn: 'TLS vulnerability checks typically take 30–90 seconds. The page is not frozen.' },
+                   warn: 'TLS vulnerability checks typically take 60–180 seconds (header / cert checks short-circuit to a sub-second fast path automatically). The page is not frozen.' },
     'tls_info': { msg: 'Fetching live TLS certificate',
                    warn: 'Sub-second.' },
     'nuclei':   { msg: 'Running nuclei template',
