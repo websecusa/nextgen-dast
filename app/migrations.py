@@ -304,6 +304,188 @@ def m_2026_05_02_remap_ai_findings_to_owasp_top10() -> str:
             f"{skipped_unknown} unrecognized scenario(s)")
 
 
+def m_2026_05_02_fp_lower_version_fingerprint_dupes() -> str:
+    """Auto-mark lower-version duplicate fingerprint findings as
+    false_positive. Earlier sca_runner.fingerprint_js_content() did
+    not deduplicate by component within a file, so a JS bundle
+    containing stray version strings (changelog comments, regex
+    literals, migrate-shim version assignments) produced one record
+    per detected version. Each record then drove its own info
+    "Library detected" finding plus per-CVE OSV findings.
+
+    The fix in fingerprint_js_content keeps only the highest semver
+    per (file, component) going forward. This migration cleans up
+    the historical data: for every (assessment, evidence_url,
+    raw_data.package.name) group that has multiple versions, we
+    keep the highest semver as-is and flip the lower-version
+    siblings to status='false_positive' / validation_status=
+    'false_positive' with a stamped validation_evidence note.
+
+    Idempotent: rows already in status='false_positive' are not
+    touched, and the second pass groups them out, so the migration
+    runs as a no-op once it has been applied.
+    """
+    rows = db.query_all("""
+        SELECT id, assessment_id, evidence_url, raw_data, status,
+               source_tool, severity
+          FROM findings
+         WHERE source_tool = 'sca'
+           AND raw_data IS NOT NULL
+    """)
+    if not rows:
+        return "no SCA findings to dedup"
+
+    # Group rows by (assessment_id, evidence_url, package_name).
+    # Each group ends up with one or more (version, row_id) pairs.
+    groups: dict[tuple, list[tuple[str, dict]]] = {}
+    for row in rows:
+        if (row.get("status") or "open") == "false_positive":
+            continue   # already triaged out; never re-flip
+        rd = row.get("raw_data")
+        try:
+            obj = json.loads(rd) if isinstance(rd, str) else (rd or {})
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # SCA findings carry either of two raw_data shapes:
+        #   * OSV / retire-style:    raw_data.package.{name, version}
+        #   * fingerprinter info:    raw_data.{component, version}
+        # Normalise both into (name, version) here so the dedup
+        # group key catches both kinds of rows for the same library.
+        pkg = obj.get("package") or {}
+        name = (pkg.get("name") or obj.get("component") or "").strip().lower()
+        version = (pkg.get("version") or obj.get("version") or "").strip()
+        url = (row.get("evidence_url") or "").strip()
+        if not (name and version and url):
+            continue
+        key = (row["assessment_id"], url, name)
+        groups.setdefault(key, []).append((version, row))
+
+    # Local semver tuple — same shape as
+    # sca_runner._semver_tuple. Reproduced inline so the migration
+    # has no dependency on importing scripts/sca_runner.
+    def _sv(v: str) -> tuple:
+        s = v.lstrip("vV").strip() if v else ""
+        base, _, pre = s.partition("-")
+        out: list = []
+        for chunk in base.split("."):
+            try:
+                out.append((1, int(chunk)))
+            except ValueError:
+                out.append((0, chunk))
+        out.append((0, pre) if pre else (2, ""))
+        return tuple(out)
+
+    flipped = 0
+    groups_touched = 0
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Find the maximum semver in the group. Only flip rows that
+        # are STRICTLY less than the max -- rows at the same version
+        # as the max are different CVEs / different findings against
+        # the same library version, not version-duplicates, and
+        # must NOT be flipped. Earlier passes did flip equal-version
+        # siblings, which incorrectly suppressed real CVE rows; the
+        # corrective_v3 migration that runs immediately after this
+        # one undoes those mistaken flips.
+        max_v = max(_sv(mv[0]) for mv in members)
+        max_v_str = next(mv[0] for mv in members if _sv(mv[0]) == max_v)
+        any_flipped_in_group = False
+        for ver, row in members:
+            if _sv(ver) >= max_v:
+                continue   # at-max version — keep
+            note = ("auto-flipped by 2026-05-02 dedup migration: "
+                    f"another finding on the same evidence_url "
+                    f"reports the same component at version "
+                    f"{max_v_str}; this record's lower version "
+                    f"{ver} is most likely a fingerprinter artifact "
+                    "(stray version string in the bundle). Review "
+                    "the higher-version finding for the canonical "
+                    "verdict.")
+            db.execute(
+                "UPDATE findings "
+                "   SET status = 'false_positive', "
+                "       validation_status = 'false_positive', "
+                "       validation_probe = 'fingerprint_dedup', "
+                "       validation_run_at = NOW(), "
+                "       validation_evidence = %s "
+                " WHERE id = %s "
+                "   AND status <> 'false_positive'",
+                (json.dumps({"summary": note,
+                              "kept_version": max_v_str,
+                              "flipped_version": ver}), row["id"]))
+            flipped += 1
+            any_flipped_in_group = True
+        if any_flipped_in_group:
+            groups_touched += 1
+
+    return (f"flipped {flipped} lower-version duplicate(s) across "
+            f"{groups_touched} (assessment, file, component) group(s)")
+
+
+def m_2026_05_02_unflip_equal_version_dedup_mistakes() -> str:
+    """Corrective pass for the previous fp_lower_version dedup
+    migration. The first two passes (v1 and v2) sorted group members
+    descending and flipped every row except the first, which mistakenly
+    flipped same-version siblings (multiple CVEs against the SAME
+    library version, e.g. four bootstrap 4.1.3 CVEs on the same JS
+    file). Those rows were never duplicates — they were independent
+    findings.
+
+    The validation_evidence JSON written by the buggy passes carries
+    `kept_version` and `flipped_version` -- if those two values are
+    EQUAL, the row was wrongly flipped and we revert it here. Rows
+    correctly flipped (lower version vs higher) are left alone.
+
+    Idempotent: only matches rows whose validation_probe is exactly
+    'fingerprint_dedup' AND whose evidence shows kept == flipped.
+    Re-runs after the cleanup find no such rows."""
+    rows = db.query_all("""
+        SELECT id, validation_evidence
+          FROM findings
+         WHERE source_tool = 'sca'
+           AND status = 'false_positive'
+           AND validation_probe = 'fingerprint_dedup'
+    """)
+    if not rows:
+        return "no fingerprint_dedup-flipped rows to inspect"
+
+    reverted = 0
+    for row in rows:
+        ev = row.get("validation_evidence")
+        try:
+            obj = json.loads(ev) if isinstance(ev, str) else (ev or {})
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kept = (obj.get("kept_version") or "").strip()
+        flipped = (obj.get("flipped_version") or "").strip()
+        if not (kept and flipped):
+            continue
+        if kept != flipped:
+            continue   # legitimate lower-version flip; leave alone
+        # Revert to status=open / unvalidated and clear the bogus
+        # dedup metadata. The downstream sca_finding_validate probe
+        # (or analyst review) decides the correct verdict; we don't
+        # presume an outcome here.
+        db.execute(
+            "UPDATE findings "
+            "   SET status = 'open', "
+            "       validation_status = 'unvalidated', "
+            "       validation_probe = NULL, "
+            "       validation_run_at = NULL, "
+            "       validation_evidence = NULL "
+            " WHERE id = %s",
+            (row["id"],))
+        reverted += 1
+
+    return (f"reverted {reverted} same-version row(s) wrongly flipped "
+            "by the earlier dedup pass")
+
+
 MIGRATIONS: list = [
     ("2026_05_01_enrichment_orphan_cleanup",
      m_2026_05_01_enrichment_orphan_cleanup),
@@ -313,6 +495,33 @@ MIGRATIONS: list = [
      m_2026_05_01_promote_existing_admins_to_superadmin),
     ("2026_05_02_remap_ai_findings_to_owasp_top10",
      m_2026_05_02_remap_ai_findings_to_owasp_top10),
+    ("2026_05_02_fp_lower_version_fingerprint_dupes",
+     m_2026_05_02_fp_lower_version_fingerprint_dupes),
+    # v2 re-runs the same dedup logic after the first pass missed
+    # rows whose raw_data carried the fingerprinter info-row shape
+    # (component/version at the top level) instead of the OSV /
+    # retire shape (package.{name, version}). The function itself
+    # is now shape-aware; a new migration id is required because
+    # the schema_migrations bookkeeping marks the original id as
+    # success and would skip a re-run otherwise.
+    ("2026_05_02_fp_lower_version_fingerprint_dupes_v2",
+     m_2026_05_02_fp_lower_version_fingerprint_dupes),
+    # v3 corrects the same-version flips that v1 and v2 wrongly
+    # produced. The bug was specifically: when a group's members all
+    # had the same version (multiple CVEs against the same library
+    # release), every row except the first was flipped. v3 reverts
+    # those, leaving real lower-version flips alone.
+    ("2026_05_02_unflip_equal_version_dedup_mistakes",
+     m_2026_05_02_unflip_equal_version_dedup_mistakes),
+    # v4 re-runs the (now correct) dedup logic. After v3 puts the
+    # equal-version rows back to status=open, this pass picks up
+    # any rows the original buggy passes missed because their group
+    # had MORE than one member at the max version (the second-and-
+    # later max-version rows would have been flipped under the old
+    # logic, then reverted by v3, but we want to make sure the
+    # genuine lower-version siblings in the group are still flipped).
+    ("2026_05_02_fp_lower_version_fingerprint_dupes_v4",
+     m_2026_05_02_fp_lower_version_fingerprint_dupes),
 ]
 
 
