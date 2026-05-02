@@ -248,6 +248,39 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Enhanced-AI anti-hallucination guard +
+  SPA-fallback fingerprinter.** Two paired guards on the
+  `enhanced_ai_testing` weakness-discovery pass to suppress the
+  largest false-positive class we have seen in the wild: a
+  CDN-fronted SPA that returns the same `index.html` (HTTP 200) for
+  every unmatched path, which lets path-presence scanners (nikto and
+  similar) report "X admin interface identified at /X.jsp" purely
+  because the path 200s — and the LLM weakness pass then escalates
+  that into a CVE chain. (1) New `app/spa_fallback.py` probes
+  random junk paths on each unique target host once per run and
+  caches a body signature; the renderer tags any
+  `evidence_url` whose body matches the signature with
+  `[SPA-FALLBACK ECHO]`, and a new `{spa_fallback_warning}`
+  placeholder lists affected hosts in a dedicated prompt block.
+  (2) New `_filter_hallucinations` step in `enhanced_ai.py` runs
+  before insertion: every LLM-emitted finding's `evidence` field
+  must be a verbatim (whitespace-normalized, case-insensitive)
+  substring of the rendered input corpus, OR the finding is
+  dropped as ungrounded. Findings whose URLs match the SPA-fallback
+  signature are also dropped. A runtime safety preamble
+  (`_RUNTIME_SAFETY_PREAMBLE`) is prepended to every
+  weakness-discovery user prompt so the rules apply even when an
+  operator has customized the system prompt or removed the
+  placeholder from the user template. The seed `HEADER` in
+  `enhanced_ai_prompts.py` also gains four new G1-G4 grounding
+  rules (verbatim quote, "200 OK is not evidence", no
+  cross-tool escalation, SPA-fallback URLs carry no signal); existing
+  installs pick these up via `Restore to default` on the AI-Prompts
+  admin page, but the runtime preamble enforces the same floor
+  unconditionally. New `spa_fallback_warning` placeholder is
+  registered in `PLACEHOLDERS_BY_SLOT` so the AI-Prompts editor
+  recognizes it.
+
 - **2026-05-02** — **Theme toggle (Dark / Light), per-user
   persistence.** New `theme` column on the `users` table (enum
   `dark`/`light`, default `dark`) plus a `/theme` page reachable
