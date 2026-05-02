@@ -432,6 +432,57 @@
     return false;
   }
 
+  // Sibling of runChallengeAside for enhanced_ai_testing rows. Hits
+  // /challenge_llm instead of /challenge_inline; same UX (transient
+  // Running… badge → re-fetch aside on success → inline error
+  // message on failure). The endpoint is admin-gated server-side; the
+  // template disables the button for read-only accounts.
+  async function runChallengeAsideLLM(event, fid) {
+    event.preventDefault();
+    const form = event.target.closest("form");
+    if (!form) return false;
+    const btn = form.querySelector("button[type=submit]");
+    const originalHTML = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      const existingBadge = btn.querySelector(".badge");
+      if (existingBadge) existingBadge.remove();
+      const running = document.createElement("span");
+      running.className = "badge running";
+      running.style.marginLeft = "auto";
+      running.textContent = "LLM grading…";
+      btn.appendChild(running);
+    }
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_llm", {
+        method: "POST", credentials: "same-origin",
+      });
+      let data = {};
+      try { data = await r.json(); } catch (_) {}
+      if (!r.ok) {
+        if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+        let errSpan = form.querySelector(".challenge-inline-msg");
+        if (!errSpan) {
+          errSpan = document.createElement("div");
+          errSpan.className = "challenge-inline-msg warn";
+          errSpan.style.cssText =
+            "font-size:.85em; margin-top:.3em; color:var(--yellow, #e0a000)";
+          form.appendChild(errSpan);
+        }
+        errSpan.textContent = data.message || data.error || "Challenge with LLM failed.";
+        return false;
+      }
+      const aside = await fetch(BASE + "/finding/" + fid + "/aside",
+                                { credentials: "same-origin" })
+                          .then(r => r.text());
+      document.getElementById("fw-aside").innerHTML = aside;
+    } catch (err) {
+      console.error("runChallengeAsideLLM failed", err);
+      if (btn) { btn.disabled = false; btn.innerHTML = originalHTML; }
+    }
+    return false;
+  }
+
   function loadFinding(id, item, ev) {
     if (ev) {
       // Suppress accidental click-into-select on the row's checkbox

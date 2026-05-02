@@ -449,6 +449,64 @@ async function runChallenge(fid, probeName, safetyClass,
   }
 }
 
+async function runChallengeLLM(fid) {
+  // Sibling of runChallenge for enhanced_ai_testing rows. Re-grades a
+  // single finding via the LLM fidelity prompt. No toolkit probe is
+  // involved — the LLM reads the finding's evidence + raw_data and
+  // emits validated/false_positive/inconclusive with confidence.
+  if (!confirm("Re-grade finding #" + fid + " with the LLM?\n\n" +
+               "This calls the configured fidelity prompt against this " +
+               "single row. Cost is typically a few cents.")) return;
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = "Challenging finding #" + fid + " with LLM…";
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">LLM grading…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/challenge_llm', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = "LLM verdict · finding #" + fid;
+    if (!r.ok || !data.ok) {
+      validateEl.innerHTML =
+        '<p class="warn">' +
+        escapeHTML(data.message || data.error || "LLM grading failed.") +
+        '</p>';
+      return;
+    }
+    const verdict = data.verdict || 'inconclusive';
+    const conf = (data.confidence != null) ? data.confidence : '—';
+    const sev = data.suggested_severity || '—';
+    const reasoning = escapeHTML(data.reasoning || '');
+    let badge = '<span class="badge">' + escapeHTML(verdict) + '</span>';
+    if (verdict === 'validated') badge =
+      '<span class="badge done">✓ ' + escapeHTML(verdict) + '</span>';
+    if (verdict === 'false_positive') badge =
+      '<span class="badge warn">' + escapeHTML(verdict) + '</span>';
+    validateEl.innerHTML =
+      '<p><strong>Verdict:</strong> ' + badge +
+      '   <strong>Confidence:</strong> ' + escapeHTML(String(conf)) +
+      '   <strong>Suggested severity:</strong> ' + escapeHTML(String(sev)) +
+      (data.auto_flipped ? '   <span class="badge done">auto-applied</span>' : '') +
+      '</p>' +
+      '<p style="white-space:pre-wrap"><strong>Reasoning:</strong> ' +
+      reasoning + '</p>' +
+      '<p class="muted small">Tokens: in=' + escapeHTML(String(data.in_tokens || 0)) +
+      ', out=' + escapeHTML(String(data.out_tokens || 0)) + '</p>';
+  } catch (err) {
+    validateEl.innerHTML =
+      '<p class="warn">Challenge with LLM failed: ' +
+      escapeHTML(String(err)) + '</p>';
+  }
+}
+
 async function runValidate(fid) {
   const modal = document.getElementById('io-modal');
   const titleEl = document.getElementById('io-modal-title');

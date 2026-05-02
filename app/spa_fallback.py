@@ -1,6 +1,6 @@
 # Author: Tim Rice <tim.j.rice@hackrange.com>
 # Part of nextgen-dast. See README.md for license and overall architecture.
-"""Per-host SPA-fallback fingerprinter.
+"""Per-host SPA-fallback (and dead-host) fingerprinter.
 
 Many modern front-ends (React/Vue/Angular SPAs behind a CDN, S3+CloudFront,
 Cloudflare Pages) answer every unmatched path with HTTP 200 and the same
@@ -9,6 +9,15 @@ that a lot of scanners (and the Enhanced-AI-Testing weakness-discovery
 LLM) rely on: a 200 status code on `/JAMonAdmin.jsp` or `/wp-admin` does
 not prove that JAMon or WordPress is actually deployed — the front-end
 just returned its SPA shell.
+
+The same pattern occurs at non-200 statuses too. A misconfigured upstream
+behind a managed gateway (MuleSoft Cloudhub, AWS API Gateway, Azure APIM,
+CloudFront with a dead origin) will return the gateway's templated error
+page — typically HTTP 502 with a fixed body — for *every* path on the
+vhost, so a Nikto signature firing because that body happens to contain
+a substring it recognizes is a pure false positive. This module catches
+both forms by requiring all junk-path probes to agree on (status, body)
+rather than being hard-pinned to status==200.
 
 This module computes, per host, a body signature for that fallback. With
 the signature in hand, a caller can ask "is this specific path just the
@@ -153,17 +162,28 @@ def _hash(body: bytes) -> str:
 
 
 def _looks_like_fallback(samples: list[tuple[int, bytes]]) -> bool:
-    """Decide whether two junk-path responses constitute an SPA
-    fallback. The strict rule is byte-identical 200 bodies. We also
+    """Decide whether two junk-path responses constitute a path-agnostic
+    echo (SPA fallback OR dead-upstream gateway error). The rule is
+    byte-identical bodies served at the SAME status code. We also
     accept a near-match for CDNs that inject a request-ID comment
     into the HTML — same status, same length, identical first and
-    last 1024 bytes after stripping common request-ID tokens."""
+    last 1024 bytes after stripping common request-ID tokens.
+
+    Status agreement matters: two 404s with identical bodies are also
+    an echo (a static "not found" page returned for every path), which
+    is just as misleading for path-existence reasoning as the 200-SPA
+    case. The only forbidden outcome is "transport failed" (status 0),
+    where we have no signal to fingerprint against."""
     if len(samples) < 2:
         return False
     statuses = [s for s, _ in samples]
-    # All must be 200; a 404/410 means the host is path-aware and
-    # therefore NOT serving an SPA fallback.
-    if any(st != 200 for st in statuses):
+    # Transport failures carry no signal — a host we couldn't reach
+    # twice tells us nothing about its path-handling behavior.
+    if any(st == 0 for st in statuses):
+        return False
+    # All probes must agree on the status code. A mix (200 + 404) means
+    # the host is path-aware: one path was real, the other was not.
+    if len(set(statuses)) != 1:
         return False
     bodies = [b for _, b in samples]
     # Empty body is suspicious (no content to compare); treat as
@@ -228,16 +248,23 @@ class Fingerprinter:
 
         if _looks_like_fallback(samples):
             sigs = sorted({_hash(b) for _, b in samples})
+            # status is guaranteed identical across samples by
+            # _looks_like_fallback's set-of-1 check, so any sample's
+            # status is the canonical one. Stored on the sig so
+            # is_fallback() can match status alongside body hash —
+            # otherwise a real 200 page that happened to share a body
+            # length with a 502 echo would be miscategorized.
             sig = {
                 "signatures": sigs,
                 "size": len(samples[0][1]),
                 "host": key,
+                "status": samples[0][0],
             }
             self._cache[key] = sig
             logger.info(
-                "spa_fallback: %s returns SPA shell for arbitrary paths "
-                "(size=%d, sigs=%s)",
-                key, sig["size"], sigs)
+                "spa_fallback: %s returns identical body for arbitrary "
+                "paths (status=%d, size=%d, sigs=%s)",
+                key, sig["status"], sig["size"], sigs)
             return sig
 
         self._cache[key] = None
@@ -265,11 +292,19 @@ class Fingerprinter:
         if url in per_host:
             return per_host[url]
         status, body = _http_get(url)
-        result = (status == 200
+        # Match BOTH status and body hash. The SPA-200 case and the
+        # gateway-502 case use the same comparator now; sig["status"]
+        # is whatever status the host's path-agnostic echo happens to
+        # use. .get() because pre-existing in-memory sigs from older
+        # boots may not carry the status field — treat absent as 200
+        # so legacy caches keep behaving as before.
+        expected_status = sig.get("status", 200)
+        result = (status == expected_status
                   and _hash(body) in set(sig["signatures"]))
         per_host[url] = result
         if result:
-            logger.info("spa_fallback: %s matches host SPA signature", url)
+            logger.info("spa_fallback: %s matches host echo signature "
+                        "(status=%d)", url, status)
         return result
 
     def affected_hosts(self) -> list[str]:

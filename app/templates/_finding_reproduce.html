@@ -86,6 +86,16 @@
           Challenge with <code>{{ io.probe_name }}</code>
         </button>
       {% endif %}
+      {# AI findings have no toolkit probe, but the analyst can still
+         re-grade them by re-running the fidelity prompt. Renders next
+         to (or instead of) the toolkit Challenge button. #}
+      {% if f.source_tool == 'enhanced_ai_testing' %}
+        <button type="button" class="primary"
+                onclick="runChallengeLLM({{ f.id }})"
+                title="Re-grade this finding with the LLM. Calls the configured fidelity prompt against this single row and writes the verdict back. Admin role required.">
+          Challenge with LLM
+        </button>
+      {% endif %}
     </div>
     {# Show a discoverability note when the probe is matched so it's
        visible BEFORE the analyst clicks. Helps non-pentesters understand

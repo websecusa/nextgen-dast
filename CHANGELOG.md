@@ -248,6 +248,49 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Enhanced-AI fidelity hardening: dead-host echo
+  detection + G3 enforcement + Challenge with LLM.** Concrete fixes
+  in response to a real false-positive cluster on a Cloudhub-broken
+  vhost where every path returned the same 502 + 11,755-byte body
+  yet a Nikto signature still fired and the BFLA prompt escalated
+  it to `high`. Five paired changes:
+  (1) `app/spa_fallback.py` no longer hard-pins to status 200; it now
+  fingerprints any host whose junk-path probes agree on (status, body)
+  — covers the SPA-200 case AND the gateway-502 case (MuleSoft
+  Cloudhub, AWS API Gateway with dead origin, CloudFront with
+  unconfigured backend). The cached signature carries the canonical
+  status so `is_fallback()` matches both axes.
+  (2) `app/enhanced_ai.py` URL-only renderers (`_render_endpoints_by_methods`,
+  `_render_oauth_endpoints`, `_render_url_processing`) now drop
+  echo-tagged URLs entirely instead of inlining the `[SPA-FALLBACK ECHO]`
+  tag — defense in depth, the model cannot speculate off paths it
+  literally cannot see. Body-bearing renderers
+  (`_render_response_samples`) keep their entries because the body
+  is itself useful telemetry.
+  (3) New mechanical post-processor `_g3_downgrade_if_scanner_only`
+  enforces HEADER rule G3: a finding whose only `evidence` is a
+  scanner URL/line claim (regex-matched) and whose severity is
+  `high`/`critical` is auto-downgraded to `low` and prefixed with
+  "REQUIRES MANUAL VERIFICATION:" in the title. Audit trail (original
+  severity, matched pattern, reason) lands in `raw_data` so a
+  reviewer can see the row was auto-touched.
+  (4) New `Challenge with LLM` button in the workspace right rail and
+  on the finding detail page, replacing the disabled `Challenge`
+  affordance for `enhanced_ai_testing` rows (toolkit probes don't
+  match those). Wired to `POST /finding/<id>/challenge_llm` →
+  `enhanced_ai.run_single_finding_fidelity()`, which runs the
+  configured fidelity prompt as a one-element batch and returns the
+  verdict (validated / false_positive / inconclusive + confidence +
+  suggested severity + reasoning) for inline rendering. Bypasses the
+  bulk-pass exclusion of LLM-emitted rows so an analyst can
+  re-evaluate any finding on demand.
+  (5) Finding `description` and `remediation` now render as markdown
+  via a new Jinja `md` filter — fenced code blocks (```bash …```)
+  show as proper monospace blocks with a left accent stripe instead
+  of literal triple-backticks. Markdown library added to the
+  Dockerfile pip install (markdown==3.7); `app/static/style.css`
+  gains a `.markdown-body` rule set scoped to the analyst-facing
+  detail page.
 - **2026-05-02** — **Enhanced-AI weakness-discovery: 10 additional
   scenarios.** Doubled the seeded weakness-discovery roster from 10
   to 20 to cover attack classes off-the-shelf DAST engines either

@@ -665,6 +665,39 @@ app = FastAPI(title="nextgen-dast", root_path=ROOT_PATH, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 templates = Jinja2Templates(directory="/app/templates")
 
+# Markdown filter for finding description / remediation rendering.
+# The Enhanced-AI-Testing weakness-discovery prompts emit markdown
+# (fenced code blocks, headings, bullet lists) by design — the FOOTER
+# explicitly tells the model to use fenced code blocks for any test
+# payload, curl scaffold, or PoC snippet. Without a markdown pass the
+# triple backticks render literally and the analyst sees a wall of
+# pre-wrap text. The `safe` extensions list omits `attr_list` and
+# `md_in_html` because the source text comes from an LLM and those
+# extensions broaden the HTML attack surface; fenced_code + tables +
+# nl2br + sane_lists is enough for the analyst-facing detail page.
+import markdown as _markdown
+from markupsafe import Markup as _Markup
+
+_MD = _markdown.Markdown(
+    extensions=["fenced_code", "tables", "nl2br", "sane_lists"],
+    output_format="html5",
+)
+
+
+def _md_filter(text: str | None) -> _Markup:
+    """Jinja filter: render an LLM-emitted markdown blob as safe HTML.
+    Empty/None passes through as empty string. The Markdown instance is
+    long-lived; we call .reset() each time to clear any per-render
+    state (footnote counters, etc.) so the same instance can be reused
+    across thousands of finding renders."""
+    if not text:
+        return _Markup("")
+    _MD.reset()
+    return _Markup(_MD.convert(str(text)))
+
+
+templates.env.filters["md"] = _md_filter
+
 # RESTful API (token-auth + IP whitelist). See app/api.py for the full
 # surface description. Mounted at /api/v1; the auth middleware below
 # whitelists /api/ so the router enforces its own token-based auth
@@ -6101,6 +6134,61 @@ def finding_challenge_inline(request: Request, fid: int):
         "last_status": last_req.get("status"),
         "error": verdict.get("error"),
     })
+
+
+@app.post("/finding/{fid}/challenge_llm")
+def finding_challenge_llm(request: Request, fid: int):
+    """LLM-driven re-grade of a single finding, used by the workspace
+    'Challenge with LLM' button on enhanced_ai_testing rows (and any
+    other source_tool the analyst wants the model to re-evaluate).
+
+    Loads the finding's assessment context, runs the configured fidelity
+    prompt as a one-element batch, persists the verdict via the same
+    `_apply_fidelity_verdicts` path the bulk pass uses, and returns the
+    decoded verdict so the frontend can show it inline next to the
+    button. Admin role required because each call spends LLM budget;
+    the assessment's enhanced_ai_budget cap is NOT consulted here
+    (single-finding cost is a few cents at most, and the analyst
+    explicitly initiated it)."""
+    user = current_user(request) or {}
+    if user.get("role") not in ("admin", "superadmin"):
+        return JSONResponse(
+            {"ok": False, "error": "forbidden",
+             "message": "Challenge with LLM requires admin role."},
+            status_code=403)
+    f = db.query_one("SELECT id, assessment_id FROM findings WHERE id=%s",
+                       (fid,))
+    if not f:
+        raise HTTPException(404)
+    a = db.query_one(
+        "SELECT llm_endpoint_id FROM assessments WHERE id=%s",
+        (f["assessment_id"],))
+    if not a:
+        return JSONResponse(
+            {"ok": False, "error": "no_assessment"}, status_code=404)
+    # Resolve the same endpoint the original orchestrator pass used,
+    # falling back to the system default if the assessment didn't pin
+    # one. Mirrors scripts/orchestrator.py:_resolve_endpoint precedence.
+    ep = None
+    if a.get("llm_endpoint_id"):
+        ep = db.query_one("SELECT * FROM llm_endpoints WHERE id=%s",
+                           (a["llm_endpoint_id"],))
+    if not ep:
+        ep = db.query_one(
+            "SELECT * FROM llm_endpoints WHERE is_default=1 LIMIT 1")
+    if not ep:
+        ep = db.query_one(
+            "SELECT * FROM llm_endpoints ORDER BY id LIMIT 1")
+    if not ep:
+        return JSONResponse(
+            {"ok": False, "error": "no_endpoint",
+             "message": "No LLM endpoint configured."}, status_code=409)
+
+    import enhanced_ai as _eai
+    result = _eai.run_single_finding_fidelity(fid, ep)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=409)
+    return JSONResponse(result)
 
 
 @app.post("/finding/{fid}/false_positive")
