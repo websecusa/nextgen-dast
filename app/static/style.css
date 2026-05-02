@@ -107,10 +107,13 @@ body.theme-light ::-webkit-scrollbar-thumb {
 .theme-meta { display: flex; flex-direction: column; gap: .15em; }
 
 /* ---- Grade badge (A-F letter on Assessments tables) --------------- */
-/* Extends .sev so the grade picks up the same severity-tier color
-   palette used everywhere else (info/low/medium/high/critical). The
-   extra rules here size the badge as a small pill and bold the
-   letter so an F reads as "F" instantly across the dashboard table. */
+/* Dedicated traffic-light palette so an A is unambiguously green and
+   an F is unambiguously red, decoupled from the severity color
+   scheme used elsewhere on the dashboard. Each tier uses a translucent
+   fill (so it reads as a chip, not a solid block) plus a stronger
+   foreground color for the letter itself. The exact hex values
+   match the standard 2.3 contrast bar against both the dark and
+   light theme panels. */
 .grade-badge {
   display: inline-block;
   min-width: 1.4em;
@@ -120,6 +123,51 @@ body.theme-light ::-webkit-scrollbar-thumb {
   text-align: center;
   border-radius: var(--radius-pill);
   letter-spacing: .02em;
+  border: 1px solid transparent;
+}
+.grade-badge.grade-a {
+  color: #1f7a3a;
+  background: rgba(45, 138, 79, 0.18);
+  border-color: rgba(45, 138, 79, 0.45);
+}
+.grade-badge.grade-b {
+  color: #4a8c5a;
+  background: rgba(123, 196, 127, 0.20);
+  border-color: rgba(123, 196, 127, 0.45);
+}
+.grade-badge.grade-c {
+  color: #b07e0e;
+  background: rgba(212, 160, 23, 0.22);
+  border-color: rgba(212, 160, 23, 0.50);
+}
+.grade-badge.grade-d {
+  color: #b8451e;
+  background: rgba(224, 138, 79, 0.22);
+  border-color: rgba(224, 138, 79, 0.50);
+}
+.grade-badge.grade-f {
+  color: #ffffff;
+  background: rgba(192, 57, 43, 0.78);
+  border-color: rgba(107, 31, 31, 0.95);
+}
+.grade-badge.grade-none {
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--border);
+}
+/* Light theme — slightly stronger fills so the chip reads on
+   white-ish panels. Letter color stays the same. */
+body.theme-light .grade-badge.grade-a {
+  background: rgba(45, 138, 79, 0.14);
+}
+body.theme-light .grade-badge.grade-b {
+  background: rgba(123, 196, 127, 0.18);
+}
+body.theme-light .grade-badge.grade-c {
+  background: rgba(212, 160, 23, 0.20);
+}
+body.theme-light .grade-badge.grade-d {
+  background: rgba(224, 138, 79, 0.22);
 }
 
 * { box-sizing: border-box; }

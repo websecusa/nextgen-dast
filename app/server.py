@@ -1253,6 +1253,15 @@ _ASSESSMENTS_SORT_COLUMNS: dict[str, str] = {
     "when": "COALESCE(finished_at, created_at)",
 }
 
+# Sortable columns that are computed AFTER the SQL fetch from the
+# per-assessment live finding aggregate. Sorting these in SQL would
+# require either correlated subqueries or denormalised cache columns;
+# instead the table helper switches to a "fetch the entire matched
+# set, decorate, sort in Python, then paginate" path when one of
+# these keys is requested. Acceptable cost at the install sizes this
+# tool sees (hundreds of assessments, not millions).
+_ASSESSMENTS_LIVE_SORT_KEYS: set[str] = {"open", "risk", "grade"}
+
 
 def _assessments_table_data(*, q: str, status: str, size: int, page: int,
                             sort: str, direction: str,
@@ -1277,9 +1286,28 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
 
     size = max(1, min(100, int(size or 25)))
     page = max(1, int(page or 1))
-    sort_key = sort if sort in _ASSESSMENTS_SORT_COLUMNS else "id"
-    direction_sql = "ASC" if (direction or "").lower() == "asc" else "DESC"
-    order_sql = f"{_ASSESSMENTS_SORT_COLUMNS[sort_key]} {direction_sql}"
+    direction_lc = (direction or "").lower()
+    is_ascending = direction_lc == "asc"
+    direction_sql = "ASC" if is_ascending else "DESC"
+
+    # Sort key resolves into one of three buckets:
+    #   * SQL-sortable column → ORDER BY in the main query, paginate
+    #     with LIMIT/OFFSET (cheap, works at any scale).
+    #   * Live-aggregate column (open / risk / grade) → fetch the
+    #     entire matched set, decorate with live counts, sort in
+    #     Python, then slice to the page. The matched set is
+    #     bounded by the WHERE filter so the cost stays proportional
+    #     to what the analyst is actually browsing.
+    #   * Unknown value → fall back to id-desc.
+    if sort in _ASSESSMENTS_SORT_COLUMNS:
+        sort_key = sort
+        live_sort = False
+    elif sort in _ASSESSMENTS_LIVE_SORT_KEYS:
+        sort_key = sort
+        live_sort = True
+    else:
+        sort_key = "id"
+        live_sort = False
 
     where_parts: list[str] = []
     params: list = []
@@ -1305,16 +1333,32 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
     total = int((total_row or {}).get("n") or 0)
     offset = (page - 1) * size
 
-    rows = db.query(
-        f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
-        f"       total_findings, created_at, finished_at "
-        f"FROM assessments {where_sql} "
-        f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
-        params + [size, offset])
+    if live_sort:
+        # Live-aggregate sort: pull every matched assessment, decorate
+        # with the live open / risk / grade fields, sort in Python on
+        # the chosen key, then slice to the requested page. The
+        # decorate-then-sort path also applies to rows the page would
+        # not have shown, but at hundreds-of-rows scale this is
+        # still under a second; if an install crosses into the
+        # tens-of-thousands range the live keys can move to a
+        # denormalised cache column without changing the URL contract.
+        rows = db.query(
+            f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
+            f"       total_findings, created_at, finished_at "
+            f"FROM assessments {where_sql} ORDER BY id DESC", params)
+    else:
+        order_sql = f"{_ASSESSMENTS_SORT_COLUMNS[sort_key]} {direction_sql}"
+        rows = db.query(
+            f"SELECT id, fqdn, application_id, profile, llm_tier, status, "
+            f"       total_findings, created_at, finished_at "
+            f"FROM assessments {where_sql} "
+            f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
+            params + [size, offset])
 
-    # Decorate the page with live open-findings count and risk score so
-    # the values match the assessment-detail view rather than the
-    # frozen orchestrator-time totals on the row.
+    # Decorate every row we have in hand with the live open-findings
+    # count, risk score, and grade dict. Two separate paths share the
+    # same decoration code below; on the SQL-sort path we only fetched
+    # one page, on the live-sort path we have the whole matched set.
     if rows:
         ids = [r["id"] for r in rows]
         ph = ",".join(["%s"] * len(ids))
@@ -1332,6 +1376,29 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
                                if r["id"] in live_per_aid
                                else _live_risk_score(fs))
             r["grade"] = _score_to_grade(r["risk_score"])
+
+    if live_sort and rows:
+        # Sort the decorated set on the chosen live column, then
+        # slice. Reverse=True for descending; secondary key on id
+        # (descending) to make ties order by recency, which matches
+        # what the analyst expects when two assessments share a
+        # grade or open count.
+        if sort_key == "open":
+            rows.sort(key=lambda r: (r.get("open_findings") or 0, r["id"]),
+                      reverse=not is_ascending)
+        elif sort_key == "risk":
+            rows.sort(key=lambda r: (r.get("risk_score") or 0, r["id"]),
+                      reverse=not is_ascending)
+        elif sort_key == "grade":
+            # grade.rank: 4 = A (best) ... 0 = F (worst), -1 = no data.
+            # Higher rank = better grade. Descending on rank shows
+            # the best-rated assessments first; ascending shows the
+            # worst.
+            rows.sort(
+                key=lambda r: ((r.get("grade") or {}).get("rank", -1),
+                                r["id"]),
+                reverse=not is_ascending)
+        rows = rows[offset:offset + size]
 
     # Distinct fqdns drive the typeahead. Cap at 200 so the page weight
     # stays reasonable on installs with thousands of assessments.
@@ -1380,7 +1447,8 @@ def index(request: Request,
     data["recent_state"] = {
         "q": a_q, "status": a_status,
         "size": page_size, "page": min(page, total_pages),
-        "sort": a_sort if a_sort in _ASSESSMENTS_SORT_COLUMNS else "id",
+        "sort": (a_sort if a_sort in _ASSESSMENTS_SORT_COLUMNS
+                  or a_sort in _ASSESSMENTS_LIVE_SORT_KEYS else "id"),
         "dir": "asc" if (a_dir or "").lower() == "asc" else "desc",
         "total_pages": total_pages,
         "size_options": [25, 50, 100],
@@ -2544,7 +2612,8 @@ def assessments_list(request: Request,
     state = {
         "q": q, "status": status,
         "size": page_size, "page": min(page_num, total_pages),
-        "sort": sort if sort in _ASSESSMENTS_SORT_COLUMNS else "id",
+        "sort": (sort if sort in _ASSESSMENTS_SORT_COLUMNS
+                  or sort in _ASSESSMENTS_LIVE_SORT_KEYS else "id"),
         "dir": "asc" if (dir or "").lower() == "asc" else "desc",
         "total_pages": total_pages,
         "size_options": [25, 50, 100],
@@ -2912,33 +2981,36 @@ _SEV_RISK_UNVALIDATED = {"critical": 8.0, "high": 4.0,
 # Letter-grade mapping for the dashboard / assessments tables. The
 # input is a 0-100 risk score where 0 = clean, 100 = max risk; the
 # output letter grade reads in the opposite direction (A = clean, F
-# = catastrophic). Colors deliberately reuse the severity palette so
-# a row's grade badge color matches the row's severity badge color
-# at the same tier (an A-rated row has the same green as info, an
-# F-rated row has the same red as critical), keeping the visual
-# vocabulary consistent across the dashboard.
+# = catastrophic). Each grade carries a numeric `rank` so Python can
+# sort rows by grade without re-deriving thresholds, plus its own CSS
+# class so the badge palette is decoupled from the severity color
+# scheme. The grade-* classes are defined in style.css and run from
+# green (A) through yellow (C) to red (F), an unambiguous traffic-
+# light gradient that doesn't depend on the operator remembering
+# which severity tier each grade maps to.
 def _score_to_grade(score: Optional[int]) -> dict:
-    """Translate a 0-100 risk score into an A-F letter grade and the
-    severity-palette color class to render it with. Returns a dict so
-    the template can render `{grade.letter}` inside a `<span class="sev
-    sev-{grade.cls}">` element. None / non-numeric scores fall back to
-    a dash with the info-tier class — represents "no data" rather
-    than "perfect score" so an empty cell isn't misread as an A."""
+    """Translate a 0-100 risk score into an A-F letter grade plus a
+    rank int (used for sorting) and the dedicated grade-tier CSS
+    class. None / non-numeric scores fall back to a dash with rank
+    -1 so they sort below every real grade in ascending order
+    (and above every real grade in descending order — the analyst
+    sees missing-data rows clearly rather than scattered through the
+    page)."""
     if score is None:
-        return {"letter": "—", "cls": "info"}
+        return {"letter": "—", "cls": "none", "rank": -1}
     try:
         s = int(score)
     except (TypeError, ValueError):
-        return {"letter": "—", "cls": "info"}
+        return {"letter": "—", "cls": "none", "rank": -1}
     if s >= 80:
-        return {"letter": "F", "cls": "critical"}
+        return {"letter": "F", "cls": "f", "rank": 0}
     if s >= 60:
-        return {"letter": "D", "cls": "high"}
+        return {"letter": "D", "cls": "d", "rank": 1}
     if s >= 40:
-        return {"letter": "C", "cls": "medium"}
+        return {"letter": "C", "cls": "c", "rank": 2}
     if s >= 20:
-        return {"letter": "B", "cls": "low"}
-    return {"letter": "A", "cls": "info"}
+        return {"letter": "B", "cls": "b", "rank": 3}
+    return {"letter": "A", "cls": "a", "rank": 4}
 
 
 def _live_risk_score(findings: list[dict]) -> int:
