@@ -191,9 +191,14 @@ def _run_tool_inner(tool: str, target: str, profile: str,
                "--flush-session", "--verbose", "1",
                "--scope", "subdomain", "-p", proxy_url,
                "-m", modules,
-               # Hard caps: per-attack 30 min, total scan 4 h.
+               # Hard caps: per-attack 30 min, total scan 12 h. The
+               # 12 h ceiling lets a thorough run on a large surface
+               # (deep auth-mode wapiti against a multi-section app)
+               # finish naturally; 4 h was clipping legitimate scans
+               # on bigger customer targets and surfacing as partial
+               # reports without a clear "we timed out" signal.
                "--max-attack-time", "1800",
-               "--max-scan-time", "14400"]
+               "--max-scan-time", "43200"]
         cmd += auth_args
     elif tool == "sqlmap":
         cmd = ["sqlmap", "-u", target, "--batch", "--random-agent",
