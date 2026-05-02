@@ -259,6 +259,118 @@ def _matches_range(version: str, vulnerable_range: str) -> Optional[bool]:
     return ok_all
 
 
+# OSV ecosystem aliases — `package.ecosystem` on the OSV side may be
+# 'npm', 'SEMVER' (npm-shaped semver from a non-tagged ecosystem),
+# 'PyPI', etc. We treat 'SEMVER' and 'npm' as interchangeable for
+# matching because almost every npm-derived OSV record uses one or the
+# other. Empty / unknown ecosystem on either side falls through to a
+# name-only match — better to derive an approximate range than to
+# return a probe verdict with no range data at all.
+_OSV_ECO_EQUIVALENTS: dict[str, set[str]] = {
+    "npm": {"npm", "semver"},
+    "semver": {"npm", "semver"},
+}
+
+
+def _derive_osv_range(vuln: dict, *, ecosystem: str, name: str,
+                       version: str) -> tuple[str, str]:
+    """Translate an OSV `vulnerability` record into the (fixed_version,
+    vulnerable_range) pair the rest of this probe uses.
+
+    OSV stores affected versions as a list of `affected[]` blocks, one
+    per ecosystem. Each block has a `ranges[]` list, and each range is
+    an event sequence of `{introduced, fixed, last_affected}`. We:
+
+      1. Pick the affected[] block whose ecosystem matches our finding
+         and whose name matches our component (some advisories cover
+         multiple package names — bootstrap, bootstrap-sass, twbs/
+         bootstrap, etc.).
+      2. Within that block, pick the range whose [introduced, fixed)
+         interval contains our `version` if we can decide; otherwise
+         take the first range as a best-effort.
+      3. Convert the events to a SemVer-style string the existing
+         `_matches_range` accepts: ">=A <B".
+
+    Returns ("", "") when nothing matches — the caller leaves the
+    args fields empty and the probe lands on the "couldn't determine
+    vulnerability from the recorded range" branch, same as before."""
+    if not isinstance(vuln, dict):
+        return "", ""
+    eco_lc = (ecosystem or "").strip().lower()
+    name_lc = (name or "").strip().lower()
+    eco_aliases = _OSV_ECO_EQUIVALENTS.get(eco_lc, {eco_lc})
+
+    candidates = []
+    for entry in vuln.get("affected") or []:
+        ent_pkg = entry.get("package") or {}
+        ent_eco = (ent_pkg.get("ecosystem") or "").strip().lower()
+        ent_name = (ent_pkg.get("name") or "").strip().lower()
+        # Prefer eco+name matches; accept name-only when no eco match
+        # has surfaced yet so a misaligned ecosystem field doesn't
+        # leave the probe with empty data.
+        if eco_aliases and ent_eco and ent_eco not in eco_aliases:
+            continue
+        if name_lc and ent_name and ent_name != name_lc:
+            continue
+        candidates.append(entry)
+
+    if not candidates:
+        return "", ""
+
+    # Two-pass selection: first walk every range looking for one whose
+    # [introduced, fixed) interval contains our version; only if no
+    # range matches do we fall back to the first range as a best-
+    # effort. This matters for advisories that publish separate
+    # ranges per branch (3.0.0..3.4.1 AND 4.0.0..4.3.1 for the same
+    # CVE). The earlier single-pass form fell into best-effort the
+    # moment the first candidate failed the version check, hiding the
+    # branch-correct range that came after it.
+    target_v = _split_semver(version) if version else None
+    parsed_ranges: list[tuple[str, str, str]] = []
+    for entry in candidates:
+        for rng in entry.get("ranges") or []:
+            introduced = ""
+            fixed = ""
+            last_affected = ""
+            for ev in rng.get("events") or []:
+                if "introduced" in ev and not introduced:
+                    introduced = (ev.get("introduced") or "").strip()
+                if "fixed" in ev and not fixed:
+                    fixed = (ev.get("fixed") or "").strip()
+                if "last_affected" in ev and not last_affected:
+                    last_affected = (ev.get("last_affected") or "").strip()
+            if introduced or fixed or last_affected:
+                parsed_ranges.append((introduced, fixed, last_affected))
+
+    if not parsed_ranges:
+        return "", ""
+
+    chosen_range: Optional[tuple[str, str, str]] = None
+    if target_v is not None:
+        for introduced, fixed, last_affected in parsed_ranges:
+            if not (introduced and fixed):
+                continue
+            lo = _split_semver(introduced) if introduced != "0" else ()
+            hi = _split_semver(fixed)
+            if (not lo or target_v >= lo) and target_v < hi:
+                chosen_range = (introduced, fixed, last_affected)
+                break
+    if chosen_range is None:
+        chosen_range = parsed_ranges[0]
+
+    introduced_c, fixed_c, last_affected_c = chosen_range
+    chosen_fixed = fixed_c
+
+    parts = []
+    if introduced_c and introduced_c != "0":
+        parts.append(f">={introduced_c}")
+    if fixed_c:
+        parts.append(f"<{fixed_c}")
+    elif last_affected_c:
+        parts.append(f"<={last_affected_c}")
+    return chosen_fixed, " ".join(parts)
+
+
 def _retire_signature_path() -> Optional[str]:
     overlay = Path("/data/sca/retire/jsrepository.json")
     baseline = Path("/opt/sca/retire/jsrepository.json")
@@ -311,6 +423,17 @@ def _retire_single_file(component: str, body: bytes) -> Optional[str]:
             pass
 
 
+# Cap on how much of the response body we run regex sniffers against.
+# The original 8 KB was sized for a single-library JS file where the
+# banner is always at the top. Real-world apps ship multi-library
+# bundles (jQuery + Bootstrap + Popper + ... in a single core.min.js
+# of ~700 KB) where any individual library's banner can live well
+# past the first kilobyte. 1 MiB covers every JS bundle we have seen
+# in practice and keeps the regex pass cheap (single-digit milliseconds
+# even on a fully matched sweep).
+_SNIFF_WINDOW_BYTES = 1 * 1024 * 1024
+
+
 def _detect_version(component: str, body_text: str,
                     body_bytes: bytes) -> tuple[Optional[str], str]:
     """Return (detected_version, method) for the named component.
@@ -319,33 +442,58 @@ def _detect_version(component: str, body_text: str,
 
     Strategy: per-library regex first (preferring the entry whose name
     matches `component`), then the generic banner sniff scoped to the
-    component name, then retire.js for fallback."""
-    head = body_text[:8192]
+    component name, then retire.js for fallback. When the named
+    component IS in our regex catalog and its dedicated regex misses,
+    we deliberately do NOT fall through to other libraries' regexes —
+    finding jQuery's banner in core.min.js does not tell us anything
+    about whether Bootstrap is in the same bundle, and reporting one
+    library's version under another library's name produced
+    misleading "phantom detection" verdicts in earlier builds."""
+    window = body_text[:_SNIFF_WINDOW_BYTES]
     component_lc = (component or "").strip().lower()
+    component_in_catalog = any(
+        name == component_lc for name, _ in _VERSION_SNIFFERS)
 
     # 1) Try the named component's specific regex first.
-    if component_lc:
+    if component_lc and component_in_catalog:
         for name, rx in _VERSION_SNIFFERS:
             if name == component_lc:
-                m = rx.search(head)
+                m = rx.search(window)
                 if m:
                     return m.group(1), f"regex:{name}"
+        # 1b) Catalog miss for a known component. Try the component-
+        # scoped generic banner before giving up — covers cases where
+        # the lib uses a non-canonical banner string the catalog regex
+        # missed.
+        for m in _GENERIC_BANNER_RE.finditer(window):
+            if component_lc in m.group(1).lower():
+                return m.group(2), "banner"
+        # We will not fall through to other libraries' regexes here.
+        # Return None so the caller can mark the verdict as "no proof"
+        # rather than misattributing another lib's banner. retire.js
+        # below is still given a chance — it does its own per-library
+        # signature match against the file content and won't mislabel.
+        detected = _retire_single_file(component_lc, body_bytes)
+        if detected:
+            return detected, "retire.js"
+        return None, "unknown"
 
-    # 2) Try every other regex (a content-fingerprint finding can use
-    # an alias like 'migrate' that maps to 'jquery-migrate'; the loop
-    # picks up that case).
+    # 2) Component NOT in the catalog (or no component name supplied).
+    # Try every regex — the SCA finding may have been raised against an
+    # alias the catalog doesn't enumerate (e.g. 'migrate' should match
+    # 'jquery-migrate'). First match wins.
     for name, rx in _VERSION_SNIFFERS:
-        m = rx.search(head)
+        m = rx.search(window)
         if m:
             return m.group(1), f"regex:{name}"
 
-    # 3) Generic banner sniff scoped to the component name.
+    # 3) Generic banner sniff scoped to the component name (if any).
     if component_lc:
-        for m in _GENERIC_BANNER_RE.finditer(head):
+        for m in _GENERIC_BANNER_RE.finditer(window):
             if component_lc in m.group(1).lower():
                 return m.group(2), "banner"
 
-    # 4) retire.js fallback for unknown libraries.
+    # 4) retire.js fallback for libraries we can't sniff via regex.
     detected = _retire_single_file(component_lc or "", body_bytes)
     if detected:
         return detected, "retire.js"
@@ -381,10 +529,27 @@ class SCAFindingValidate(Probe):
                                  "raw_data.cached_vuln.cve_id)")
 
     def _enrich_from_raw_data(self, args) -> None:
-        """Pull the package + cached_vuln fields out of the finding's
+        """Pull the package + vulnerability fields out of the finding's
         raw_data JSON when the caller didn't pass them as flags. The
         Challenge button always passes raw_data; CLI users can pass
-        flags manually."""
+        flags manually.
+
+        Three raw_data shapes are recognized:
+          * retire.js — `{package, cached_vuln: {fixed_version,
+            vulnerable_range, cve_id}}`. cached_vuln carries already-
+            normalised strings, so we copy them across verbatim.
+          * osv-scanner — `{ecosystem, package, vulnerability}` where
+            `vulnerability` is the raw OSV record. Range and fixed
+            version live inside `affected[].ranges[].events[]` and
+            need to be rederived per-ecosystem; the CVE id lives in
+            `aliases`.
+          * LLM-augmented — same envelope as retire.js since
+            sca.augment_with_llm normalises to that shape.
+
+        Order matters: we prefer cached_vuln when both are present
+        because it has already been normalised; the OSV branch only
+        runs when cached_vuln is absent or empty.
+        """
         raw_blob = ""
         extra = getattr(args, "extra", None) or {}
         if isinstance(extra, dict):
@@ -399,17 +564,49 @@ class SCAFindingValidate(Probe):
         if not isinstance(raw, dict):
             return
         pkg = raw.get("package") or {}
-        vuln = raw.get("cached_vuln") or {}
+        cached_vuln = raw.get("cached_vuln") or {}
         if not args.component:
             args.component = (pkg.get("name") or "").strip()
         if not args.claimed_version:
             args.claimed_version = (pkg.get("version") or "").strip()
-        if not args.fixed_version:
-            args.fixed_version = (vuln.get("fixed_version") or "").strip()
-        if not args.vulnerable_range:
-            args.vulnerable_range = (vuln.get("vulnerable_range") or "").strip()
+
+        # Branch 1 — retire.js / LLM-augmented findings carry a
+        # pre-normalised cached_vuln block. Use it as-is.
+        if cached_vuln:
+            if not args.fixed_version:
+                args.fixed_version = (
+                    cached_vuln.get("fixed_version") or "").strip()
+            if not args.vulnerable_range:
+                args.vulnerable_range = (
+                    cached_vuln.get("vulnerable_range") or "").strip()
+            if not args.cve_id:
+                args.cve_id = (cached_vuln.get("cve_id") or "").strip()
+            return
+
+        # Branch 2 — osv-scanner findings carry the raw OSV record at
+        # raw_data.vulnerability. Derive the fields we need from the
+        # affected[] entry whose ecosystem matches the finding.
+        osv_vuln = raw.get("vulnerability") or {}
+        if not osv_vuln:
+            return
+        eco = (raw.get("ecosystem") or pkg.get("ecosystem") or "").strip()
+        comp = (pkg.get("name") or args.component or "").strip()
+        version = (pkg.get("version") or args.claimed_version or "").strip()
+        fixed, vrange = _derive_osv_range(
+            osv_vuln, ecosystem=eco, name=comp, version=version)
+        if not args.fixed_version and fixed:
+            args.fixed_version = fixed
+        if not args.vulnerable_range and vrange:
+            args.vulnerable_range = vrange
         if not args.cve_id:
-            args.cve_id = (vuln.get("cve_id") or "").strip()
+            cve = ""
+            for alias in osv_vuln.get("aliases") or []:
+                if isinstance(alias, str) and alias.startswith("CVE-"):
+                    cve = alias
+                    break
+            # Fall back to the OSV id (GHSA-...) when no CVE alias is
+            # present — better than an empty string in the verdict.
+            args.cve_id = cve or (osv_vuln.get("id") or "").strip()
 
     def run(self, args, client: SafeClient) -> Verdict:
         self._enrich_from_raw_data(args)
