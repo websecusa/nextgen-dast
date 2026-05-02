@@ -871,8 +871,32 @@ def ctx(request: Request, **extra) -> dict:
         "csrf_token": (user or {}).get("csrf", ""),
         "brand": brand,
         "web": web_theme,
+        # User-selected UI theme. 'dark' (default) or 'light'. Read fresh
+        # from the users row on every render so a theme flip is visible
+        # immediately without a session re-issue. Falls back to 'dark'
+        # for unauthenticated visitors and any DB read error so the
+        # login page never flashes a theme variant.
+        "user_theme": _resolve_user_theme(user),
         **extra,
     }
+
+
+def _resolve_user_theme(user: Optional[dict]) -> str:
+    """Return 'dark' or 'light' for the supplied user. Reads the theme
+    column off the users row; returns 'dark' on any failure (no user,
+    DB error, missing column on a stale schema). Centralised so the
+    dark fallback rule lives in exactly one place."""
+    if not user:
+        return "dark"
+    try:
+        row = db.query_one(
+            "SELECT theme FROM users WHERE id=%s", (user.get("id"),))
+    except Exception:
+        return "dark"
+    if not row:
+        return "dark"
+    val = (row.get("theme") or "dark").strip().lower()
+    return val if val in ("dark", "light") else "dark"
 
 
 def _dashboard_data(trend_filter: Optional[str] = None,
@@ -1284,6 +1308,7 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
             r["risk_score"] = (live_per_aid.get(r["id"])
                                if r["id"] in live_per_aid
                                else _live_risk_score(fs))
+            r["grade"] = _score_to_grade(r["risk_score"])
 
     # Distinct fqdns drive the typeahead. Cap at 200 so the page weight
     # stays reasonable on installs with thousands of assessments.
@@ -2859,6 +2884,38 @@ _SEV_RISK_VALIDATED = {"critical": 15.0, "high": 8.0,
                        "medium": 3.0, "low": 1.0, "info": 0.0}
 _SEV_RISK_UNVALIDATED = {"critical": 8.0, "high": 4.0,
                          "medium": 1.5, "low": 0.5, "info": 0.0}
+
+
+# Letter-grade mapping for the dashboard / assessments tables. The
+# input is a 0-100 risk score where 0 = clean, 100 = max risk; the
+# output letter grade reads in the opposite direction (A = clean, F
+# = catastrophic). Colors deliberately reuse the severity palette so
+# a row's grade badge color matches the row's severity badge color
+# at the same tier (an A-rated row has the same green as info, an
+# F-rated row has the same red as critical), keeping the visual
+# vocabulary consistent across the dashboard.
+def _score_to_grade(score: Optional[int]) -> dict:
+    """Translate a 0-100 risk score into an A-F letter grade and the
+    severity-palette color class to render it with. Returns a dict so
+    the template can render `{grade.letter}` inside a `<span class="sev
+    sev-{grade.cls}">` element. None / non-numeric scores fall back to
+    a dash with the info-tier class — represents "no data" rather
+    than "perfect score" so an empty cell isn't misread as an A."""
+    if score is None:
+        return {"letter": "—", "cls": "info"}
+    try:
+        s = int(score)
+    except (TypeError, ValueError):
+        return {"letter": "—", "cls": "info"}
+    if s >= 80:
+        return {"letter": "F", "cls": "critical"}
+    if s >= 60:
+        return {"letter": "D", "cls": "high"}
+    if s >= 40:
+        return {"letter": "C", "cls": "medium"}
+    if s >= 20:
+        return {"letter": "B", "cls": "low"}
+    return {"letter": "A", "cls": "info"}
 
 
 def _live_risk_score(findings: list[dict]) -> int:
@@ -4980,6 +5037,45 @@ def admin_toolkit_page(request: Request):
 # enforcement (header parsing, IP whitelisting, last-used tracking) lives
 # in app/api.py; this is just the management surface so an admin can mint
 # and retire keys without dropping into SQL.
+
+# ---- Theme preference (Dark / Light) -------------------------------------
+# Each authenticated user owns a single theme string on their users row
+# ('dark' or 'light'). The toggle page is intentionally lightweight: a
+# small form with two options and a Save button. We POST rather than GET-
+# toggle so a CSRF token is required and the action shows up in the audit
+# log of any reverse proxy that logs only POST mutations.
+
+@app.get("/theme", response_class=HTMLResponse)
+def theme_page(request: Request, msg: str = ""):
+    """Render the theme preference page. Unauthenticated visitors are
+    redirected to login; the page itself only shows the current choice
+    + a save form."""
+    user = current_user(request)
+    if not user:
+        return redirect("/login?next=/theme")
+    return templates.TemplateResponse(
+        "theme.html",
+        ctx(request, msg=msg, current_theme=_resolve_user_theme(user)))
+
+
+@app.post("/theme")
+def theme_save(request: Request,
+                theme: str = Form("dark"),
+                csrf_token: str = Form("")):
+    """Persist the user's theme choice. Validates against the enum so a
+    tampered form value cannot smuggle SQL or non-enum text into the
+    column. CSRF-checked via the standard helper."""
+    user = current_user(request)
+    if not user:
+        return redirect("/login?next=/theme")
+    check_csrf(request, csrf_token)
+    choice = (theme or "").strip().lower()
+    if choice not in ("dark", "light"):
+        choice = "dark"
+    db.execute("UPDATE users SET theme=%s WHERE id=%s",
+                (choice, user.get("id")))
+    return redirect("/theme?msg=theme+saved")
+
 
 @app.get("/admin/api-tokens", response_class=HTMLResponse)
 def admin_api_tokens_page(request: Request, msg: str = "",

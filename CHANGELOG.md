@@ -248,6 +248,54 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Theme toggle (Dark / Light), per-user
+  persistence.** New `theme` column on the `users` table (enum
+  `dark`/`light`, default `dark`) plus a `/theme` page reachable
+  from a new sidebar entry below API tokens. Selection saves
+  server-side so it follows the analyst across browsers without
+  any client-side cookie. `body class="theme-{{ user_theme }}"` on
+  every render swaps the CSS variable palette so existing
+  components inherit the new colors automatically; severity colors
+  stay constant across themes for accessibility. Schema additions
+  are idempotent (the canonical CREATE block carries the column,
+  the legacy ALTER ADD COLUMN IF NOT EXISTS path covers older DBs,
+  and `verify_schema.py` learns about the new column for the
+  startup-time drift heal).
+
+- **2026-05-02** — **PDF narrative excludes triaged findings.**
+  Two pieces. (1) `consolidation._fetch_buckets` now filters out
+  rows with `status IN ('false_positive','fixed','accepted_risk')`
+  before handing the bucket list to the LLM that writes the
+  executive narrative. At first-run consolidation (immediately
+  after a scan) nothing is triaged, so this is a no-op; on a
+  re-run the LLM only sees what the analyst still considers
+  actionable. (2) `reports.generate()` now calls a new
+  `_refresh_narrative_if_stale()` helper before rendering the PDF
+  template. When any finding has been triaged since the cached
+  `exec_summary` was written, consolidation is re-run so the
+  narrative matches the live finding list the rest of the report
+  shows. Best-effort: skipped cleanly when no LLM endpoint is
+  configured or the API is unreachable, so PDFs still render with
+  the cached narrative in degraded paths.
+
+- **2026-05-02** — **Letter-grade column on Assessments tables.**
+  New `Grade` column on both the dashboard's Assessments card and
+  the standalone `/assessments` listing. A new `_score_to_grade()`
+  helper maps the live 0-100 risk score to A/B/C/D/F; the badge
+  reuses the existing severity-tier color palette so an A is the
+  same green as info, an F is the same red as critical. Mapping
+  is 0-19 → A, 20-39 → B, 40-59 → C, 60-79 → D, 80-100 → F. Each
+  row carries a `grade` dict (`{letter, cls}`) so the template
+  can render `<span class="sev sev-{{ grade.cls }}">{{ letter
+  }}</span>` without recomputing thresholds.
+
+- **2026-05-02** — **Main column fills viewport.** Removed the
+  hard `max-width: 1400px` cap on `main.main`. On wider displays
+  the dashboard now uses the full width between the 240-px sidebar
+  and the right edge instead of leaving dead space. The padding
+  rule and per-card internal layouts are unchanged so readable
+  line lengths inside cards stay consistent.
+
 - **2026-05-02** — **Filter-row layout: dropdowns left, search
   right.** Two pieces of feedback on the previous Assessments
   layout: (1) the status / page-size / Apply controls were

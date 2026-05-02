@@ -96,6 +96,13 @@ CREATE TABLE IF NOT EXISTS users (
   -- assessment-submit time: server clamps the submitted budget to
   -- min(system_default, user.max_spend_usd). Editable only by superadmin.
   max_spend_usd DECIMAL(8,2) NULL,
+  -- Per-user UI theme preference. 'dark' is the application default and
+  -- the only theme prior to 2026-05; 'light' was added in the 2026-05
+  -- dashboard pass. Stored on the user row so a saved choice follows
+  -- the analyst across browsers without a client-side cookie. Read by
+  -- the base template at every page render to set the body class that
+  -- swaps the CSS variable palette.
+  theme ENUM('dark','light') NOT NULL DEFAULT 'dark',
   disabled TINYINT(1) NOT NULL DEFAULT 0,
   last_login DATETIME,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -712,6 +719,12 @@ UPDATE users SET role='admin' WHERE is_admin = 1 AND role = 'readonly';
 ALTER TABLE users MODIFY COLUMN role
   ENUM('superadmin','admin','readonly') NOT NULL DEFAULT 'readonly';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_spend_usd DECIMAL(8,2) NULL;
+-- 2026-05-02: per-user UI theme preference. Default 'dark' matches the
+-- pre-existing visual identity of the app; the light palette was added
+-- alongside the dashboard overhaul. Existing users keep dark until they
+-- flip the toggle. Idempotent on reapply.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS theme
+  ENUM('dark','light') NOT NULL DEFAULT 'dark';
 
 ALTER TABLE assessments ADD COLUMN IF NOT EXISTS llm_debug
   TINYINT(1) NOT NULL DEFAULT 0;
