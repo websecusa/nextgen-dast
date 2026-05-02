@@ -238,6 +238,72 @@ def m_2026_05_01_promote_existing_admins_to_superadmin() -> str:
 # alphabetical ordering matches chronological ordering. Ids never change
 # once shipped — renaming would re-run the migration on databases that
 # already applied the original.
+def m_2026_05_02_remap_ai_findings_to_owasp_top10() -> str:
+    """Backfill `owasp_category` for existing enhanced_ai_testing
+    findings so they land in the right OWASP Top 10 bucket for the
+    PDF cover scorecard, the heat map, and the per-category demerit
+    math. Earlier enhanced_ai builds wrote the scenario name
+    ('bola_idor', 'rate_limit_evasion', etc.) directly into
+    `owasp_category`; new code writes the OWASP code at insert time
+    (see enhanced_ai._scenario_to_owasp), but historical rows still
+    carry the scenario label and won't be re-scanned.
+
+    The scenario label is preserved in `raw_data.llm_category` so we
+    can read it back even when `owasp_category` already got
+    overwritten (it shouldn't have, but the redundancy makes this
+    migration idempotent without a separate "did we run yet" guard).
+
+    Skips rows that already carry an OWASP code (starts with 'A0' or
+    'A10') so re-running the migration is a no-op even if the DB has
+    already been touched by a partial backfill. New databases with
+    no enhanced_ai findings see this migration run as a no-op.
+    """
+    import enhanced_ai as ea_mod  # local import: avoid cycles at module load
+
+    rows = db.query_all(
+        "SELECT id, owasp_category, raw_data FROM findings "
+        "WHERE source_tool = 'enhanced_ai_testing'")
+    if not rows:
+        return "no enhanced_ai_testing findings to remap"
+
+    remapped = 0
+    skipped_already_ok = 0
+    skipped_unknown = 0
+    for row in rows:
+        current = (row.get("owasp_category") or "").strip()
+        # Already an OWASP Top 10 code (A01..A10 prefix). Leave alone.
+        if current.startswith("A0") or current.startswith("A10"):
+            skipped_already_ok += 1
+            continue
+
+        # Recover the scenario label. Prefer raw_data.llm_category (the
+        # canonical record); fall back to whatever's in owasp_category
+        # on databases where llm_category wasn't yet recorded.
+        scenario = current
+        rd = row.get("raw_data")
+        if isinstance(rd, str) and rd:
+            try:
+                rd_obj = json.loads(rd)
+                lc = rd_obj.get("llm_category") if isinstance(rd_obj, dict) else None
+                if isinstance(lc, str) and lc.strip():
+                    scenario = lc.strip()
+            except Exception:
+                pass
+
+        owasp_code = ea_mod._scenario_to_owasp(scenario)
+        if not owasp_code:
+            skipped_unknown += 1
+            continue
+        db.execute(
+            "UPDATE findings SET owasp_category = %s WHERE id = %s",
+            (owasp_code[:64], row["id"]))
+        remapped += 1
+
+    return (f"remapped {remapped} enhanced_ai finding(s); "
+            f"skipped {skipped_already_ok} already-OWASP-coded, "
+            f"{skipped_unknown} unrecognized scenario(s)")
+
+
 MIGRATIONS: list = [
     ("2026_05_01_enrichment_orphan_cleanup",
      m_2026_05_01_enrichment_orphan_cleanup),
@@ -245,6 +311,8 @@ MIGRATIONS: list = [
      m_2026_05_01_reset_stale_traversal_validations),
     ("2026_05_01_promote_existing_admins_to_superadmin",
      m_2026_05_01_promote_existing_admins_to_superadmin),
+    ("2026_05_02_remap_ai_findings_to_owasp_top10",
+     m_2026_05_02_remap_ai_findings_to_owasp_top10),
 ]
 
 
