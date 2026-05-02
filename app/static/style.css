@@ -825,21 +825,30 @@ footer {
 .assessments-filter.typeahead {
   flex-wrap: nowrap;
   gap: .5em;
-  /* Push the search wrap to the right so the dropdowns + Apply read
-     left-to-right ahead of the long FQDN field. Margin-left:auto on
-     the .typeahead-wrap absorbs whatever slack the row has, keeping
-     the controls visually grouped on the left and the search field
-     on the right. */
+  /* Children flow naturally left-to-right: status dropdown,
+     size dropdown, search wrap, Apply button, clear link. No
+     margin tricks needed; the search wrap takes the slack
+     between the dropdowns and Apply via flex-grow below. */
 }
 .assessments-filter .typeahead-wrap {
-  margin-left: auto;
+  /* Let the search wrap absorb spare horizontal space so the
+     row stays neat on wider viewports. The input itself caps at
+     its declared width, but the wrapper stretches and the input
+     can grow with it via the rule below. */
+  flex: 1 1 auto;
+  min-width: 220px;
 }
 .assessments-filter .typeahead-input {
   /* Wider than the trend-chart filter input because customer FQDNs
      in the assessments table are routinely 30+ characters and were
-     getting truncated visually inside a 200-px field. */
-  width: 320px;
-  max-width: 100%;
+     getting truncated visually inside a 200-px field. The input
+     fills its wrapper (which grows via flex above) up to a 480 px
+     ceiling so the row stays balanced rather than letting the
+     search field eat half the page on a wide viewport. */
+  width: 100%;
+  min-width: 240px;
+  max-width: 480px;
+  box-sizing: border-box;
 }
 /* select.ghost wasn't styled before -- the existing rule only covered
    button.ghost / .button.ghost. Match the visual weight (border,

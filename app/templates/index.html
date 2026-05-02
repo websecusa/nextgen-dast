@@ -311,17 +311,10 @@
         {% endfor %}
       </select>
 
-      <button type="submit" class="ghost typeahead-apply">Apply</button>
-      {% if rs.q or rs.status %}
-        <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}&a_size={{ rs.size }}"
-           class="muted small">clear</a>
-      {% endif %}
-
-      {# Search input is wrapped in its own positioning context so the
+      {# Search input wrapped in its own positioning context so the
          typeahead suggestion list anchors directly under the input
-         instead of the form's left edge. The input sits last in the
-         row so the dropdowns + Apply read left-to-right ahead of the
-         long FQDN field. #}
+         (not the form's left edge). Final left-to-right order is:
+         status, size, search, Apply, clear -- read like a sentence. #}
       <span class="typeahead-wrap">
         <input type="search" name="a_q"
                class="typeahead-input"
@@ -331,6 +324,12 @@
                spellcheck="false">
         <ul class="typeahead-suggest" role="listbox" hidden></ul>
       </span>
+
+      <button type="submit" class="ghost typeahead-apply">Apply</button>
+      {% if rs.q or rs.status %}
+        <a href="?trend_days={{ trend.window_days }}{% if trend.filter %}&trend={{ trend.filter | urlencode }}{% endif %}&a_size={{ rs.size }}"
+           class="muted small">clear</a>
+      {% endif %}
     </form>
   </div>
 
@@ -419,5 +418,5 @@
 
 {# Custom typeahead + chart hover tooltip. Both are no-frameworks vanilla
    JS; cache-busted alongside style.css via the same query string. #}
-<script src="{{ base }}/static/dashboard-trend.js?b=20260428a"></script>
+<script src="{{ base }}/static/dashboard-trend.js?b=20260502c"></script>
 {% endblock %}
