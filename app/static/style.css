@@ -753,9 +753,18 @@ footer {
 .trend-tooltip .tt-n { font-variant-numeric: tabular-nums; font-weight: 600; }
 
 /* ---- Custom typeahead (used by trend filter and assessments table) -- */
+/* flex-direction: row is intentional and load-bearing — there is a
+   global `form { display: flex; flex-direction: column; }` rule
+   higher up in this file (~line 313). Without an explicit row
+   override here, `<form class="typeahead">` would inherit the
+   column direction from the global rule and stack the search
+   input, dropdowns, and Apply button vertically. The global rule
+   exists because most forms in this app are vertical config
+   panels; the typeahead filter is the exception. */
 .typeahead {
   position: relative;
-  display: flex; gap: .4em; align-items: center; flex-wrap: wrap;
+  display: flex; flex-direction: row;
+  gap: .4em; align-items: center; flex-wrap: wrap;
 }
 .typeahead-input {
   width: 240px; font-size: .85em;
