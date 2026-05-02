@@ -122,6 +122,62 @@ _GENERIC_BANNER_RE = re.compile(
 )
 
 
+# Pulled from any flavor of <script src="..."> the page exposes. We use
+# a permissive expression here because we are not parsing a DOM, just
+# salvaging URLs. The match captures the src value irrespective of
+# quote style (single, double, none) and tolerates extra attributes.
+_SCRIPT_SRC_RE = re.compile(
+    r"""<script\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))""",
+    re.IGNORECASE,
+)
+
+# Cap on how many candidate scripts we follow when an SCA finding
+# pointed at a page URL instead of a JS asset. Five keeps the total
+# request count (1 page fetch + up to 5 scripts) inside the manifest's
+# request_budget_max=6, so the SafeClient cap kicks in cleanly.
+_MAX_SCRIPT_FOLLOWS = 5
+
+
+def _looks_like_html(body_text: str) -> bool:
+    """Cheap heuristic — true if the body opens with a markup byte
+    sequence we'd expect from a browser-rendered page. We don't sniff
+    Content-Type because some servers mis-set it; the leading bytes
+    are more reliable for the "is this an HTML wrapper?" decision the
+    fan-out logic needs."""
+    head = body_text[:2048].lstrip().lower()
+    if not head:
+        return False
+    return (head.startswith("<!doctype html")
+            or head.startswith("<html")
+            or "<head" in head[:512]
+            or "<body" in head[:512])
+
+
+def _extract_script_srcs(html: str, base_url: str) -> list[str]:
+    """Pull script src URLs out of an HTML page and resolve each
+    relative URL against `base_url`. Filters out empty values, data:
+    and javascript: pseudo-protocols, and de-duplicates while keeping
+    document order. Caps the result at _MAX_SCRIPT_FOLLOWS so the caller
+    cannot blow the request budget."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _SCRIPT_SRC_RE.finditer(html):
+        src = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if not src:
+            continue
+        low = src.lower()
+        if low.startswith(("data:", "javascript:", "blob:", "about:")):
+            continue
+        absolute = urllib.parse.urljoin(base_url, src)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        out.append(absolute)
+        if len(out) >= _MAX_SCRIPT_FOLLOWS:
+            break
+    return out
+
+
 def _split_semver(v: str) -> tuple:
     """Best-effort semver tuple for ordered comparison. Strips a leading
     'v', splits on '.' and '-', coerces numeric parts to int. Returns a
@@ -409,12 +465,56 @@ class SCAFindingValidate(Probe):
         sha_prefix = hashlib.sha256(body_bytes).hexdigest()[:16]
 
         detected, method = _detect_version(component, body_text, body_bytes)
+        # Track which URL produced the version match. For a direct JS
+        # finding this is just the input URL; for an HTML fan-out it's
+        # the specific script we sniffed. The verdict surfaces this so
+        # an analyst reviewing the audit log can see exactly what we
+        # validated against.
+        detected_url = url
+        scripts_checked: list[str] = []
+
+        # When the original SCA finding pointed at the bare site root
+        # (legacy data — fingerprint-derived findings used to record the
+        # target hostname instead of the actual JS asset), the response
+        # body is HTML and we have nothing to sniff. Walk the page's
+        # <script src=...> attributes and try each candidate within the
+        # client's remaining request budget. This recovers validation
+        # for findings produced before the upstream sca_runner fix.
+        if not detected and _looks_like_html(body_text):
+            for js_url in _extract_script_srcs(body_text, url):
+                scripts_checked.append(js_url)
+                try:
+                    jr = client.get(js_url)
+                except Exception:
+                    # Budget exhausted or unreachable script — try the
+                    # next candidate; SafeClient will raise consistently
+                    # once the cap is hit, so keep the loop bounded.
+                    break
+                jstatus = getattr(jr, "status", None)
+                if jstatus is None:
+                    jstatus = getattr(jr, "status_code", 0)
+                if jstatus >= 400:
+                    continue
+                jbody = getattr(jr, "body", None) or getattr(
+                    jr, "content", b"") or b""
+                jtext = jbody.decode("utf-8", "replace")
+                cand, cand_method = _detect_version(
+                    component, jtext, jbody)
+                if cand:
+                    detected = cand
+                    method = cand_method
+                    detected_url = js_url
+                    body_bytes = jbody
+                    sha_prefix = hashlib.sha256(jbody).hexdigest()[:16]
+                    break
 
         # Build the evidence block first — it's identical across the
         # validated/not-validated branches, just with different summary
         # text wrapping it.
         evidence = {
             "url": url,
+            "detected_url": detected_url,
+            "scripts_checked": scripts_checked,
             "component": component,
             "cve_id": cve_id,
             "claimed_version": claimed or None,
@@ -427,16 +527,35 @@ class SCAFindingValidate(Probe):
         }
 
         if not detected:
-            # We have the file, we just couldn't pull a version out of
-            # it. Don't claim "patched" — the original SCA detector had
-            # other signals (file hash, AST shape) we can't replicate
-            # with a regex. Mark as inconclusive so the analyst knows
-            # to look more closely.
+            # We fetched the cited URL (and any linked scripts) but found
+            # no version banner. We don't claim "patched" — the upstream
+            # SCA detector relied on signals (hash, AST shape) we can't
+            # reproduce here. We DO call the result a "no proof" verdict
+            # rather than asserting the finding stands: an open finding
+            # that has been validated and yielded no evidence should look
+            # different in the UI from one that simply has not been
+            # checked yet. confidence=0.5 (was 0.4) bumps the verdict out
+            # of the "obvious manual review" band into "the analyst has
+            # to make a call" territory; status remains 'open' but the
+            # validation_notes make the no-proof state explicit.
+            checked_note = ""
+            if scripts_checked:
+                checked_note = (
+                    f" Followed {len(scripts_checked)} <script src> "
+                    f"URLs from the page; none carried a recognizable "
+                    f"'{component}' banner.")
+            elif _looks_like_html(body_text):
+                checked_note = (
+                    f" The response was HTML, not a JS asset, and "
+                    "exposed no script references the probe could "
+                    "fan out to.")
             return Verdict(
-                ok=True, validated=None, confidence=0.4,
-                summary=(f"fetched {url} but could not detect a "
-                         f"version banner for '{component}'. Original "
-                         f"SCA finding stands; manual review needed."),
+                ok=True, validated=None, confidence=0.5,
+                summary=(f"no validation evidence: fetched {url} but "
+                         f"could not detect a version banner for "
+                         f"'{component}'.{checked_note} Finding has "
+                         "no on-target proof — review whether to keep "
+                         "it open or close as unverifiable."),
                 evidence=evidence,
             )
 

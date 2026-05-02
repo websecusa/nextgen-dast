@@ -899,8 +899,15 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
         # length and assume max output. Better to over-estimate and skip
         # a call than to overshoot the budget.
         rendered_user = render_user_prompt(row["user_template"], telemetry)
-        sys_prompt = (row["system_prompt"] or "").format_map(
-            _SafeDict({"fqdn": telemetry.get("fqdn", "")}))
+        # System prompts only ever take a single substitution ({fqdn}). We
+        # used to render via str.format_map, but the FOOTER carries a JSON
+        # example with literal "{" / "}" that format_map mistakes for format
+        # fields — first one it hits ("severity") raises ValueError and the
+        # whole scenario crashes. Plain str.replace sidesteps the format
+        # mini-language entirely so braces inside JSON examples (or any
+        # operator-pasted content) stay inert.
+        sys_prompt = (row["system_prompt"] or "").replace(
+            "{fqdn}", telemetry.get("fqdn", ""))
         approx_in = (len(sys_prompt) + len(rendered_user)) // 4
         approx_cost = llm_mod.cost(approx_in, WEAKNESS_MAX_OUTPUT_TOKENS,
                                      endpoint.get("model") or "")
