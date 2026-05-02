@@ -2474,35 +2474,41 @@ def assess_start(
 
 
 @app.get("/assessments", response_class=HTMLResponse)
-def assessments_list(request: Request):
-    rows: list[dict] = []
-    if db.healthy():
-        rows = db.query("SELECT id, fqdn, application_id, profile, llm_tier, "
-                        "status, total_findings, created_at, finished_at "
-                        "FROM assessments ORDER BY id DESC LIMIT 100")
-        # Decorate each row with the LIVE open-findings count and risk
-        # score (post-triage). assessments.total_findings is the value
-        # the orchestrator wrote at scan time and never re-derives, so
-        # it goes stale the moment an analyst marks anything as
-        # false_positive / fixed / accepted_risk. One query pulls the
-        # findings we need across every row in the page.
-        if rows:
-            ids = [r["id"] for r in rows]
-            placeholders = ",".join(["%s"] * len(ids))
-            findings_by_aid: dict[int, list[dict]] = {aid: [] for aid in ids}
-            for f in db.query(
-                    f"SELECT assessment_id, severity, status, validation_status "
-                    f"FROM findings WHERE assessment_id IN ({placeholders})",
-                    ids):
-                findings_by_aid.setdefault(f["assessment_id"], []).append(f)
-            for r in rows:
-                fs = findings_by_aid.get(r["id"], [])
-                r["open_findings"] = sum(
-                    1 for f in fs
-                    if (f.get("status") or "open") not in EXCLUDED_FROM_SCORE)
-                r["risk_score"] = _live_risk_score(fs)
-    return templates.TemplateResponse("assessments.html",
-                                      ctx(request, assessments=rows))
+def assessments_list(request: Request,
+                     q: str = "", status: str = "",
+                     size: int = 25, page: int = 1,
+                     sort: str = "id", dir: str = "desc"):
+    """Standalone Assessments listing. Same filter / sort / pagination
+    shape as the dashboard's Assessments card; the underlying helper
+    is shared so any change to the SQL or sort allowlist applies
+    uniformly.
+
+    URL params here are NOT prefixed with `a_` because this page has
+    a single form (the dashboard uses `a_*` because it shares the URL
+    with the trend chart's form)."""
+    table = _assessments_table_data(
+        q=q, status=status, size=size, page=page,
+        sort=sort, direction=dir,
+        live_per_aid={})
+    page_size = max(1, min(100, int(size or 25)))
+    page_num = max(1, int(page or 1))
+    total_pages = max(1, (table["total"] + page_size - 1) // page_size)
+    state = {
+        "q": q, "status": status,
+        "size": page_size, "page": min(page_num, total_pages),
+        "sort": sort if sort in _ASSESSMENTS_SORT_COLUMNS else "id",
+        "dir": "asc" if (dir or "").lower() == "asc" else "desc",
+        "total_pages": total_pages,
+        "size_options": [25, 50, 100],
+    }
+    return templates.TemplateResponse(
+        "assessments.html",
+        ctx(request,
+            assessments=table["rows"],
+            assessments_total=table["total"],
+            status_options=table["status_options"],
+            fqdn_suggest=table["fqdn_suggest"],
+            state=state))
 
 
 # ---------------------------------------------------------------------------
