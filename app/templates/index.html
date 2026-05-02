@@ -8,9 +8,9 @@
        targets / assessments / last-scan totals)
     3. Findings trend (30-day stacked-area sparkline, drawn inline as SVG
        so we don't ship a charting library)
-    4. Two-column row: Target Security (top targets by score) + Unresolved
-       findings by age (severity matrix)
-    5. Recent activity table
+    4. Unresolved findings by age (severity matrix)
+    5. Resolved findings by age (severity matrix)
+    6. Recent activity table
 
   All data is gathered server-side in server._dashboard_data().
 #}
@@ -173,80 +173,36 @@
   {% endif %}
 </section>
 
-{# ---- Two-column row: targets + age matrix ------------------------ #}
-<div class="grid">
-  <section>
-    <div class="card-header">
-      <h2>Target security</h2>
-      <a href="{{ base }}/assessments" class="muted small">View all →</a>
-    </div>
-    {% if targets %}
-      <div style="display:flex; flex-direction:column; gap:.7em">
-      {% for t in targets %}
-        <a href="{{ base }}/assessment/{{ t.id }}"
-           style="display:flex; align-items:center; justify-content:space-between;
-                  padding:.7em .9em; background:var(--panel-2);
-                  border:1px solid var(--border); border-radius:10px;
-                  color:var(--text); text-decoration:none">
-          <div style="min-width:0; flex:1; padding-right:1em">
-            <div style="font-weight:600; color:var(--text)">{{ t.fqdn }}</div>
-            <div class="muted small" style="margin-top:.15em">
-              {% if t.application_id %}<code>{{ t.application_id }}</code> · {% endif %}
-              {{ t.total_findings or 0 }} findings
-              {% if t.finished_at %} · {{ t.finished_at.strftime('%Y-%m-%d') if t.finished_at.strftime else t.finished_at }}{% endif %}
-            </div>
-          </div>
-          <div style="text-align:right">
-            {% if t.risk_score is not none %}
-              {% set sev = 'critical' if t.risk_score >= 80 else ('high' if t.risk_score >= 60 else ('medium' if t.risk_score >= 40 else ('low' if t.risk_score >= 20 else 'info'))) %}
-              <span class="sev sev-{{ sev }}"
-                    style="font-size:1.2em">{{ t.risk_score }}</span>
-              <div class="muted small">/ 100</div>
-            {% else %}
-              <span class="muted">—</span>
-            {% endif %}
-          </div>
-        </a>
-      {% endfor %}
-      </div>
-    {% else %}
-      <p class="muted">
-        No assessments yet.
-        <a href="{{ base }}/assess">Run your first assessment →</a>
-      </p>
-    {% endif %}
-  </section>
-
-  <section>
-    <div class="card-header">
-      <h2>Unresolved findings by age</h2>
-    </div>
-    <table>
-      <thead>
+{# ---- Unresolved findings by age (severity matrix) ----------------- #}
+<section>
+  <div class="card-header">
+    <h2>Unresolved findings by age</h2>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Age</th>
+        {% for sev in ['critical','high','medium','low','info'] %}
+          <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for label in ['>30 days', '>60 days', '>90 days'] %}
         <tr>
-          <th>Age</th>
+          <td>{{ label }}</td>
           {% for sev in ['critical','high','medium','low','info'] %}
-            <th><span class="sev-dot sev-{{ sev }}"></span>{{ sev|capitalize }}</th>
+            <td>
+              {% if ages[label][sev] %}
+                <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
           {% endfor %}
         </tr>
-      </thead>
-      <tbody>
-        {% for label in ['>30 days', '>60 days', '>90 days'] %}
-          <tr>
-            <td>{{ label }}</td>
-            {% for sev in ['critical','high','medium','low','info'] %}
-              <td>
-                {% if ages[label][sev] %}
-                  <span class="sev sev-{{ sev }}">{{ ages[label][sev] }}</span>
-                {% else %}<span class="muted">—</span>{% endif %}
-              </td>
-            {% endfor %}
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </section>
-</div>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 
 {# Resolved counterpart to the Unresolved-by-age card. Counts findings
    marked as fixed or accepted_risk, bucketed by the original

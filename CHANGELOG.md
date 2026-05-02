@@ -248,6 +248,18 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **Removed Target Security card from the
+  dashboard.** The two-column row at the bottom of the index page
+  used to pair "Target Security" (top six targets by live risk
+  score) with "Unresolved findings by age". The targets card
+  duplicated information already accessible from the assessments
+  list and KPI strip; removing it lets the age matrix run full
+  width and matches the layout of the Resolved-by-age card right
+  below it. Dropped: the `target_rows` query and `targets` key in
+  `_dashboard_data`, the surrounding `<div class="grid">` wrapper,
+  and the corresponding section in `templates/index.html`. The
+  layout comment at the top of `index.html` was updated to match.
+
 - **2026-05-02** — **Wapiti `--max-scan-time` raised from 4 h to
   12 h.** The previous 14400-second ceiling was clipping deep
   authenticated runs against larger customer surfaces, which then
