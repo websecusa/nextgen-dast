@@ -1100,26 +1100,6 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
         if v and v not in seen:
             seen.add(v); filter_targets.append(v)
 
-    # Top 6 targets ranked by their most recent live risk score (the
-    # post-triage value, computed above). a.risk_score is preserved on
-    # the row for PDF report regeneration but no longer drives the
-    # dashboard ordering or the displayed number.
-    target_rows = db.query(
-        "SELECT a.fqdn, a.application_id, a.id, "
-        "       a.total_findings, a.finished_at "
-        "FROM assessments a "
-        "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
-        "      WHERE status='done' GROUP BY fqdn) t "
-        "  ON a.id = t.mid")
-    for t in target_rows:
-        t["risk_score"] = live_per_aid.get(t["id"])
-    targets = sorted(
-        target_rows,
-        key=lambda t: (-(t["risk_score"] or 0),
-                       -(t["finished_at"].timestamp() if t.get("finished_at")
-                         and hasattr(t["finished_at"], "timestamp") else 0)),
-    )[:6]
-
     # Unresolved findings broken down by age bucket. Triaged rows
     # (false-positive, resolved, archived) are excluded so the matrix
     # matches the actionable list.
@@ -1201,7 +1181,6 @@ def _dashboard_data(trend_filter: Optional[str] = None) -> dict:
                   "filter": trend_filter,
                   "filter_targets": filter_targets,
                   "filter_matched": filter_matched},
-        "targets": targets,
         "ages": ages,
         "resolved_ages": resolved_ages,
         "recent": recent,
