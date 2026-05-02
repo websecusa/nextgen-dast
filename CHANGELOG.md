@@ -248,6 +248,41 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **`sca_finding_validate` quality pass — three
+  bugs surfaced while re-validating the assessment 31 SCA findings.**
+  (1) **Phantom detection**: when the named component (e.g.
+  bootstrap) was in the regex catalog and its dedicated regex did
+  not match the file, `_detect_version` fell through to "try every
+  other regex" and returned the first hit — typically jQuery's
+  banner from the same multi-library bundle, mislabeled as the
+  named component's version. The verdict surfaced as e.g. "detected
+  bootstrap 3.7.1" which does not exist as a release. Step 2 is now
+  gated: it runs only when the component name is NOT in the catalog
+  (the original "alias resolution" use case); for catalog-known
+  components a regex miss now falls through to the component-scoped
+  generic banner, then retire.js, and finally returns None so the
+  verdict cleanly flags "no validation evidence". (2) **Head window
+  too small for bundle files**: the previous 8 KB cap covered
+  single-library JS files but missed Bootstrap's banner buried 600+
+  KB into a real-world `core.min.js`. Raised to 1 MiB; the regex
+  pass stays cheap on full-file scans. (3) **OSV vulnerability data
+  never extracted**: `_enrich_from_raw_data` only read
+  `raw_data.cached_vuln`, the retire.js / LLM-augmented shape. OSV-
+  scanner stores under `raw_data.vulnerability` with a structured
+  affected/ranges/events tree, so every OSV-derived finding entered
+  the probe with empty `fixed_version` / `vulnerable_range` /
+  `cve_id` and the comparator returned "could not determine". Added
+  a `_derive_osv_range()` helper that walks affected[] entries
+  (matching by ecosystem + name, with npm/SEMVER aliasing), picks
+  the range whose [introduced, fixed) interval contains the
+  detected version (two-pass: targeted match wins over best-effort
+  first range), and emits a SemVer string the existing
+  `_matches_range` accepts. CVE id resolves to the first `CVE-…`
+  alias, falling back to the OSV / GHSA id. Net effect: OSV
+  findings now get real range / fixed / CVE data and produce
+  validated / false-positive verdicts where they used to land at
+  inconclusive.
+
 - **2026-05-02** — **`fire_when` short-circuit parser bug** — the
   expression evaluator at `evaluate_fire_when()` combined parsed
   operands with Python's native `and` / `or`, which short-circuit.
