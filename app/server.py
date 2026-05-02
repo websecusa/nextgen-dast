@@ -6420,7 +6420,8 @@ async def finding_run_probe(request: Request, fid: int):
     # skipped to avoid a tautological match.
     raw = {}
     f_full = db.query_one(
-        "SELECT raw_data, evidence_url FROM findings WHERE id=%s", (fid,))
+        "SELECT raw_data, evidence_url, source_tool, status, "
+        "validation_status FROM findings WHERE id=%s", (fid,))
     if f_full and f_full.get("raw_data"):
         try:
             raw = json.loads(f_full["raw_data"])
@@ -6433,6 +6434,80 @@ async def finding_run_probe(request: Request, fid: int):
             and "://" not in evidence_str):
         # Looks like a body / banner / envelope quote, not a URL line.
         highlight = evidence_str[:200]
+
+    # Deterministic auto-FP. When the live probe matches the host's
+    # echo signature AND the URL we just probed is one the finding
+    # itself cited (either evidence_url or a URL parsed out of
+    # raw_data.llm_evidence), the path-existence claim that motivated
+    # the finding is refuted by the host's own response: every path on
+    # this vhost returns the same body. Auto-flip the finding to
+    # false_positive — same audit shape as the analyst-override path,
+    # tagged so a reviewer can tell it came from a probe rather than a
+    # manual decision. We deliberately DO NOT auto-flip on echo_match
+    # alone if the probed URL doesn't match the finding's URL: a
+    # finding about XSS at /search?q= cited /admin as an unrelated
+    # example would not be refuted by an echo on /admin.
+    auto_flipped_fp = False
+    if echo_match and f_full:
+        candidate_urls = []
+        if (f_full.get("evidence_url") or "").strip():
+            candidate_urls.append(f_full["evidence_url"].strip())
+        # raw_data.llm_evidence often carries a "<count>x GET <url>"
+        # form. Pick the first URL out of it.
+        if evidence_str and "://" in evidence_str:
+            import re as _re
+            m = _re.search(r"https?://[^\s'\"`)<>|]+", evidence_str)
+            if m:
+                candidate_urls.append(m.group(0))
+        # URL-equality is path-loose: if the probed URL's host+path
+        # matches any candidate URL's host+path (ignoring query
+        # string), we count it as a self-probe. Avoids missing the
+        # match when the curl in the reproduction block adds a
+        # ?refresh=0 the original finding didn't carry.
+        from urllib.parse import urlsplit as _split
+        probed = _split(url)
+        probed_key = f"{probed.scheme}://{probed.hostname}{probed.path}"
+        for cu in candidate_urls:
+            try:
+                cs = _split(cu)
+                if (probed.hostname == cs.hostname
+                        and (probed.path or "/") == (cs.path or "/")):
+                    auto_flipped_fp = True
+                    break
+            except Exception:
+                continue
+        # Only flip if the finding isn't already in a settled state.
+        # Idempotent on repeat probes; doesn't clobber an analyst's
+        # explicit "Re-open" / "Mark validated" decision.
+        if (auto_flipped_fp
+                and (f_full.get("status") or "open") == "open"):
+            audit = {
+                "kind": "live-probe-echo-match",
+                "user": (current_user(request) or {}).get("username"),
+                "reason": ("Live probe at " + url + " returned the host's "
+                            "echo signature (status="
+                            + str(status) + ", body matches cached "
+                            "echo body hash). Path-existence claim is "
+                            "refuted by the host's path-agnostic "
+                            "response."),
+                "echo_signature": (
+                    {"status": sig.get("status"),
+                      "size": sig.get("size")}
+                    if sig else None),
+                "probed_url": url,
+                "set_at": datetime.now(timezone.utc).isoformat(),
+            }
+            db.execute(
+                "UPDATE findings SET status='false_positive', "
+                "validation_status='false_positive', "
+                "validation_probe='live_probe_echo_match', "
+                "validation_run_at=NOW(), "
+                "validation_evidence=%s WHERE id=%s",
+                (json.dumps(audit, default=str)[:65000], fid))
+        else:
+            # We matched the URL but the finding was already settled;
+            # surface that to the UI but don't write the row.
+            auto_flipped_fp = False
 
     return JSONResponse({
         "ok": True,
@@ -6448,6 +6523,7 @@ async def finding_run_probe(request: Request, fid: int):
             if sig else None),
         "highlight": highlight,
         "scope": {"fqdn": fqdn, "method": method, "url": url},
+        "auto_flipped_fp": auto_flipped_fp,
     })
 
 
