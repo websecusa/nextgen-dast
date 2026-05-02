@@ -678,7 +678,16 @@ def evaluate_fire_when(expr: str, summary: dict) -> bool:
             nxt = peek()
             if nxt and nxt == ("BOOLOP", "AND"):
                 consume()
-                v = bool(v) and bool(parse_atom())
+                # Right side MUST be parsed (and its tokens consumed)
+                # before we collapse to a boolean. The earlier form
+                # `v = bool(v) and bool(parse_atom())` short-circuited
+                # in Python when v was False, leaving the right side's
+                # tokens un-consumed, which then surfaced upstream as
+                # "trailing tokens after expression". Splitting the
+                # parse from the combine forces every operand to be
+                # tokenized regardless of the running boolean value.
+                right = parse_atom()
+                v = bool(v) and bool(right)
             else:
                 return v
 
@@ -688,7 +697,12 @@ def evaluate_fire_when(expr: str, summary: dict) -> bool:
             nxt = peek()
             if nxt and nxt == ("BOOLOP", "OR"):
                 consume()
-                v = bool(v) or bool(parse_and())
+                # Same short-circuit hazard as parse_and: when v is
+                # already True, Python skips the right operand and
+                # leaves its tokens dangling. Parse first, combine
+                # after.
+                right = parse_and()
+                v = bool(v) or bool(right)
             else:
                 return v
 

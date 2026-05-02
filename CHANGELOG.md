@@ -248,6 +248,24 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-02** — **`fire_when` short-circuit parser bug** — the
+  expression evaluator at `evaluate_fire_when()` combined parsed
+  operands with Python's native `and` / `or`, which short-circuit.
+  When the left operand of an `AND` evaluated False (or the left
+  operand of an `OR` evaluated True), Python skipped the right
+  operand's `parse_atom()` call entirely, leaving its tokens
+  un-consumed. The terminal check at the end of `parse_or` then
+  raised `trailing tokens after expression` and the whole
+  fire_when returned False, silently dropping the scenario from the
+  weakness-discovery loop. On advanced-tier scans this skipped
+  any scenario whose fire_when contained `<flag> AND <comparison>`
+  unless every preceding flag in the chain happened to be true.
+  Fixed by parsing the right operand into a local before the
+  boolean combine, so token consumption is independent of the
+  running boolean value. Added a 14-case unit test fixture covering
+  AND / OR short-circuits in both directions, three-way chains,
+  and parenthesised groups.
+
 - **2026-05-02** — **Enhanced AI weakness-discovery prompt
   rendering** — the per-scenario `system_prompt` rows in `ai_prompts`
   carry a literal JSON example (single `{`/`}` braces) showing the
