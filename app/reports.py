@@ -339,8 +339,19 @@ def _gather(assessment_id: int) -> Optional[dict]:
         "FROM findings WHERE assessment_id = %s "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (assessment_id,))
+    # Set of triaged-away statuses excluded from the body of the PDF.
+    # false_positive (suppressed by the analyst), fixed (remediated),
+    # and accepted_risk (archived) all drop out -- the PDF should
+    # describe what's still actionable, not what's already cleared.
+    # Counts are kept separately so an optional appendix can list
+    # totals per triage outcome.
+    _PDF_TRIAGED = {"false_positive", "fixed", "accepted_risk"}
     excluded_fp_count = sum(1 for f in all_findings
                             if f.get("status") == "false_positive")
+    excluded_fixed_count = sum(1 for f in all_findings
+                               if f.get("status") == "fixed")
+    excluded_accepted_count = sum(1 for f in all_findings
+                                  if f.get("status") == "accepted_risk")
     # The assessment's filter_info toggle (set via the on-screen
     # checkbox) suppresses info-severity rows from the report too. We
     # count the hidden rows for an optional appendix entry but never
@@ -348,12 +359,12 @@ def _gather(assessment_id: int) -> Optional[dict]:
     filter_info = bool(a.get("filter_info"))
     excluded_info_count = (
         sum(1 for f in all_findings
-            if f.get("status") != "false_positive"
+            if f.get("status") not in _PDF_TRIAGED
                and f.get("severity") == "info")
         if filter_info else 0
     )
     findings = [f for f in all_findings
-                if f.get("status") != "false_positive"
+                if f.get("status") not in _PDF_TRIAGED
                    and not (filter_info and f.get("severity") == "info")]
 
     # Decode raw_data JSON for each finding (used for reproduction details).
@@ -484,6 +495,8 @@ def _gather(assessment_id: int) -> Optional[dict]:
         "a": a,
         "findings": findings,
         "excluded_fp_count": excluded_fp_count,
+        "excluded_fixed_count": excluded_fixed_count,
+        "excluded_accepted_count": excluded_accepted_count,
         "excluded_info_count": excluded_info_count,
         "sev_counts": sev_counts,
         "risk_score": risk_score,
