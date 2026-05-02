@@ -22,7 +22,7 @@
      counter (not the docker tag); bump it when style.css meaningfully
      changes. Has no effect on the served file -- StaticFiles ignores
      the query string. #}
-  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260502d">
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260502e">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -54,7 +54,7 @@
         object-fit:contain; flex-shrink:0; display:block; }
   </style>
 </head>
-<body>
+<body class="theme-{{ user_theme | default('dark') }}">
 {% if brand and brand.classification %}
 <div class="classification-banner"
      style="background: {{ brand.classification_color or '#e87060' }}">
@@ -137,6 +137,16 @@
     <nav>
       <a href="{{ base }}/admin"             class="{{ nav_class('/admin') }}">{{ icon('cog') }}<span>Settings</span></a>
       <a href="{{ base }}/admin/api-tokens"  class="{{ nav_class('/admin/api-tokens') }}">{{ icon('key') }}<span>API tokens</span></a>
+    </nav>
+    {% endif %}
+
+    {# Theme toggle is available to every signed-in user (not admin-only)
+       — dark / light is a personal display choice, not a privilege. The
+       link sits below the admin block when the user is admin so the
+       Configuration / Admin sections stay grouped. #}
+    {% if user %}
+    <nav>
+      <a href="{{ base }}/theme" class="{{ nav_class('/theme') }}">{{ icon('sparkles') }}<span>Theme</span></a>
     </nav>
     {% endif %}
 

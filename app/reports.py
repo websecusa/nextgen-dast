@@ -1937,7 +1937,76 @@ def report_filename(a: dict) -> str:
     return f"{_safe_fqdn(a.get('fqdn'))}_{_finished_date(a)}_report.pdf"
 
 
+def _refresh_narrative_if_stale(assessment_id: int) -> Optional[str]:
+    """Re-run consolidation to regenerate the cached exec_summary when
+    the analyst has triaged any finding (false_positive / fixed /
+    accepted_risk) since the original consolidation pass ran. The
+    cached narrative is LLM-written prose that may reference findings
+    by name; once the analyst marks one of those findings as a false
+    positive, the cached narrative is suddenly inconsistent with the
+    live finding list the rest of the PDF shows.
+
+    Best-effort. Returns a short status string for logging:
+      - "no-triage": nothing has been triaged; cached narrative stands
+      - "no-endpoint": triage detected but no LLM endpoint configured;
+        cached narrative stands (operator can re-run after wiring an
+        endpoint)
+      - "refreshed": LLM successfully produced a fresh narrative
+      - "error: <detail>": LLM call failed; cached narrative stands
+
+    Failures are non-fatal: the PDF renders either way. The point of
+    this hook is to keep the narrative honest when the operator has
+    cleared findings since the original scan; if the regen fails the
+    PDF still ships, just with the original narrative.
+    """
+    triaged = db.query_one(
+        "SELECT COUNT(*) AS n FROM findings "
+        "WHERE assessment_id=%s "
+        "  AND status IN ('false_positive','fixed','accepted_risk')",
+        (assessment_id,))
+    if not triaged or int(triaged.get("n") or 0) == 0:
+        return "no-triage"
+
+    # Resolve the LLM endpoint the same way the orchestrator does:
+    # the assessment row's pinned endpoint first, then the system
+    # default. If neither resolves, leave the cached narrative alone.
+    a_row = db.query_one(
+        "SELECT llm_endpoint_id FROM assessments WHERE id=%s",
+        (assessment_id,))
+    endpoint = None
+    if a_row and a_row.get("llm_endpoint_id"):
+        endpoint = db.query_one(
+            "SELECT * FROM llm_endpoints WHERE id=%s",
+            (a_row["llm_endpoint_id"],))
+    if not endpoint:
+        endpoint = db.query_one(
+            "SELECT * FROM llm_endpoints WHERE is_default=1 LIMIT 1")
+    if not endpoint:
+        return "no-endpoint"
+
+    try:
+        import consolidation as consolidation_mod
+        result = consolidation_mod.run(assessment_id, endpoint)
+    except Exception as e:
+        return f"error: {e!r}"
+    if not result.get("ok"):
+        return f"error: {result.get('error') or 'consolidation failed'}"
+    return "refreshed"
+
+
 def generate(assessment_id: int) -> Optional[Path]:
+    # Refresh the LLM-written narrative if the analyst has triaged any
+    # findings since the original consolidation pass — keeps false
+    # positives out of the executive summary. Best-effort; failures
+    # fall through to the cached narrative.
+    refresh_status = _refresh_narrative_if_stale(assessment_id)
+    if refresh_status and refresh_status not in ("no-triage", "refreshed"):
+        # Surface the failure to the operator's stdout so a missing
+        # LLM endpoint or a transient API blip is debuggable; the PDF
+        # still renders so report generation never silently fails.
+        print(f"[pdf] narrative refresh skipped for assessment "
+              f"{assessment_id}: {refresh_status}", flush=True)
+
     data = _gather(assessment_id)
     if not data:
         return None

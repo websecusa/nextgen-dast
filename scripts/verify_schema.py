@@ -48,7 +48,7 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
     },
     "users": {
         "id", "username", "password_hash", "role", "is_admin",
-        "max_spend_usd",
+        "max_spend_usd", "theme",
         "disabled", "last_login", "created_at", "updated_at",
     },
     "config": {"key", "value", "updated_at"},

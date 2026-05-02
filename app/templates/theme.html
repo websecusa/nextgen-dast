@@ -1,0 +1,52 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Per-user UI theme preference. Saves to users.theme; the body class is
+  rendered from that column on every page load (see base.html). No
+  JavaScript required -- the form POSTs and the next render reflects
+  the choice.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Theme</h1>
+<p class="muted">Choose how nextgen-dast renders for your account. Your
+selection is saved server-side and follows you across browsers.</p>
+
+{% if msg %}
+  <p class="muted"><code>{{ msg }}</code></p>
+{% endif %}
+
+<section style="max-width: 540px">
+  <form method="post" action="{{ base }}/theme">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="theme-option">
+      <input type="radio" name="theme" value="dark"
+             {% if current_theme == 'dark' %}checked{% endif %}>
+      <span class="theme-swatch theme-swatch-dark" aria-hidden="true"></span>
+      <span class="theme-meta">
+        <strong>Dark</strong>
+        <span class="muted small">Default. High-contrast palette tuned
+          for long inspection sessions; matches the brand colors used
+          on the cover page of generated reports.</span>
+      </span>
+    </label>
+
+    <label class="theme-option">
+      <input type="radio" name="theme" value="light"
+             {% if current_theme == 'light' %}checked{% endif %}>
+      <span class="theme-swatch theme-swatch-light" aria-hidden="true"></span>
+      <span class="theme-meta">
+        <strong>Light</strong>
+        <span class="muted small">Lower-contrast neutral palette for
+          well-lit environments and screen-shared review sessions.</span>
+      </span>
+    </label>
+
+    <div style="margin-top: 1.4em">
+      <button type="submit">Save preference</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

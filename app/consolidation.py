@@ -127,6 +127,14 @@ def _fetch_buckets(aid: int) -> list[dict]:
     flow — get_or_create always returns one), we fall back to grouping by
     title/severity/source_tool so the roll-up still sees them.
     """
+    # Excluding triaged-away rows (false_positive, fixed, accepted_risk)
+    # is critical: the LLM that writes the executive narrative based
+    # on these buckets must not reference findings the analyst has
+    # already cleared. At first-run consolidation nothing is triaged
+    # so this clause is a no-op; on a re-run after triage, it
+    # produces a clean narrative that matches what the report
+    # actually shows. Aligns with the EXCLUDED_FROM_SCORE set used
+    # by the live-risk path on the dashboard.
     rows = db.query("""
         SELECT
             f.enrichment_id,
@@ -141,6 +149,8 @@ def _fetch_buckets(aid: int) -> list[dict]:
         FROM findings f
         LEFT JOIN finding_enrichment fe ON fe.id = f.enrichment_id
         WHERE f.assessment_id = %s
+          AND COALESCE(f.status, 'open')
+              NOT IN ('false_positive', 'fixed', 'accepted_risk')
         GROUP BY f.enrichment_id, f.title, f.severity, f.source_tool,
                  fe.owasp_category, f.owasp_category, fe.cwe, f.cwe,
                  fe.title_norm

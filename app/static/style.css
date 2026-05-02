@@ -39,6 +39,89 @@
   --radius-pill:   9999px;
 }
 
+/* ---- Light theme palette ------------------------------------------ */
+/* Activated when the body carries class="theme-light". The default
+   :root dark values stay in place; this rule re-binds the CSS
+   variables for the light variant so every existing component
+   (cards, severity dots, brand accents, typeahead popup, etc.)
+   inherits the new colors without any per-component changes.
+
+   Severity colors stay the same regardless of theme so a critical
+   on the dashboard still reads as critical at a glance — the
+   accessibility win of consistent severity mapping outweighs the
+   slight aesthetic mismatch. */
+body.theme-light {
+  --bg:        #f5f6f8;
+  --panel:     #ffffff;
+  --panel-2:   #f0f2f5;
+  --elevated:  #e9ecf1;
+  --border:    rgba(0, 0, 0, .08);
+  --border-strong: rgba(0, 0, 0, .15);
+
+  --text:      #1c2026;
+  --text-soft: #2c333d;
+  --muted:     #5c636d;
+  --muted-2:   #8b929b;
+}
+body.theme-light a { color: var(--accent-2); }
+/* Form controls in the light palette need a visible default fill so
+   inputs and selects don't blend into the page background. Border
+   stays the existing strong-border variable for consistency. */
+body.theme-light input[type="text"],
+body.theme-light input[type="search"],
+body.theme-light input[type="password"],
+body.theme-light input[type="number"],
+body.theme-light input[type="email"],
+body.theme-light input[type="url"],
+body.theme-light textarea,
+body.theme-light select {
+  background: var(--panel);
+}
+/* Scrollbar styling for both themes — keep them subtle and matched
+   to the surrounding panel color. */
+body.theme-light ::-webkit-scrollbar { width: 10px; height: 10px; }
+body.theme-light ::-webkit-scrollbar-track { background: var(--panel-2); }
+body.theme-light ::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 5px;
+}
+
+/* ---- Theme toggle page (radio + swatch row) ----------------------- */
+.theme-option {
+  display: flex; gap: .9em; align-items: center;
+  padding: .9em 1em; margin-bottom: .6em;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  cursor: pointer;
+}
+.theme-option:hover { border-color: var(--accent); }
+.theme-option input[type="radio"] { margin: 0; }
+.theme-swatch {
+  display: inline-block; width: 36px; height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.theme-swatch-dark  { background: linear-gradient(135deg,#0a0b0d,#1b1e23); }
+.theme-swatch-light { background: linear-gradient(135deg,#ffffff,#e9ecf1); }
+.theme-meta { display: flex; flex-direction: column; gap: .15em; }
+
+/* ---- Grade badge (A-F letter on Assessments tables) --------------- */
+/* Extends .sev so the grade picks up the same severity-tier color
+   palette used everywhere else (info/low/medium/high/critical). The
+   extra rules here size the badge as a small pill and bold the
+   letter so an F reads as "F" instantly across the dashboard table. */
+.grade-badge {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: .15em .55em;
+  font-weight: 700;
+  font-size: .95em;
+  text-align: center;
+  border-radius: var(--radius-pill);
+  letter-spacing: .02em;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -231,7 +314,12 @@ aside.sidebar .build-tag {
 
 main.main {
   padding: 1.6em 1.8em 2.4em;
-  max-width: 1400px;
+  /* No max-width: let the main column fill the viewport up to the
+     edge of the sidebar. The 1400 px cap previously left blank
+     space on the right of any monitor wider than ~1640 px (sidebar
+     + content + scrollbar). Cards and tables already cap their own
+     readable widths internally where it matters; the grid and the
+     assessments table specifically benefit from the extra room. */
 }
 main.main h1 {
   font-weight: 700;

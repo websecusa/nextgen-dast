@@ -347,6 +347,7 @@
          the displayed values stay accurate. #}
       <th title="Open findings, post-triage. Excludes false-positive, resolved, archived.">Open</th>
       <th>Risk</th>
+      <th title="Letter grade derived from the live risk score: A (0-19) clean, B (20-39), C (40-59), D (60-79), F (80-100).">Grade</th>
       <th>{{ col_link('When', 'when') }}</th>
     </tr></thead>
     <tbody>
@@ -366,6 +367,11 @@
           {% if a.risk_score is not none %}
             {% set sev = 'critical' if a.risk_score >= 80 else ('high' if a.risk_score >= 60 else ('medium' if a.risk_score >= 40 else ('low' if a.risk_score >= 20 else 'info'))) %}
             <span class="sev sev-{{ sev }}">{{ a.risk_score }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if a.grade is defined and a.grade %}
+            <span class="grade-badge sev sev-{{ a.grade.cls }}">{{ a.grade.letter }}</span>
           {% else %}<span class="muted">—</span>{% endif %}
         </td>
         <td>
