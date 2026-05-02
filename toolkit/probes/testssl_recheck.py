@@ -113,6 +113,157 @@ _HEADER_FAST_ID_TO_HEADER: dict[str, str] = {
 _HSTS_MIN_MAX_AGE = 15552000   # 180 days, conventional remediation threshold
 
 
+# Path to the testssl-bundled openssl 1.0.2-bad binary that supports
+# the deprecated protocols / ciphers system openssl 3.x refuses to
+# carry. Required for SSLv2, SSLv3, TLS 1.0, TLS 1.1, EXPORT-grade
+# ciphers, NULL, RC4, etc. OPENSSL_CONF must be empty when invoking
+# (default config tries to load providers that aren't shipped).
+_LEGACY_OPENSSL = "/opt/testssl/bin/openssl.Linux.x86_64"
+
+# Vulnerability-check IDs whose verification reduces to one openssl
+# s_client handshake attempt — sub-second answer instead of a 60-180 s
+# testssl.sh -U narrowing run. Must stay in sync with the server-side
+# _VULN_FAST_TESTSSL_PROBES table in app/server.py.
+_VULN_FAST_PROBES: dict[str, dict] = {
+    "BEAST_CBC_TLS1":   {"protocol": "-tls1",   "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.0 with CBC cipher (AES128-SHA)"},
+    "BEAST_CBC_TLS1_1": {"protocol": "-tls1_1", "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.1 with CBC cipher (AES128-SHA)"},
+    "POODLE_SSL":       {"protocol": "-ssl3",   "cipher": None,
+                          "needs_legacy": True,
+                          "human": "SSLv3 (any cipher)"},
+    "LUCKY13":          {"protocol": "-tls1",   "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.0 with CBC cipher"},
+    "FREAK":            {"protocol": None,      "cipher": "EXPORT",
+                          "needs_legacy": True,
+                          "human": "EXPORT-grade cipher"},
+    "DROWN":            {"protocol": "-ssl2",   "cipher": None,
+                          "needs_legacy": True,
+                          "human": "SSLv2 negotiation (DROWN surface)"},
+    "LOGJAM":           {"protocol": None,      "cipher": "kEDH+EXPORT",
+                          "needs_legacy": True,
+                          "human": "EXPORT-grade DHE cipher (LOGJAM)"},
+    "ADH":              {"protocol": None,      "cipher": "ADH",
+                          "needs_legacy": True,
+                          "human": "anonymous DH (ADH) cipher"},
+}
+
+# Single-protocol availability checks. Same flags as the server-side
+# _PROTOCOL_TESTSSL_TO_OPENSSL_FLAG; legacy protocols need the
+# bundled openssl.
+_PROTOCOL_FLAGS: dict[str, str] = {
+    "SSLv2":  "-ssl2", "SSLv3": "-ssl3",
+    "TLS1":   "-tls1", "TLS1_1": "-tls1_1",
+    "TLS1_2": "-tls1_2", "TLS1_3": "-tls1_3",
+}
+_LEGACY_PROTOCOLS = {"SSLv2", "SSLv3", "TLS1", "TLS1_1"}
+
+# cipherlist_<NAME> categories. NULL/EXPORT/LOW/DES/RC4 need legacy openssl.
+_CIPHERLIST_OPENSSL_NAME: dict[str, str] = {
+    "NULL":   "NULL:eNULL",
+    "aNULL":  "aNULL",
+    "EXPORT": "EXPORT",
+    "LOW":    "LOW",
+    "DES":    "DES:!eDES",
+    "3DES":   "3DES",
+    "RC4":    "RC4",
+    "MD5":    "MD5",
+    "MEDIUM": "MEDIUM",
+}
+_LEGACY_CIPHER_SUFFIXES = {"NULL", "aNULL", "EXPORT", "LOW", "DES", "RC4", "MD5"}
+
+
+def _openssl_handshake_recheck(host: str, port: int, testssl_id: str,
+                                 protocol_flag: str | None,
+                                 cipher_str: str | None,
+                                 needs_legacy: bool,
+                                 human_summary: str) -> Verdict:
+    """Run one openssl s_client handshake attempt and translate the
+    outcome into a Verdict. Used by the protocol / cipher / vuln
+    fast paths in this probe.
+    """
+    import os as _os
+    import subprocess as _subprocess
+    import time as _time
+
+    binary = _LEGACY_OPENSSL if needs_legacy else "/usr/bin/openssl"
+    env = _os.environ.copy()
+    if needs_legacy:
+        env["OPENSSL_CONF"] = ""
+
+    cmd = [binary, "s_client", "-connect", f"{host}:{port}",
+           "-servername", host, "-brief"]
+    if protocol_flag:
+        cmd.append(protocol_flag)
+    if cipher_str:
+        cmd.extend(["-cipher", cipher_str])
+    reproduce = (("OPENSSL_CONF= " if needs_legacy else "")
+                 + " ".join(cmd) + " < /dev/null")
+
+    t0 = _time.monotonic()
+    try:
+        proc = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=8.0, check=False, env=env, input="",
+        )
+        rc = proc.returncode
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except _subprocess.TimeoutExpired:
+        rc = -1
+        out = "openssl s_client timed out after 8s"
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    handshake_ok = (rc == 0 and "CONNECTION ESTABLISHED" in out)
+    negotiated_proto = ""
+    negotiated_cipher = ""
+    for line in out.splitlines():
+        if line.startswith("Protocol version:"):
+            negotiated_proto = line.split(":", 1)[1].strip()
+        elif line.startswith("Ciphersuite:"):
+            negotiated_cipher = line.split(":", 1)[1].strip()
+
+    if handshake_ok:
+        return Verdict(
+            ok=True, validated=True, confidence=0.95,
+            summary=(f"{testssl_id} reproduced — server accepted a "
+                     f"handshake under {human_summary}. Negotiated: "
+                     f"protocol={negotiated_proto!r}, "
+                     f"cipher={negotiated_cipher!r}. "
+                     f"Original testssl finding still applies."),
+            evidence={
+                "command": reproduce, "elapsed_ms": elapsed_ms,
+                "exit_code": rc,
+                "negotiated_protocol": negotiated_proto,
+                "negotiated_cipher": negotiated_cipher,
+            })
+
+    reason = ""
+    for line in out.splitlines():
+        if "no protocols available" in line.lower():
+            reason = "protocol disabled by server"; break
+        if "alert handshake failure" in line.lower():
+            reason = "server refused handshake (no shared cipher)"; break
+        if "wrong version number" in line.lower():
+            reason = "protocol disabled / refused"; break
+        if "alert protocol version" in line.lower():
+            reason = "server refused via TLS alert"; break
+    if not reason:
+        reason = f"handshake failed (exit {rc})"
+
+    return Verdict(
+        ok=True, validated=False, confidence=0.85,
+        summary=(f"{testssl_id} no longer reproducible — server "
+                 f"refused {human_summary}: {reason}. "
+                 f"Original testssl finding looks remediated."),
+        evidence={
+            "command": reproduce, "elapsed_ms": elapsed_ms,
+            "exit_code": rc,
+        })
+
+
 def _header_fast_recheck(host: str, port: int, testssl_id: str,
                           target_header: str) -> Verdict:
     """Single HTTPS GET to verify a header-presence finding. Returns a
@@ -290,7 +441,7 @@ class TestsslRecheckProbe(Probe):
             "--testssl-binary", default="testssl.sh",
             help="Path to testssl.sh (default: pull from PATH).")
         parser.add_argument(
-            "--narrow-timeout", type=float, default=120.0,
+            "--narrow-timeout", type=float, default=180.0,
             help="Timeout (s) for the narrow testssl run. Default 120.")
 
     def run(self, args, client):
@@ -327,16 +478,56 @@ class TestsslRecheckProbe(Probe):
         if not testssl_id:
             testssl_id = (extra.get("title") or "").strip()
 
-        # Header-presence fast path. Header-class IDs (HSTS, CSP,
-        # X-Frame-Options, security headers, server banners, plus
-        # enhanced_testing's config_*_missing aliases) get answered
-        # by a single HTTPS GET instead of a 30-60s testssl.sh -h
-        # subprocess. Same Verdict shape on the way out, so the
-        # orchestrator UI is identical.
+        # ----------------------------------------------------------------
+        # Fast paths. Each handles a specific class of testssl IDs with
+        # a sub-second probe instead of forking a 60-180 s testssl.sh
+        # subprocess. Order matches the server-side dispatch in
+        # app/server.py:_finding_test_tls so behavior is identical
+        # whether the analyst clicks "Test (TLS)" (server-side) or
+        # "Validate" / "Challenge" (this probe).
+        # ----------------------------------------------------------------
+
+        # 1. Header presence (HSTS, CSP, X-Frame-Options, banner_*,
+        #    config_*_missing aliases) → one HTTPS GET.
         target_header = _HEADER_FAST_ID_TO_HEADER.get(testssl_id.lower())
         if target_header:
             return _header_fast_recheck(host, port, testssl_id,
                                           target_header)
+
+        # 2. Vulnerability checks reducible to a handshake attempt
+        #    (BEAST_CBC_TLS1, BEAST_CBC_TLS1_1, POODLE_SSL, LUCKY13,
+        #    FREAK). HEARTBLEED, ROBOT, TICKETBLEED, CCS_INJECTION,
+        #    CRIME_TLS still fall through to testssl.sh below.
+        spec = _VULN_FAST_PROBES.get(testssl_id)
+        if spec:
+            return _openssl_handshake_recheck(
+                host, port, testssl_id,
+                protocol_flag=spec.get("protocol"),
+                cipher_str=spec.get("cipher"),
+                needs_legacy=spec.get("needs_legacy", False),
+                human_summary=spec["human"])
+
+        # 3. Single protocol availability (SSLv2/3, TLS1.0/1.1/1.2/1.3).
+        if testssl_id in _PROTOCOL_FLAGS:
+            return _openssl_handshake_recheck(
+                host, port, testssl_id,
+                protocol_flag=_PROTOCOL_FLAGS[testssl_id],
+                cipher_str=None,
+                needs_legacy=(testssl_id in _LEGACY_PROTOCOLS),
+                human_summary=f"{testssl_id} protocol negotiation")
+
+        # 4. cipherlist_<NAME> single-category cipher availability
+        #    (NULL/aNULL/EXPORT/LOW/DES/3DES/RC4/MD5/MEDIUM).
+        if testssl_id.startswith("cipherlist_"):
+            suffix = testssl_id[len("cipherlist_"):]
+            cipher_str = _CIPHERLIST_OPENSSL_NAME.get(suffix)
+            if cipher_str:
+                return _openssl_handshake_recheck(
+                    host, port, testssl_id,
+                    protocol_flag=None,
+                    cipher_str=cipher_str,
+                    needs_legacy=(suffix in _LEGACY_CIPHER_SUFFIXES),
+                    human_summary=f"a cipher in the {suffix} category")
 
         flag, flag_label = _pick_flag(testssl_id)
         target = f"{host}:{port}"
