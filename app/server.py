@@ -4360,6 +4360,170 @@ _CIPHERLIST_OPENSSL_NAME: dict[str, str] = {
 }
 
 
+# Vulnerability-check IDs whose claim reduces to "the server still
+# accepts protocol P with cipher class C". Each maps to one openssl
+# s_client handshake attempt — sub-second answer instead of a 60-180 s
+# testssl.sh -U narrowing run. Order matters only for documentation;
+# dispatch is by exact id match. Anything not in this map (HEARTBLEED,
+# ROBOT, TICKETBLEED, CCS_INJECTION, CRIME_TLS) genuinely needs the
+# testssl path because verification requires timing analysis or
+# protocol-level injection that openssl alone can't do.
+#
+# `cipher` is the OpenSSL cipher string that selects the vulnerable
+# class — a successful handshake under it = vulnerable. `protocol`
+# is the openssl flag (`-tls1`, `-ssl3`, etc.); None means use
+# default protocol negotiation.
+_VULN_FAST_TESTSSL_PROBES: dict[str, dict] = {
+    # CBC-mode + TLS 1.0/1.1: BEAST applies. CVE-2011-3389.
+    "BEAST_CBC_TLS1":   {"protocol": "-tls1",   "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.0 with CBC cipher (AES128-SHA)"},
+    "BEAST_CBC_TLS1_1": {"protocol": "-tls1_1", "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.1 with CBC cipher (AES128-SHA)"},
+    # SSLv3 + any cipher: POODLE oracle. CVE-2014-3566.
+    "POODLE_SSL":       {"protocol": "-ssl3",   "cipher": None,
+                          "needs_legacy": True,
+                          "human": "SSLv3 (any cipher)"},
+    # TLS 1.0/1.1 + CBC: LUCKY13 timing oracle. CVE-2013-0169.
+    "LUCKY13":          {"protocol": "-tls1",   "cipher": "AES128-SHA",
+                          "needs_legacy": True,
+                          "human": "TLS 1.0 with CBC cipher (LUCKY13 surface)"},
+    # EXPORT cipher offered → FREAK reproducible. CVE-2015-0204.
+    "FREAK":            {"protocol": None,      "cipher": "EXPORT",
+                          "needs_legacy": True,
+                          "human": "EXPORT-grade cipher"},
+    # SSLv2 still negotiable → DROWN cross-protocol downgrade attack.
+    # CVE-2016-0800.
+    "DROWN":            {"protocol": "-ssl2",   "cipher": None,
+                          "needs_legacy": True,
+                          "human": "SSLv2 negotiation (DROWN surface)"},
+    # EXPORT-grade DHE cipher offered → LOGJAM downgrade attack.
+    # CVE-2015-4000.
+    "LOGJAM":           {"protocol": None,      "cipher": "kEDH+EXPORT",
+                          "needs_legacy": True,
+                          "human": "EXPORT-grade DHE cipher (LOGJAM)"},
+    # Anonymous DH offered → trivially MITMable.
+    "ADH":              {"protocol": None,      "cipher": "ADH",
+                          "needs_legacy": True,
+                          "human": "anonymous DH (ADH) cipher"},
+}
+
+
+def _finding_test_vuln_fast(host: str, port: int, testssl_id: str,
+                              finding: dict) -> JSONResponse:
+    """Vulnerability-check fast path. Each ID in _VULN_FAST_TESTSSL_PROBES
+    maps to one openssl s_client handshake attempt that reproduces (or
+    refutes) the testssl claim in <100 ms. Same JSON envelope as the
+    other fast paths so the modal renders identically."""
+    import subprocess as _subprocess
+    import time as _time
+    import os as _os
+
+    spec = _VULN_FAST_TESTSSL_PROBES.get(testssl_id)
+    if not spec:
+        return JSONResponse({
+            "ok": False, "error": "no_vuln_spec",
+            "message": f"testssl id {testssl_id!r} not in vuln-fast map.",
+        }, status_code=500)
+
+    use_legacy = spec.get("needs_legacy", False)
+    binary = _LEGACY_OPENSSL if use_legacy else "/usr/bin/openssl"
+    env = _os.environ.copy()
+    if use_legacy:
+        env["OPENSSL_CONF"] = ""
+
+    cmd = [binary, "s_client", "-connect", f"{host}:{port}",
+           "-servername", host, "-brief"]
+    if spec.get("protocol"):
+        cmd.append(spec["protocol"])
+    if spec.get("cipher"):
+        cmd.extend(["-cipher", spec["cipher"]])
+
+    reproduce = (("OPENSSL_CONF= " if use_legacy else "")
+                 + " ".join(cmd) + " < /dev/null")
+
+    t0 = _time.monotonic()
+    try:
+        proc = _subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=8.0, check=False, env=env, input="",
+        )
+        rc = proc.returncode
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except _subprocess.TimeoutExpired:
+        rc = -1
+        out = "openssl s_client timed out after 8s"
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    handshake_ok = (rc == 0 and "CONNECTION ESTABLISHED" in out)
+    # Pull the negotiated protocol + cipher for the verdict text — the
+    # analyst needs to see the actual combo the server accepted, not
+    # just "ok".
+    negotiated_proto = ""
+    negotiated_cipher = ""
+    for line in out.splitlines():
+        if line.startswith("Protocol version:"):
+            negotiated_proto = line.split(":", 1)[1].strip()
+        elif line.startswith("Ciphersuite:"):
+            negotiated_cipher = line.split(":", 1)[1].strip()
+
+    if handshake_ok:
+        verdict = "reproduced"
+        # BEAST/POODLE/LUCKY13/FREAK are all MEDIUM in modern triage —
+        # the underlying weaknesses exist but exploitation requires
+        # specific MITM positioning. Severity is preserved on the
+        # finding row; this is just the matched_rows severity for the
+        # modal table.
+        severity_out = "MEDIUM"
+        finding_text = (f"{testssl_id} reproduced — server accepted "
+                        f"a handshake under {spec['human']}. "
+                        f"Negotiated: protocol={negotiated_proto!r}, "
+                        f"cipher={negotiated_cipher!r}. "
+                        f"The original testssl finding still applies.")
+    else:
+        verdict = "not_reproduced"
+        severity_out = "INFO"
+        # Pull the openssl error reason out for the analyst.
+        reason = ""
+        for line in out.splitlines():
+            if "no protocols available" in line.lower():
+                reason = "protocol disabled by server"; break
+            if "alert handshake failure" in line.lower():
+                reason = "server refused handshake (no shared cipher)"; break
+            if "wrong version number" in line.lower():
+                reason = "protocol disabled / refused"; break
+            if "alert protocol version" in line.lower():
+                reason = "server refused via TLS alert"; break
+        if not reason:
+            reason = f"handshake failed (exit {rc})"
+        finding_text = (f"{testssl_id} no longer reproducible — "
+                        f"server refused {spec['human']}: {reason}. "
+                        f"Original testssl finding looks remediated.")
+
+    cmd_label = (f"openssl s_client {' '.join(cmd[3:])} "
+                 f"({'legacy' if use_legacy else 'system'} openssl)")
+
+    return JSONResponse({
+        "ok": True, "kind": "tls",
+        "host": host, "port": port,
+        "command": cmd_label,
+        "reproduce_command": reproduce,
+        "elapsed_ms": elapsed_ms, "exit_code": rc,
+        "flag": spec.get("protocol", "default"),
+        "flag_label": cmd_label,
+        "testssl_id": testssl_id,
+        "verdict": verdict,
+        "matched_rows": [{
+            "id": testssl_id,
+            "severity": severity_out,
+            "finding": finding_text,
+        }],
+        "stdout_excerpt": out[:1500],
+        "stderr_excerpt": "",
+    })
+
+
 def _finding_test_protocol_fast(host: str, port: int, testssl_id: str,
                                   finding: dict) -> JSONResponse:
     """Single-protocol availability check via openssl s_client. Sub-
@@ -4706,6 +4870,13 @@ def _finding_test_tls(finding: dict, parsed) -> JSONResponse:
     if (testssl_id in {"cipher_negotiated", "cipher_order"}
             or testssl_id.startswith("cipher_x")):
         return _finding_test_cipher_enum_fast(host, port, testssl_id, finding)
+
+    # Fast path: vulnerability-class IDs whose verification reduces to
+    # one openssl handshake attempt (BEAST_CBC_TLS1, BEAST_CBC_TLS1_1,
+    # POODLE_SSL, LUCKY13, FREAK). HEARTBLEED, ROBOT, TICKETBLEED,
+    # CCS_INJECTION, CRIME_TLS still genuinely need testssl below.
+    if testssl_id in _VULN_FAST_TESTSSL_PROBES:
+        return _finding_test_vuln_fast(host, port, testssl_id, finding)
 
     flag, flag_label = _pick_testssl_flag(testssl_id)
     target = f"{host}:{port}"
