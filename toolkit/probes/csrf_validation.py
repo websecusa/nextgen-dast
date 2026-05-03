@@ -76,6 +76,23 @@ through. Only 4xx responses that signal a CSRF/Origin/token problem
 (403, 419, 422 plus body keywords like 'csrf', 'forbidden', 'cross-
 origin', 'missing token') count as CSRF rejection.
 
+Form selection on multi-form pages
+----------------------------------
+
+Real-world pages usually render more than one form (a header
+logout/login form alongside the actual state-changing form).
+The earlier scraper grabbed only the FIRST <form> on the page,
+which on a page like /vendor-srs-details.php meant the probe
+wound up testing the header login form -- whose CSRF behavior
+differs from the form wapiti actually flagged.
+
+The probe now collects every form on the page and picks the one
+whose resolved action path matches the wapiti target URL's path.
+When no form matches, the probe bails with validated=None and a
+clear "could not locate the target form on this page" message,
+rather than silently testing the wrong form and emitting a
+verdict for the wrong endpoint.
+
 Auth-wall detection
 -------------------
 
@@ -125,45 +142,110 @@ from lib.http import SafeClient
 
 # ---- Form parsing ----------------------------------------------------------
 
+class _Form:
+    """One <form> scraped from the page: action, method, and every
+    <input> field. Plain attribute container so the rest of the
+    probe can keep using `form.action` / `form.method` / `form.inputs`
+    without caring whether selection happened."""
+
+    def __init__(self, action: str = "", method: str = "post"):
+        self.action: str = action
+        self.method: str = method
+        self.inputs: list[tuple[str, str, str]] = []  # (name, type, value)
+
+
 class _FormScraper(HTMLParser):
-    """Minimal form parser. Picks the FIRST <form> on the page and
-    captures its action URL, method, and every <input> field. Adequate
-    for the login-form / state-changing-form patterns this probe
-    targets; not a general-purpose HTML parser."""
+    """Collects EVERY <form> on the page along with its action URL,
+    method, and child <input> fields. Selection is delegated to
+    `_scrape_form` so this class is a pure capture device.
+
+    The earlier version of this class only captured the first form
+    and stopped. That worked for pages whose only form was the one
+    being tested, but mis-fired on real-world apps that render
+    multiple forms (a header logout/login form alongside the actual
+    state-changing form). The probe ended up testing the header
+    form's CSRF behavior, which had nothing to do with the wapiti
+    finding's target URL."""
 
     def __init__(self):
         super().__init__()
         self.in_form = False
-        self.captured = False
-        self.action: Optional[str] = None
-        self.method: str = "post"
-        self.inputs: list[tuple[str, str, str]] = []  # (name, type, value)
+        self.forms: list[_Form] = []
+        self._cur: Optional[_Form] = None
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
-        if tag == "form" and not self.captured:
+        if tag == "form":
             self.in_form = True
-            self.action = a.get("action") or ""
-            self.method = (a.get("method") or "post").lower()
-        elif tag == "input" and self.in_form:
+            self._cur = _Form(action=a.get("action") or "",
+                              method=(a.get("method") or "post").lower())
+        elif tag == "input" and self.in_form and self._cur is not None:
             name = a.get("name") or ""
             if name:
-                self.inputs.append((name, (a.get("type") or "text").lower(),
-                                    a.get("value") or ""))
+                self._cur.inputs.append((
+                    name, (a.get("type") or "text").lower(),
+                    a.get("value") or ""))
 
     def handle_endtag(self, tag):
         if tag == "form" and self.in_form:
             self.in_form = False
-            self.captured = True
+            if self._cur is not None:
+                self.forms.append(self._cur)
+                self._cur = None
 
 
-def _scrape_form(html: str) -> Optional[_FormScraper]:
+def _form_action_path(form: _Form, page_url: str) -> str:
+    """Resolve a form's action URL against the page it was scraped
+    from and return only its path component (with trailing slash
+    stripped). Empty action means 'submit to this page'."""
+    resolved = urljoin(page_url or "", form.action or "")
+    return urlparse(resolved).path.rstrip("/") or "/"
+
+
+def _scrape_form(html: str, *, target_url: str = "",
+                 page_url: str = "") -> Optional[_Form]:
+    """Parse every <form> on the page and return the one whose action
+    matches the target URL's path. Falls back to the form that posts
+    to the page itself, then -- as a last resort -- the first form
+    on the page when no target URL is supplied (e.g. running the
+    probe interactively without a wapiti context).
+
+    Returns None when forms exist but none match the target. The
+    caller treats that as 'wrong form on this page' and bails with
+    a clear verdict instead of testing the wrong form (which is the
+    bug that produced the vendor-srs-details / login.php cross-form
+    false positive).
+    """
     s = _FormScraper()
     try:
         s.feed(html)
     except Exception:
         return None
-    return s if s.captured or s.inputs else None
+    if not s.forms:
+        return None
+
+    # Priority 1: form action path == target URL path. urlparse
+    # discards the query string, so /vendor-srs-details.php?id=1 in
+    # the wapiti finding still matches a form whose action="" or
+    # action="/vendor-srs-details.php" on the page.
+    if target_url:
+        target_path = urlparse(target_url).path.rstrip("/") or "/"
+        page = page_url or target_url
+        for f in s.forms:
+            if _form_action_path(f, page) == target_path:
+                return f
+        # No match. Don't fall back blindly -- the page rendered a
+        # different form than the one wapiti flagged, and testing
+        # the wrong form yields a verdict for the wrong endpoint.
+        return None
+
+    # No target URL supplied: legacy behavior, return the first form
+    # that has any inputs. Used when the probe is invoked manually
+    # against a single-form page.
+    for f in s.forms:
+        if f.inputs:
+            return f
+    return s.forms[0]
 
 
 # Names commonly used by web frameworks for the synchronizer token
@@ -467,16 +549,37 @@ class CsrfValidationProbe(Probe):
         samesite_a = _samesite_attrs_from_headers(r_a.headers)
         # The user-supplied --login-page-url may itself redirect (e.g.
         # http -> https or to a canonical /login path). Track the URL
-        # the form actually lives at so the auth-wall check below
-        # compares POST landings against the right reference.
+        # the form actually lives at so the form selector resolves
+        # relative actions against the right base, and so the
+        # auth-wall check below compares POST landings against the
+        # right reference.
         login_final_url = r_a.final_url or login_page
-        form_a = _scrape_form(r_a.text)
+        # Pass the wapiti target URL so _scrape_form picks the form
+        # whose action matches it. Pages frequently render multiple
+        # forms (a header logout/login form alongside the actual
+        # state-changing form), and grabbing the first one gives a
+        # verdict for the wrong endpoint.
+        form_a = _scrape_form(r_a.text, target_url=target,
+                              page_url=login_final_url)
         if not form_a or not form_a.inputs:
-            return Verdict(ok=False, validated=None,
-                           summary=("could not locate a <form> on the login "
-                                    "page; specify --login-page-url"),
-                           evidence={"login_page": login_page,
-                                     "status": r_a.status})
+            return Verdict(
+                ok=False, validated=None,
+                summary=(
+                    "could not locate a <form> whose action matches "
+                    "the target URL " + target + " on the page at " +
+                    login_final_url + ". The page may render "
+                    "multiple forms (e.g. a header logout form "
+                    "alongside the form wapiti flagged), or the GET "
+                    "may have been redirected to a different page "
+                    "entirely (auth wall, error page, etc.). Specify "
+                    "--login-page-url to point at the page that "
+                    "actually renders the target form, and confirm "
+                    "the probe is running with a session that can "
+                    "reach it."),
+                evidence={"login_page": login_page,
+                          "login_final_url": login_final_url,
+                          "target_url": target,
+                          "status": r_a.status})
 
         # ---- Step 2: fetch the login page in session B --------------
         r_b = client_b.request("GET", login_page)
@@ -484,7 +587,8 @@ class CsrfValidationProbe(Probe):
             return Verdict(ok=False, validated=None,
                            summary="login page unreachable in second session")
         _merge_cookie_jar(sess_b, r_b.headers)
-        form_b = _scrape_form(r_b.text)
+        form_b = _scrape_form(r_b.text, target_url=target,
+                              page_url=r_b.final_url or login_page)
 
         # ---- Step 3: identify the CSRF token field (if any) --------
         # Operator override wins. Otherwise: ONLY the name heuristic.
@@ -553,8 +657,13 @@ class CsrfValidationProbe(Probe):
                     data.append((n, v or ""))
             return urlencode(data).encode()
 
-        # Resolve form action URL (may be relative).
-        post_url = urljoin(login_page, form_a.action or "") or login_page
+        # Resolve form action URL (may be relative). Resolve against
+        # the URL the GET actually settled on, not the user-supplied
+        # login_page -- the latter may have redirected to a canonical
+        # path, and a relative `action=""` should anchor on where the
+        # form was actually rendered.
+        post_url = (urljoin(login_final_url, form_a.action or "")
+                    or login_final_url)
 
         # The CSRF check is meaningful only for state-changing
         # methods. We hardcode the form's declared method here (the
