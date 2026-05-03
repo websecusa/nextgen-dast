@@ -541,6 +541,12 @@ class TestsslRecheckProbe(Probe):
         if not testssl_id:
             testssl_id = (extra.get("title") or "").strip()
 
+        # Normalize testssl's "<hostCert#N>" multi-cert suffix away so
+        # cert_notAfter <hostCert#1> matches the bare cert_notAfter
+        # dispatch below. Mirrors server.py:_normalize_testssl_id —
+        # both must agree on the canonical form.
+        testssl_id = re.sub(r"\s*<hostCert#\d+>\s*$", "", testssl_id).strip()
+
         # ----------------------------------------------------------------
         # Fast paths. Each handles a specific class of testssl IDs with
         # a sub-second probe instead of forking a 60-180 s testssl.sh
