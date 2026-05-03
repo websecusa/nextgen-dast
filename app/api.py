@@ -799,7 +799,13 @@ def api_scan_results(
         raise HTTPException(404, f"no scan with id {scan_id}")
     rows = _findings_for(scan_id)
     if not include_false_positives:
-        rows = [r for r in rows if r.get("status") != "false_positive"]
+        # Both fields count as FP — a row refuted by a probe but not
+        # yet manually flipped by an analyst is still a false positive.
+        # Mirrors server.py:_is_finding_triaged so the API agrees with
+        # the workspace and the PDF report.
+        rows = [r for r in rows
+                if r.get("status") != "false_positive"
+                   and (r.get("validation_status") or "") != "false_positive"]
     if not include_accepted_risk:
         rows = [r for r in rows if r.get("status") != "accepted_risk"]
     if not include_info:
