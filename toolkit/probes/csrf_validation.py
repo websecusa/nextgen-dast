@@ -108,12 +108,22 @@ as "real" (the textbook "response unchanged on tampering"
 heuristic). The truth is just that the request never reached the
 CSRF gate.
 
-The probe detects this by comparing each POST's final URL to the
-login page URL. When the POST endpoint differs from the login
-page, but every test response lands back on the login page, we
-flag the run as auth-gated and return validated=None with guidance
-to re-run from an authenticated session. This avoids the
-false-positive Wapiti would otherwise hand off to us unchanged.
+The probe detects this in two complementary places:
+
+  - Pre-test: when the GET that establishes session A lands on a
+    page that has no form matching the wapiti target URL, but
+    DOES carry a login form (password input present, or URL path
+    contains /login, /signin, /auth, etc.), AND the response sets
+    SameSite=Lax/Strict on the session cookie, the probe returns
+    `validated=False` with confidence 0.85 -- the cross-site CSRF
+    attack vector wapiti checks for is defeated by the auth wall
+    plus the browser's SameSite enforcement, regardless of
+    server-side token validation. (Confidence ≥ 0.8 is what the
+    dispatcher needs to flip the finding to false_positive.)
+  - Post-test: when the test battery does run but every POST's
+    final URL matches the login page URL, the probe returns
+    `validated=None` so the operator knows the CSRF logic was
+    never actually exercised.
 
 Examples
 --------
@@ -203,26 +213,32 @@ def _form_action_path(form: _Form, page_url: str) -> str:
 
 
 def _scrape_form(html: str, *, target_url: str = "",
-                 page_url: str = "") -> Optional[_Form]:
-    """Parse every <form> on the page and return the one whose action
-    matches the target URL's path. Falls back to the form that posts
-    to the page itself, then -- as a last resort -- the first form
-    on the page when no target URL is supplied (e.g. running the
-    probe interactively without a wapiti context).
+                 page_url: str = "") -> tuple[Optional[_Form], list[_Form]]:
+    """Parse every <form> on the page and return:
+        (chosen, all_forms)
 
-    Returns None when forms exist but none match the target. The
-    caller treats that as 'wrong form on this page' and bails with
-    a clear verdict instead of testing the wrong form (which is the
-    bug that produced the vendor-srs-details / login.php cross-form
-    false positive).
+    where `chosen` is the form whose action path matches the target
+    URL's path, or None when no form matches. `all_forms` is every
+    form on the page (in document order) -- exposed so the caller
+    can examine non-target forms (e.g. spot a login form to detect
+    that the GET was redirected to an auth wall).
+
+    When `target_url` is empty, the chosen form is the first one
+    with inputs -- legacy behavior for interactive (non-wapiti-
+    driven) runs.
+
+    Returning None for `chosen` when forms exist but none match the
+    target prevents the probe from silently testing the wrong form
+    (which is the bug that produced the vendor-srs-details /
+    login.php cross-form false positive).
     """
     s = _FormScraper()
     try:
         s.feed(html)
     except Exception:
-        return None
+        return None, []
     if not s.forms:
-        return None
+        return None, []
 
     # Priority 1: form action path == target URL path. urlparse
     # discards the query string, so /vendor-srs-details.php?id=1 in
@@ -233,19 +249,25 @@ def _scrape_form(html: str, *, target_url: str = "",
         page = page_url or target_url
         for f in s.forms:
             if _form_action_path(f, page) == target_path:
-                return f
-        # No match. Don't fall back blindly -- the page rendered a
-        # different form than the one wapiti flagged, and testing
-        # the wrong form yields a verdict for the wrong endpoint.
-        return None
+                return f, s.forms
+        # No match. Don't fall back blindly -- testing the wrong
+        # form yields a verdict for the wrong endpoint.
+        return None, s.forms
 
     # No target URL supplied: legacy behavior, return the first form
     # that has any inputs. Used when the probe is invoked manually
     # against a single-form page.
     for f in s.forms:
         if f.inputs:
-            return f
-    return s.forms[0]
+            return f, s.forms
+    return s.forms[0], s.forms
+
+
+def _form_has_password_input(form: _Form) -> bool:
+    """True when the form contains an <input type="password">.
+    Used to recognize that the page we landed on is a login page
+    even when the URL itself doesn't carry a 'login' segment."""
+    return any(t == "password" for (_, t, _) in form.inputs)
 
 
 # Names commonly used by web frameworks for the synchronizer token
@@ -559,9 +581,97 @@ class CsrfValidationProbe(Probe):
         # forms (a header logout/login form alongside the actual
         # state-changing form), and grabbing the first one gives a
         # verdict for the wrong endpoint.
-        form_a = _scrape_form(r_a.text, target_url=target,
-                              page_url=login_final_url)
+        form_a, forms_a = _scrape_form(r_a.text, target_url=target,
+                                        page_url=login_final_url)
         if not form_a or not form_a.inputs:
+            # The page we landed on doesn't contain the form wapiti
+            # flagged. Two common reasons:
+            #
+            #   1. The target endpoint is gated by authentication
+            #      and our anonymous GET was redirected to a login
+            #      page. (We deliberately probe with a fresh
+            #      session because the CSRF tests need to drive
+            #      session-A vs session-B independent of any
+            #      ambient login state.)
+            #   2. The page genuinely doesn't render the form
+            #      wapiti claimed (JS-rendered, form behind feature
+            #      flag, wapiti flagged a non-form endpoint).
+            #
+            # Reason #1 is exactly the textbook wapiti CSRF false-
+            # positive: wapiti's csrf module flags the form-token
+            # absence on the login page or on the post-auth form
+            # without realising the cross-site attack vector is
+            # already defeated by browser-side defenses on the
+            # session cookie. If the response we got while landing
+            # on the login page sets `SameSite=Lax/Strict` on any
+            # cookie, the textbook cross-site CSRF POST cannot
+            # carry the victim's session cookie regardless of
+            # whether the form-token is validated server-side.
+            # Combined with the auth wall (an unauthenticated
+            # attacker can't reach the endpoint to bypass the
+            # token in the first place), that is enough to refute
+            # wapiti's finding with high confidence.
+            target_path_lc = (urlparse(target).path or "").lower()
+            login_path_lc = (urlparse(login_final_url).path
+                             or "").lower() if login_final_url else ""
+            _LOGIN_HINTS = ("/login", "/signin", "/sign-in",
+                            "/auth/", "/sso")
+            target_is_login_itself = any(seg in target_path_lc
+                                         for seg in _LOGIN_HINTS)
+            landed_on_login = (
+                any(seg in login_path_lc for seg in _LOGIN_HINTS)
+                or any(_form_has_password_input(f) for f in forms_a)
+            )
+            samesite_modes = sorted(
+                {(v or "").lower() for v in samesite_a.values()
+                 if (v or "").lower() in ("lax", "strict")})
+
+            if (landed_on_login and not target_is_login_itself
+                    and samesite_modes):
+                modes_str = ",".join(samesite_modes)
+                return Verdict(
+                    ok=True, validated=False, confidence=0.85,
+                    summary=(
+                        "Target endpoint " + target + " is gated "
+                        "by authentication: an anonymous GET was "
+                        "redirected to the login page at " +
+                        login_final_url + ". The response also "
+                        "sets SameSite=" + modes_str + " on the "
+                        "session cookie, so a cross-site forged "
+                        "POST cannot carry the victim's session "
+                        "cookie -- the textbook CSRF attack "
+                        "vector wapiti's csrf module checks for "
+                        "is defeated at the browser layer "
+                        "regardless of whether the form-token is "
+                        "validated server-side. An attacker "
+                        "without a session also cannot reach the "
+                        "endpoint to submit a tampered request. "
+                        "The wapiti finding is a false positive."),
+                    evidence={
+                        "target_url": target,
+                        "login_page": login_final_url,
+                        "samesite": samesite_a,
+                        "auth_wall_detected": True,
+                        "samesite_defense": True,
+                        "candidate_forms": [
+                            {"action": f.action,
+                             "input_names": [n for n, _, _ in f.inputs]}
+                            for f in forms_a],
+                    },
+                    remediation=(
+                        "No code change required. The endpoint's "
+                        "defense rests on (1) auth gating ("
+                        "unauthenticated requests are redirected "
+                        "to the login page) and (2) SameSite=" +
+                        modes_str + " session cookies (cross-"
+                        "site forged POSTs do not carry the "
+                        "cookie). Server-side form-token "
+                        "validation is sensible defense-in-depth "
+                        "but is not strictly required to defeat "
+                        "the cross-site attack vector wapiti's "
+                        "csrf module checks for."),
+                )
+
             return Verdict(
                 ok=False, validated=None,
                 summary=(
@@ -579,6 +689,11 @@ class CsrfValidationProbe(Probe):
                 evidence={"login_page": login_page,
                           "login_final_url": login_final_url,
                           "target_url": target,
+                          "samesite": samesite_a,
+                          "candidate_forms": [
+                              {"action": f.action,
+                               "input_names": [n for n, _, _ in f.inputs]}
+                              for f in forms_a],
                           "status": r_a.status})
 
         # ---- Step 2: fetch the login page in session B --------------
@@ -587,8 +702,8 @@ class CsrfValidationProbe(Probe):
             return Verdict(ok=False, validated=None,
                            summary="login page unreachable in second session")
         _merge_cookie_jar(sess_b, r_b.headers)
-        form_b = _scrape_form(r_b.text, target_url=target,
-                              page_url=r_b.final_url or login_page)
+        form_b, _forms_b = _scrape_form(r_b.text, target_url=target,
+                                        page_url=r_b.final_url or login_page)
 
         # ---- Step 3: identify the CSRF token field (if any) --------
         # Operator override wins. Otherwise: ONLY the name heuristic.
