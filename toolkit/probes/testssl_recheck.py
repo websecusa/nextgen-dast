@@ -176,6 +176,69 @@ _CIPHERLIST_OPENSSL_NAME: dict[str, str] = {
 _LEGACY_CIPHER_SUFFIXES = {"NULL", "aNULL", "EXPORT", "LOW", "DES", "RC4", "MD5"}
 
 
+def _dns_caa_recheck(host: str, testssl_id: str) -> Verdict:
+    """One DNS CAA lookup via dnspython. Sub-second. Returns the
+    same Verdict shape the openssl/header recheck paths produce."""
+    import time as _time
+    try:
+        import dns.resolver as _dns_resolver
+        import dns.exception as _dns_exception
+    except ImportError:
+        return Verdict(
+            ok=False, validated=None,
+            summary="dnspython not installed in this container.",
+            error="no-dnspython")
+
+    cmd_label = f"dig +short CAA {host}"
+    t0 = _time.monotonic()
+    records: list[str] = []
+    err_text = None
+    rcode_name = "NOERROR"
+    try:
+        resolver = _dns_resolver.Resolver()
+        resolver.lifetime = 8.0
+        answer = resolver.resolve(host, "CAA")
+        for r in answer:
+            records.append(str(r))
+    except _dns_resolver.NoAnswer:
+        rcode_name = "NOANSWER"
+    except _dns_resolver.NXDOMAIN:
+        rcode_name = "NXDOMAIN"
+        err_text = f"DNS NXDOMAIN — host {host!r} does not resolve"
+    except _dns_exception.Timeout:
+        rcode_name = "TIMEOUT"
+        err_text = "DNS query timed out after 8s"
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    if err_text:
+        return Verdict(
+            ok=False, validated=None,
+            summary=(f"DNS query failed: {err_text}. Run "
+                     f"`dig CAA {host}` manually to confirm."),
+            error="dns-failed",
+            evidence={"command": cmd_label, "elapsed_ms": elapsed_ms,
+                       "rcode": rcode_name})
+
+    if not records:
+        return Verdict(
+            ok=True, validated=True, confidence=0.95,
+            summary=(f"No CAA records for {host} ({rcode_name}). CAA "
+                     f"is recommended (RFC 6844) — without it, any "
+                     f"CA can issue certificates for the domain."),
+            evidence={"command": cmd_label, "elapsed_ms": elapsed_ms,
+                       "rcode": rcode_name, "records": []})
+
+    return Verdict(
+        ok=True, validated=False, confidence=0.95,
+        summary=(f"CAA records present for {host}: {records!r}. "
+                 f"CA issuance is restricted; testssl finding is "
+                 f"remediated."),
+        evidence={"command": cmd_label, "elapsed_ms": elapsed_ms,
+                   "rcode": rcode_name, "records": records})
+
+
 def _openssl_handshake_recheck(host: str, port: int, testssl_id: str,
                                  protocol_flag: str | None,
                                  cipher_str: str | None,
@@ -515,6 +578,11 @@ class TestsslRecheckProbe(Probe):
                 cipher_str=None,
                 needs_legacy=(testssl_id in _LEGACY_PROTOCOLS),
                 human_summary=f"{testssl_id} protocol negotiation")
+
+        # 5. DNS_CAArecord (and "<hostCert#N>" suffix variants) — one
+        #    DNS query via dnspython, sub-second.
+        if re.match(r"^DNS_CAArecord(?:\s|$)", testssl_id):
+            return _dns_caa_recheck(host, testssl_id)
 
         # 4. cipherlist_<NAME> single-category cipher availability
         #    (NULL/aNULL/EXPORT/LOW/DES/3DES/RC4/MD5/MEDIUM).
