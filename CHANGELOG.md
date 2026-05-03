@@ -859,6 +859,19 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **Bulk Challenge re-evaluates `validated` findings.** Previously
+  the bulk runner skipped any finding whose `validation_status` was
+  `validated` OR `false_positive`, on the theory that a confident
+  verdict shouldn't be re-tested. That made stale verdicts immortal:
+  when a probe was updated to fix a false positive (as just happened
+  with `csrf_validation`), already-validated findings stayed stuck on
+  the old verdict and the user had to flip each one by hand. Bulk
+  now skips only `false_positive` (intentional triage, either by the
+  probe or by the analyst) and re-runs `validated` so probe updates
+  propagate. A no-downgrade guard on the write path preserves a
+  previously-validated verdict when the re-run returns
+  `inconclusive` or `errored` (transient network blip on a confident
+  finding shouldn't wipe out the verdict).
 - **`csrf_validation` probe — auth-wall + SameSite refutes wapiti
   CSRF.** When the probe's anonymous GET lands on a login page
   (URL path contains `/login`/`/signin`/`/auth`, or any form on

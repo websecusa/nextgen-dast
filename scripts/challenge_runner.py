@@ -123,13 +123,20 @@ def run(aid: int, safe_only: bool = False) -> None:
     #   * info-severity     → reconnaissance signal, not vulnerabilities;
     #                         probing them produces noise and drains
     #                         budget without analyst value.
-    #   * already-terminal  → validation_status in (validated,
-    #                         false_positive). The probe already gave a
-    #                         confident verdict; re-running on every
-    #                         bulk pass would burn budget and pollute
-    #                         the audit log. Re-runnable states
-    #                         (inconclusive, errored, unvalidated)
-    #                         flow through to the eligible bucket.
+    #   * false_positive    → validation_status == 'false_positive'.
+    #                         Either the probe was confident the
+    #                         finding wasn't real OR the analyst
+    #                         clicked "Mark false positive". Either
+    #                         way it's intentional triage, and bulk
+    #                         re-running could undo that suppression
+    #                         if the probe later changes its mind.
+    #                         (validated is NOT skipped here -- when
+    #                         a probe is updated, previously-validated
+    #                         findings need to be re-evaluated against
+    #                         the new logic, otherwise stale verdicts
+    #                         live on forever. The write path below
+    #                         guards against a flaky re-run degrading
+    #                         a confident validated verdict.)
     #   * non-open status   → fixed / accepted_risk / false_positive on
     #                         findings.status — the analyst already
     #                         dispositioned the row. Skipping respects
@@ -165,7 +172,8 @@ def run(aid: int, safe_only: bool = False) -> None:
         _dispatch_fast_path = None
         _fast_path_to_verdict = None
 
-    skip_counts = {"info": 0, "terminal": 0, "non_open": 0, "no_probe": 0}
+    skip_counts = {"info": 0, "false_positive": 0, "non_open": 0,
+                    "no_probe": 0}
     # plan entries are (finding, probe_or_None). probe=None means
     # "use the fast-path dispatcher instead of a toolkit probe".
     plan: list[tuple[dict, Optional[dict]]] = []
@@ -174,8 +182,12 @@ def run(aid: int, safe_only: bool = False) -> None:
             skip_counts["info"] += 1
             continue
         vs = (f.get("validation_status") or "unvalidated").lower()
-        if vs in ("validated", "false_positive"):
-            skip_counts["terminal"] += 1
+        if vs == "false_positive":
+            # Confident refutation OR analyst override -- both are
+            # intentional triage. Don't undo it on a bulk pass. To
+            # re-evaluate a false_positive, the analyst clicks the
+            # per-finding Challenge button.
+            skip_counts["false_positive"] += 1
             continue
         st = (f.get("status") or "open").lower()
         if st != "open":
@@ -213,7 +225,7 @@ def run(aid: int, safe_only: bool = False) -> None:
     total = len(plan)
     skipped_total = sum(skip_counts.values())
     skip_summary = (f"skipped {skipped_total}: "
-                    f"{skip_counts['terminal']} already-validated, "
+                    f"{skip_counts['false_positive']} false-positive, "
                     f"{skip_counts['info']} info, "
                     f"{skip_counts['non_open']} closed-status, "
                     f"{skip_counts['no_probe']} no-probe")
@@ -281,6 +293,26 @@ def run(aid: int, safe_only: bool = False) -> None:
 
         new_status = toolkit_mod.verdict_to_status(verdict)
         counts[new_status] = counts.get(new_status, 0) + 1
+
+        # No-downgrade guard. We re-run validated findings (so a
+        # probe-update can re-classify stale verdicts), but a flaky
+        # network re-run that returns inconclusive / errored MUST NOT
+        # wipe out a previously-confident validated verdict. Apply the
+        # new verdict only when it's at least as decisive as the old
+        # one. The hierarchy is: false_positive / validated  >>
+        # inconclusive / errored. (The earlier per-finding behavior
+        # always wrote unconditionally; that's fine for an explicit
+        # analyst click but unsafe under bulk where one transient
+        # connection failure could erase dozens of confident verdicts.)
+        prior_vs = (f.get("validation_status") or "unvalidated").lower()
+        if (prior_vs == "validated"
+                and new_status in ("inconclusive", "errored")):
+            print(f"[challenge_runner] preserving validated verdict on "
+                  f"finding #{f['id']} -- new run was {new_status} "
+                  f"(probe={probe_label}, will not downgrade)",
+                  flush=True)
+            time.sleep(0.5)
+            continue
 
         # Same write logic as the per-finding route: flip findings.status
         # too when the verdict is a confident false positive.
