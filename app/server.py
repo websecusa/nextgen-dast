@@ -4614,6 +4614,23 @@ def _detect_header_check_target(finding: dict) -> Optional[str]:
     return None
 
 
+# testssl emits IDs with a "<hostCert#N>" suffix when the host serves
+# multiple certs (different SAN sets, dual-stack v4/v6, etc.). The
+# rest of the dispatch is keyed on the bare ID, so normalize at the
+# entry point — without this, cert_notAfter matched but
+# cert_notAfter <hostCert#1> didn't, and 12 cert/DNS rows across our
+# assessments were silently bucketed as "no fast path" by both the
+# per-finding Challenge button and the bulk runner. Single fix here
+# applies to every dispatcher and every classifier downstream.
+_TESTSSL_HOSTCERT_SUFFIX = re.compile(r"\s*<hostCert#\d+>\s*$")
+
+
+def _normalize_testssl_id(rid: str) -> str:
+    if not rid:
+        return rid
+    return _TESTSSL_HOSTCERT_SUFFIX.sub("", rid).strip()
+
+
 def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
     """Single source of truth for "does this finding have a sub-second
     deterministic verification path?" If yes, run it and return the
@@ -4653,9 +4670,11 @@ def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
         return _finding_test_cookie_fast(host, port, detected_cookie, finding)
 
     # 2. testssl-id-keyed dispatch (only when raw_data carries an id,
-    #    typically source_tool == 'testssl').
+    #    typically source_tool == 'testssl'). Normalize the ID first
+    #    so testssl's "<hostCert#N>" multi-cert suffix doesn't shadow
+    #    the bare-ID lookups (cert_notAfter <hostCert#1> -> cert_notAfter).
     raw = finding.get("raw") or {}
-    rid = (raw.get("id") or "").strip()
+    rid = _normalize_testssl_id((raw.get("id") or "").strip())
     if not rid:
         return None
     if rid.lower() in _HEADER_FAST_ID_TO_HEADER:
@@ -4746,9 +4765,11 @@ def _finding_has_fast_path(finding: dict) -> bool:
     if _detect_cookie_check_target(finding):
         return True
     # testssl-id-keyed dispatch (only relevant when raw_data carries
-    # an id, typically source_tool == 'testssl').
+    # an id, typically source_tool == 'testssl'). Normalize away
+    # testssl's "<hostCert#N>" multi-cert suffix so the lookup matches
+    # the bare-ID entries in the maps.
     raw = finding.get("raw") or {}
-    rid = (raw.get("id") or "").strip()
+    rid = _normalize_testssl_id((raw.get("id") or "").strip())
     if not rid:
         return False
     rid_lower = rid.lower()
