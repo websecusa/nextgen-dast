@@ -92,6 +92,12 @@ _WRITABLE_FIELDS = (
     # row so a scheduled scan inherits the debug + budget the schedule
     # was configured with. Only meaningful for llm_tier='advanced'.
     "llm_debug", "enhanced_ai_budget_usd",
+    # Role-aware Enhanced-AI-Testing controls. Only honored when the
+    # schedule has profile=premium AND llm_tier=advanced; the caller
+    # (server.py:schedule_update / api.py) enforces the required-field
+    # combo before reaching here. The two TEXT fields are read verbatim
+    # into the weakness-discovery and fidelity prompts.
+    "enhanced_ai_testing", "role_scope_description", "role_restrictions",
 )
 
 
@@ -116,7 +122,8 @@ def _normalize(payload: dict) -> dict:
 
     # Booleans (forms send "on" / "1" / missing).
     for k in ("scan_http", "scan_https", "enabled",
-              "skip_if_running", "keep_only_latest", "llm_debug"):
+              "skip_if_running", "keep_only_latest", "llm_debug",
+              "enhanced_ai_testing"):
         if k in out:
             out[k] = 1 if out[k] in (1, "1", True, "on", "true") else 0
 
@@ -124,7 +131,8 @@ def _normalize(payload: dict) -> dict:
     for k in ("creds_username", "creds_password", "login_url",
               "application_id", "start_after", "end_before",
               "llm_endpoint_id", "user_agent_id",
-              "enhanced_ai_budget_usd"):
+              "enhanced_ai_budget_usd",
+              "role_scope_description", "role_restrictions"):
         if k in out and (out[k] is None or out[k] == ""):
             out[k] = None
 
@@ -259,9 +267,11 @@ def _materialize(sched: dict) -> int:
                llm_endpoint_id, user_agent_id,
                creds_username, creds_password, login_url,
                application_id, schedule_id, keep_only_latest,
-               llm_debug, enhanced_ai_budget_usd, status)
+               llm_debug, enhanced_ai_budget_usd,
+               enhanced_ai_testing, role_scope_description,
+               role_restrictions, status)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, 'queued')""",
+                   %s, %s, %s, %s, %s, 'queued')""",
         (
             sched["fqdn"],
             int(sched.get("scan_http") or 0),
@@ -278,6 +288,9 @@ def _materialize(sched: dict) -> int:
             int(sched.get("keep_only_latest") or 0),
             int(sched.get("llm_debug") or 0),
             sched.get("enhanced_ai_budget_usd"),
+            int(sched.get("enhanced_ai_testing") or 0),
+            sched.get("role_scope_description"),
+            sched.get("role_restrictions"),
         ),
     )
 

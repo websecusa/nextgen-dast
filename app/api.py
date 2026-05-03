@@ -360,6 +360,37 @@ class CreateScanRequest(BaseModel):
                     "Server clamps to min(system_default, "
                     "user.max_spend_usd); non-superadmin callers always "
                     "get the clamped value regardless of submitted.")
+    # Role-aware Enhanced-AI-Testing controls. Only honored when
+    # profile == 'premium' AND llm_tier == 'advanced'; the orchestrator
+    # additionally requires enhanced_ai_testing == True before invoking
+    # the enhanced_ai pass. When all three gate conditions hold,
+    # creds_username + creds_password + login_url + role_scope_description
+    # + role_restrictions are all required (the create endpoint returns
+    # 400 otherwise). Outside that corner, the three fields are silently
+    # ignored so a non-premium caller cannot smuggle role context in.
+    enhanced_ai_testing: bool = Field(
+        False,
+        description="Opt-in for the role-aware Enhanced-AI pass. Only "
+                    "honored when profile='premium' AND llm_tier="
+                    "'advanced'; outside that corner the value is "
+                    "silently ignored. When True, requires creds + "
+                    "login_url + role_scope_description + "
+                    "role_restrictions.")
+    role_scope_description: Optional[str] = Field(
+        None,
+        description="Free-form description of the authenticated user "
+                    "role and its authorized scope (e.g. 'Auditor with "
+                    "read-only access to every assessment and report'). "
+                    "Read verbatim into both Enhanced-AI prompt passes.")
+    role_restrictions: Optional[str] = Field(
+        None,
+        description="Free-form description of what the user must NOT "
+                    "be able to do (e.g. 'Cannot create users, launch "
+                    "scans, or edit findings'). Read verbatim into "
+                    "both Enhanced-AI prompt passes; capabilities the "
+                    "user IS authorized for are auto-tagged "
+                    "expected_behavior info-severity rather than "
+                    "raised as findings.")
 
 
 class CreateScheduleRequest(BaseModel):
@@ -410,6 +441,24 @@ class CreateScheduleRequest(BaseModel):
         None,
         description="Per-scan Enhanced-AI budget cap in USD; server "
                     "clamps to system + user max on each materialization.")
+    # Role-aware Enhanced-AI-Testing controls. See CreateScanRequest
+    # for the full semantics; the schedule materializer copies these
+    # three columns onto every assessment row it creates so a recurring
+    # scan inherits the role context.
+    enhanced_ai_testing: bool = Field(
+        False,
+        description="Opt-in for the role-aware Enhanced-AI pass on "
+                    "every materialization. Same gating as a one-off "
+                    "scan: requires profile='premium' + "
+                    "llm_tier='advanced' to take effect.")
+    role_scope_description: Optional[str] = Field(
+        None,
+        description="Authenticated user's authorized scope. See the "
+                    "matching field on CreateScanRequest.")
+    role_restrictions: Optional[str] = Field(
+        None,
+        description="What the authenticated user must NOT be able to "
+                    "do. See the matching field on CreateScanRequest.")
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -436,6 +485,9 @@ class UpdateScheduleRequest(BaseModel):
     keep_only_latest: Optional[bool] = None
     llm_debug: Optional[bool] = None
     enhanced_ai_budget_usd: Optional[float] = None
+    enhanced_ai_testing: Optional[bool] = None
+    role_scope_description: Optional[str] = None
+    role_restrictions: Optional[str] = None
 
 
 class CreateScanResponse(BaseModel):
@@ -643,13 +695,49 @@ def api_create_scan(
             effective_budget = round(
                 max(0.0, min(float(body.enhanced_ai_budget_usd), sysd)), 2)
 
+    # Role-aware Enhanced-AI-Testing gate + validation. Mirrors the form
+    # path in server.py:assess_start so a programmatic caller cannot
+    # smuggle the role textareas into a non-premium scan, and so the
+    # required-fields combo (creds + login_url + both role textareas)
+    # is enforced regardless of which entry point the caller uses.
+    if (body.profile == "premium" and body.llm_tier == "advanced"
+            and body.enhanced_ai_testing):
+        ear_flag = 1
+        missing: list[str] = []
+        if not (body.creds_username or "").strip():
+            missing.append("creds_username")
+        if not (body.creds_password or "").strip():
+            missing.append("creds_password")
+        if not (body.login_url or "").strip():
+            missing.append("login_url")
+        if not (body.role_scope_description or "").strip():
+            missing.append("role_scope_description")
+        if not (body.role_restrictions or "").strip():
+            missing.append("role_restrictions")
+        if missing:
+            raise HTTPException(
+                400,
+                "enhanced_ai_testing requires: " + ", ".join(missing))
+        # Length-cap the role textareas so a programmatic caller cannot
+        # blow out the prompt-token budget; matches server.py limit.
+        role_scope_value: Optional[str] = (
+            body.role_scope_description.strip()[:8000])
+        role_restrict_value: Optional[str] = (
+            body.role_restrictions.strip()[:8000])
+    else:
+        ear_flag = 0
+        role_scope_value = None
+        role_restrict_value = None
+
     aid = db.execute(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
             application_id, keep_only_latest, llm_debug,
-            enhanced_ai_budget_usd, status)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued')""",
+            enhanced_ai_budget_usd, enhanced_ai_testing,
+            role_scope_description, role_restrictions, status)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                   'queued')""",
         (fqdn,
          1 if body.scan_http else 0,
          1 if body.scan_https else 0,
@@ -662,7 +750,10 @@ def api_create_scan(
          application_id,
          1 if body.keep_only_latest else 0,
          debug_flag,
-         effective_budget),
+         effective_budget,
+         ear_flag,
+         role_scope_value,
+         role_restrict_value),
     )
     _spawn_orchestrator(aid)
     row = db.query_one(
@@ -902,6 +993,28 @@ def api_create_schedule(
     progress as usual. Validation errors are returned as 400 with the
     croniter / field-validation message in `detail`."""
     _require_token(request, authorization, x_api_token)
+    # Role-aware Enhanced-AI gate. Same combo enforced on POST /scans
+    # and the form path; an API caller cannot smuggle role context into
+    # a non-premium scheduled scan or skip the required fields. PATCH
+    # remains a partial update by design (the form path is the
+    # authority for required-field enforcement on existing rows).
+    if (body.profile == "premium" and body.llm_tier == "advanced"
+            and body.enhanced_ai_testing):
+        missing: list[str] = []
+        if not (body.creds_username or "").strip():
+            missing.append("creds_username")
+        if not (body.creds_password or "").strip():
+            missing.append("creds_password")
+        if not (body.login_url or "").strip():
+            missing.append("login_url")
+        if not (body.role_scope_description or "").strip():
+            missing.append("role_scope_description")
+        if not (body.role_restrictions or "").strip():
+            missing.append("role_restrictions")
+        if missing:
+            raise HTTPException(
+                400,
+                "enhanced_ai_testing requires: " + ", ".join(missing))
     try:
         sid = schedules_mod.create(body.model_dump())
     except ValueError as e:

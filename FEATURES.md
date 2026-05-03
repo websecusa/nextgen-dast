@@ -428,6 +428,32 @@ Endpoints configured at `/llm`. Multiple endpoints can be registered;
 the active one is selected per call. Per-finding enrichment can be
 "locked" so the analyst's edits are not overwritten by a re-run.
 
+### 11.1 Role-aware Enhanced-AI-Testing
+
+Opt-in pass that runs only in the `profile=premium` + `llm_tier=advanced`
+corner. Ticking the **Scan with enhanced_ai_testing** checkbox on the
+assess form (or `enhanced_ai_testing=true` in `POST /api/v1/scans`)
+makes the credentialed-scan fields and two free-text fields required:
+
+* **Describe the user role and what this user's scope is** — e.g.
+  *"Auditor — read-only access to every assessment, finding, and
+  report; can export PDFs and CSVs."*
+* **What the user should NOT be able to do in the test** — e.g.
+  *"Cannot create users, launch scans, edit findings, manage API
+  tokens, or alter LLM endpoints."*
+
+Both texts are read verbatim into both Enhanced-AI prompt passes. The
+weakness-discovery preamble instructs the model to suppress findings
+that merely demonstrate authorized capabilities; the fidelity grader
+gains a fourth verdict — `expected_behavior` — that auto-tags in-scope
+findings with `validation_probe='enhanced_ai_role_scope'` and severity
+forced to `info`. Real out-of-scope abuses (XSS, SQLi, IDOR, SSRF,
+privilege escalation beyond scope) keep their original severity.
+
+The role context is persisted on the `assessments` row and travels
+with Re-scan prefill, so a recurring or repeated scan inherits the
+same authorization model without re-typing it.
+
 
 ## 12. Cleanup
 

@@ -2479,7 +2479,13 @@ def assess_page(request: Request):
         src = db.query_one(
             "SELECT fqdn, application_id, scan_http, scan_https, profile, "
             "llm_tier, llm_endpoint_id, user_agent_id, creds_username, "
-            "login_url, keep_only_latest, creds_password "
+            "login_url, keep_only_latest, creds_password, "
+            # Role-aware Enhanced-AI-Testing fields. Carried through so
+            # a Re-scan prefill arrives with the operator's prior role
+            # description and out-of-scope restrictions intact, in the
+            # same shape the template's ngdToggleEnhancedAiRole() helper
+            # expects.
+            "enhanced_ai_testing, role_scope_description, role_restrictions "
             "FROM assessments WHERE id = %s", (src_id,))
         if src:
             prefill = dict(src)
@@ -2535,6 +2541,20 @@ def assess_start(
     # whatever a non-superadmin submitted.
     llm_debug: Optional[str] = Form(None),
     enhanced_ai_budget_usd: str = Form(""),
+    # Role-aware Enhanced-AI-Testing controls. Only meaningful when
+    # profile == 'premium' AND llm_tier == 'advanced'; the orchestrator
+    # additionally requires enhanced_ai_testing == 1 before invoking
+    # the enhanced_ai pass. The two textareas describe the authenticated
+    # user's authorized scope and what the user must NOT be able to do,
+    # and are read verbatim into both prompt passes (weakness-discovery
+    # + fidelity) so the model can suppress findings that merely
+    # demonstrate authorized capabilities. When checkbox is on, all five
+    # of (creds_username, creds_password, login_url,
+    # role_scope_description, role_restrictions) are required -- the
+    # validation block below mirrors the browser-side check.
+    enhanced_ai_testing: Optional[str] = Form(None),
+    role_scope_description: str = Form(""),
+    role_restrictions: str = Form(""),
     # Re-scan flow. When the form was reached via "Re-scan" on an
     # assessment detail page, this hidden field carries the source
     # assessment id. If the visible password field is left as the
@@ -2614,6 +2634,41 @@ def assess_start(
         effective_budget = None
         debug_flag = 0
 
+    # Role-aware Enhanced-AI-Testing gate + validation. The checkbox is
+    # only meaningful in the (premium + advanced) corner; outside that
+    # corner we reject the value entirely so a stale browser tick (e.g.
+    # an operator who flipped llm_tier back to 'basic' without
+    # unchecking) cannot smuggle role context into a non-premium scan.
+    # When the checkbox is honored, all five (creds + login_url + the
+    # two role textareas) are required -- the same combo the template's
+    # ngdToggleEnhancedAiRole() helper enforces in the browser.
+    if profile == "premium" and llm_tier == "advanced" and enhanced_ai_testing:
+        ear_flag = 1
+        missing = []
+        if not (creds_username or "").strip():
+            missing.append("creds_username")
+        if not (creds_password or "").strip():
+            missing.append("creds_password")
+        if not (login_url or "").strip():
+            missing.append("login_url")
+        if not (role_scope_description or "").strip():
+            missing.append("role_scope_description")
+        if not (role_restrictions or "").strip():
+            missing.append("role_restrictions")
+        if missing:
+            raise HTTPException(
+                400,
+                "enhanced_ai_testing requires: " + ", ".join(missing))
+        # Length-cap the role textareas. Both columns are TEXT (~64 KB);
+        # 8 KB each is plenty for a thorough role description and keeps
+        # the prompt-token budget bounded.
+        role_scope_value = role_scope_description.strip()[:8000]
+        role_restrict_value = role_restrictions.strip()[:8000]
+    else:
+        ear_flag = 0
+        role_scope_value = None
+        role_restrict_value = None
+
     # Schedule branch: persist a scan_schedules row instead of running now.
     # Validation lives in app/schedules.py; we surface ValueError as a 400
     # so the form can re-render with the message inline.
@@ -2640,6 +2695,9 @@ def assess_start(
                 "keep_only_latest": keep_flag,
                 "llm_debug": debug_flag,
                 "enhanced_ai_budget_usd": effective_budget,
+                "enhanced_ai_testing": ear_flag,
+                "role_scope_description": role_scope_value,
+                "role_restrictions": role_restrict_value,
             })
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -2650,9 +2708,10 @@ def assess_start(
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
             application_id, keep_only_latest, llm_debug,
-            enhanced_ai_budget_usd, status)
+            enhanced_ai_budget_usd, enhanced_ai_testing,
+            role_scope_description, role_restrictions, status)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   'queued')""",
+                   %s, %s, %s, 'queued')""",
         (fqdn,
          1 if scan_http else 0,
          1 if scan_https else 0,
@@ -2664,7 +2723,10 @@ def assess_start(
          application_id,
          keep_flag,
          debug_flag,
-         effective_budget),
+         effective_budget,
+         ear_flag,
+         role_scope_value,
+         role_restrict_value),
     )
     # spawn detached orchestrator
     log_path = LOGS_DIR / f"orchestrator_{aid}.log"
@@ -2793,6 +2855,14 @@ def schedule_update(
     # touching schedules_mod._materialize beyond the column list.
     llm_debug: Optional[str] = Form(None),
     enhanced_ai_budget_usd: str = Form(""),
+    # Role-aware Enhanced-AI-Testing controls. Mirror /assess so a
+    # scheduled scan inherits the same role context as a one-off; gating
+    # on (premium + advanced + checkbox) is identical to assess_start
+    # above so a scheduled basic-tier scan can never sneak the role
+    # textareas in.
+    enhanced_ai_testing: Optional[str] = Form(None),
+    role_scope_description: str = Form(""),
+    role_restrictions: str = Form(""),
 ):
     """Apply edits from the schedule detail form. Empty strings are
     forwarded to schedules_mod.update which normalizes them to NULL for
@@ -2805,6 +2875,33 @@ def schedule_update(
     else:
         effective_budget = None
         debug_flag = 0
+    # Same gate as assess_start: only honor the role-aware fields in the
+    # premium + advanced corner. Required-fields enforcement also
+    # mirrors the form path -- a tampered DOM cannot bypass it.
+    if (profile == "premium" and llm_tier == "advanced"
+            and enhanced_ai_testing):
+        ear_flag = 1
+        missing = []
+        if not (creds_username or "").strip():
+            missing.append("creds_username")
+        if not (creds_password or "").strip():
+            missing.append("creds_password")
+        if not (login_url or "").strip():
+            missing.append("login_url")
+        if not (role_scope_description or "").strip():
+            missing.append("role_scope_description")
+        if not (role_restrictions or "").strip():
+            missing.append("role_restrictions")
+        if missing:
+            raise HTTPException(
+                400,
+                "enhanced_ai_testing requires: " + ", ".join(missing))
+        role_scope_value = role_scope_description.strip()[:8000]
+        role_restrict_value = role_restrictions.strip()[:8000]
+    else:
+        ear_flag = 0
+        role_scope_value = None
+        role_restrict_value = None
     payload = {
         "name": name, "fqdn": fqdn,
         "profile": profile or None, "llm_tier": llm_tier or None,
@@ -2823,6 +2920,9 @@ def schedule_update(
         "keep_only_latest": 1 if keep_only_latest else 0,
         "llm_debug": debug_flag,
         "enhanced_ai_budget_usd": effective_budget,
+        "enhanced_ai_testing": ear_flag,
+        "role_scope_description": role_scope_value,
+        "role_restrictions": role_restrict_value,
     }
     try:
         schedules_mod.update(sid, payload)

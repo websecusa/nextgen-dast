@@ -532,7 +532,79 @@ MIGRATIONS: list = [
     # any future code path that only inspects .status is also right.
     ("2026_05_03_backfill_status_from_validation_status",
      lambda: __import__("__main__")),  # placeholder, real fn below
+    # 2026-05-03: refresh the seeded fidelity prompt to the v2 text
+    # that includes the 'expected_behavior' verdict and the
+    # {role_context_block} placeholder. Existing 2.1.1 databases
+    # already have a seeded row from the v1 release; without this
+    # migration the role-aware verdict path is dead code until an
+    # operator manually clicks "Restore to default". Operator-edited
+    # rows are detected by checking whether 'expected_behavior' is
+    # already in the system_prompt and are left untouched.
+    # Registered with a placeholder lambda; the real function is
+    # defined further down (alongside other 2026-05-03 migrations) and
+    # bound into this list by the same late-binding loop the
+    # backfill-status migration uses.
+    ("2026_05_03_refresh_fidelity_prompt_for_role_scope",
+     lambda: __import__("__main__")),
 ]
+
+
+def m_2026_05_03_refresh_fidelity_prompt_for_role_scope() -> str:
+    """Refresh the seeded fidelity prompt to the v2 text that includes
+    the 'expected_behavior' verdict and the {role_context_block}
+    placeholder.
+
+    Why this is needed: existing 2.1.1 databases already have a row in
+    `ai_prompts` with slot='advanced_ai_testing.fidelity', is_seeded=1,
+    and the original v1 system_prompt + user_template. seed_defaults_if_empty
+    only inserts when the slot+name pair is missing, so on an upgrade
+    the row keeps the v1 text and the new role-aware verdict path is
+    dead code until an operator clicks "Restore to default" by hand.
+    This migration does that automatically -- but only for rows that
+    look unchanged from v1, so an operator's customizations are
+    preserved.
+
+    Detection heuristic: the row is considered "v1 default" when
+    is_seeded=1 AND the system_prompt does NOT contain the substring
+    'expected_behavior'. Once the migration writes the v2 text, the
+    same check on the next boot is False, so re-runs are no-ops.
+
+    For operator-edited rows we surface a one-line note in the
+    migration summary so the operator knows their custom prompt did
+    NOT receive the role-aware verdict and can manually merge if
+    desired."""
+    import enhanced_ai_prompts as eap
+
+    rows = db.query_all(
+        "SELECT id, system_prompt, user_template "
+        "FROM ai_prompts "
+        "WHERE slot = %s AND is_seeded = 1",
+        (eap.SLOT_FIDELITY,))
+    if not rows:
+        return "no seeded fidelity row to refresh (will be added by seed_defaults_if_empty on next boot)"
+
+    refreshed = 0
+    skipped_custom = 0
+    for r in rows:
+        sys_prompt = r.get("system_prompt") or ""
+        if "expected_behavior" in sys_prompt:
+            # Already on the v2 text (either via this migration on a
+            # prior boot, or because an operator manually restored
+            # to default after pulling the new image).
+            continue
+        # Looks like the v1 default — overwrite with the in-code v2.
+        # We only update body fields, leaving is_active alone so a
+        # paused row stays paused.
+        db.execute(
+            "UPDATE ai_prompts "
+            "SET system_prompt = %s, user_template = %s "
+            "WHERE id = %s",
+            (eap.FIDELITY_SYSTEM, eap.FIDELITY_USER, r["id"]))
+        refreshed += 1
+
+    return (f"refreshed {refreshed} seeded fidelity prompt(s) to v2 "
+            f"(role-aware verdict + role_context_block placeholder); "
+            f"{skipped_custom} operator-edited row(s) left untouched")
 
 
 def m_2026_05_03_backfill_status_from_validation_status() -> str:
@@ -561,14 +633,19 @@ def m_2026_05_03_backfill_status_from_validation_status() -> str:
     return f"back-filled {len(rows)} half-flipped FP row(s) to status='false_positive'"
 
 
-# Re-bind the placeholder in MIGRATIONS now that the function exists.
+# Re-bind the placeholders in MIGRATIONS now that the functions exist.
 # The registration list is built at import time so we patch it here
 # rather than re-ordering the file (the dedup migrations need their
 # m_* helpers defined first too).
+_LATE_BIND = {
+    "2026_05_03_backfill_status_from_validation_status":
+        m_2026_05_03_backfill_status_from_validation_status,
+    "2026_05_03_refresh_fidelity_prompt_for_role_scope":
+        m_2026_05_03_refresh_fidelity_prompt_for_role_scope,
+}
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
-    if _id == "2026_05_03_backfill_status_from_validation_status":
-        MIGRATIONS[_i] = (_id, m_2026_05_03_backfill_status_from_validation_status)
-        break
+    if _id in _LATE_BIND:
+        MIGRATIONS[_i] = (_id, _LATE_BIND[_id])
 
 
 # ---- public entry point ----------------------------------------------------

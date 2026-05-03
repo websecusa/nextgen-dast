@@ -69,6 +69,8 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
         "worker_pid", "filter_info", "application_id",
         "schedule_id", "keep_only_latest",
         "llm_debug", "enhanced_ai_budget_usd",
+        "enhanced_ai_testing", "role_scope_description",
+        "role_restrictions",
         "created_at", "started_at", "finished_at",
     },
     "api_tokens": {
@@ -123,6 +125,8 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
         "creds_password", "login_url", "application_id", "cron_expr",
         "start_after", "end_before", "enabled", "skip_if_running",
         "keep_only_latest", "llm_debug", "enhanced_ai_budget_usd",
+        "enhanced_ai_testing", "role_scope_description",
+        "role_restrictions",
         "next_run_at", "last_run_at",
         "last_assessment_id", "created_by", "created_at", "updated_at",
     },
