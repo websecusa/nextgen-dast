@@ -143,8 +143,32 @@ def run(aid: int, safe_only: bool = False) -> None:
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (aid,))
 
+    # Lazy import of the fast-path classifier from server.py. Lets the
+    # bulk runner also benefit from the deterministic urllib / openssl
+    # / nmap / dnspython paths — without it, findings whose fast-path
+    # exists but whose toolkit probe doesn't (header-missing rows from
+    # nikto / wapiti / nuclei / LLM) would silently get bucketed as
+    # "no_probe" and skipped. Same classifier the per-finding
+    # Challenge button uses so the bulk pass and the manual click
+    # always agree on what's eligible.
+    try:
+        from server import (
+            _finding_has_fast_path as _has_fast_path,
+            _dispatch_finding_fast_path as _dispatch_fast_path,
+            _fast_path_response_to_verdict as _fast_path_to_verdict,
+        )
+    except Exception as _imp_err:
+        print(f"[challenge_runner] WARN: fast-path import failed: "
+              f"{_imp_err!r} — bulk run will skip fast-path-only "
+              f"findings (no_probe bucket)", flush=True)
+        _has_fast_path = lambda _f: False  # noqa: E731
+        _dispatch_fast_path = None
+        _fast_path_to_verdict = None
+
     skip_counts = {"info": 0, "terminal": 0, "non_open": 0, "no_probe": 0}
-    plan: list[tuple[dict, dict]] = []
+    # plan entries are (finding, probe_or_None). probe=None means
+    # "use the fast-path dispatcher instead of a toolkit probe".
+    plan: list[tuple[dict, Optional[dict]]] = []
     for f in candidates:
         if (f.get("severity") or "").lower() == "info":
             skip_counts["info"] += 1
@@ -157,8 +181,24 @@ def run(aid: int, safe_only: bool = False) -> None:
         if st != "open":
             skip_counts["non_open"] += 1
             continue
+        # Decode raw_data once so the fast-path classifier sees a
+        # structured `raw` field (it inspects raw['id'] for testssl
+        # IDs alongside title patterns).
+        if f.get("raw_data") and not f.get("raw"):
+            try:
+                f["raw"] = json.loads(f["raw_data"])
+            except Exception:
+                f["raw"] = None
         p = toolkit_mod.find_probe_for_finding(f)
         if not p:
+            # Before bucketing as no_probe, check whether the fast
+            # path can handle this finding. Most header / cookie /
+            # cipher / cert / DNS_CAA findings from non-testssl tools
+            # land here — without this check, the bulk runner
+            # silently dropped them.
+            if _has_fast_path(f) and _dispatch_fast_path is not None:
+                plan.append((f, None))   # probe=None signals fast-path
+                continue
             skip_counts["no_probe"] += 1
             continue
         # safe-only mode adds one more filter: the matched probe must
@@ -193,20 +233,44 @@ def run(aid: int, safe_only: bool = False) -> None:
     counts = {"validated": 0, "false_positive": 0,
               "inconclusive": 0, "errored": 0}
     for i, (f, p) in enumerate(plan, 1):
-        _step(aid, f"{label}: running probe {i}/{total} "
-                   f"({p['name']} on finding #{f['id']})")
-        # Shared config + timeout + verdict mapping with the per-finding
-        # /challenge route. See toolkit.build_finding_config for what
-        # gets populated; the bulk runner used to have its own stripped-
-        # down version, which was the root cause of probes (auth_logout,
-        # config_hsts on path-only urls, etc.) silently erroring under
-        # bulk Challenge while the per-finding click validated them.
-        config = toolkit_mod.build_finding_config(f, p, cookie=session_cookie)
-        timeout = toolkit_mod.probe_timeout(p)
-        try:
-            verdict = toolkit_mod.run_probe(p["name"], config, timeout=timeout)
-        except Exception as e:
-            verdict = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # Branch by entry type: probe=None means use the fast-path
+        # dispatcher (header / cookie / cert / protocol / cipher /
+        # vuln / DNS) instead of a toolkit probe subprocess.
+        if p is None:
+            probe_label = "fast_path"
+            _step(aid, f"{label}: running probe {i}/{total} "
+                       f"(fast_path on finding #{f['id']})")
+            try:
+                resp = _dispatch_fast_path(f)
+                if resp is None:
+                    # Defensive — has_fast_path said yes but dispatcher
+                    # returned None. Treat as errored so the analyst
+                    # can investigate; don't silently skip.
+                    verdict = {"ok": False, "error": "dispatcher_miss"}
+                else:
+                    verdict = _fast_path_to_verdict(resp)
+            except Exception as e:
+                verdict = {"ok": False,
+                            "error": f"{type(e).__name__}: {e}"}
+        else:
+            probe_label = p["name"][:64]
+            _step(aid, f"{label}: running probe {i}/{total} "
+                       f"({p['name']} on finding #{f['id']})")
+            # Shared config + timeout + verdict mapping with the per-finding
+            # /challenge route. See toolkit.build_finding_config for what
+            # gets populated; the bulk runner used to have its own stripped-
+            # down version, which was the root cause of probes (auth_logout,
+            # config_hsts on path-only urls, etc.) silently erroring under
+            # bulk Challenge while the per-finding click validated them.
+            config = toolkit_mod.build_finding_config(
+                f, p, cookie=session_cookie)
+            timeout = toolkit_mod.probe_timeout(p)
+            try:
+                verdict = toolkit_mod.run_probe(
+                    p["name"], config, timeout=timeout)
+            except Exception as e:
+                verdict = {"ok": False,
+                            "error": f"{type(e).__name__}: {e}"}
 
         # Decorate with auth diagnostics + scrub any echoed Cookie headers.
         if isinstance(verdict, dict):
@@ -226,14 +290,14 @@ def run(aid: int, safe_only: bool = False) -> None:
                 "validation_probe = %s, validation_run_at = NOW(), "
                 "validation_evidence = %s, status = 'false_positive' "
                 "WHERE id = %s",
-                (new_status, p["name"][:64],
+                (new_status, probe_label,
                  json.dumps(verdict, default=str)[:65000], f["id"]))
         else:
             db.execute(
                 "UPDATE findings SET validation_status = %s, "
                 "validation_probe = %s, validation_run_at = NOW(), "
                 "validation_evidence = %s WHERE id = %s",
-                (new_status, p["name"][:64],
+                (new_status, probe_label,
                  json.dumps(verdict, default=str)[:65000], f["id"]))
 
         time.sleep(0.5)
