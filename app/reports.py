@@ -444,8 +444,22 @@ def _gather(assessment_id: int) -> Optional[dict]:
     # Counts are kept separately so an optional appendix can list
     # totals per triage outcome.
     _PDF_TRIAGED = {"false_positive", "fixed", "accepted_risk"}
+    # `_pdf_is_triaged` mirrors server.py:_is_finding_triaged so the
+    # PDF report and the workspace agree on what counts as triaged.
+    # Status OR validation_status='false_positive' both count as FP —
+    # a finding refuted by a probe should not show up in the PDF
+    # even if the analyst hasn't manually clicked Mark False Positive
+    # yet. Same defensive principle as the workspace filter.
+    def _pdf_is_triaged(f):
+        if (f.get("status") or "open") in _PDF_TRIAGED:
+            return True
+        if (f.get("validation_status") or "") == "false_positive":
+            return True
+        return False
     excluded_fp_count = sum(1 for f in all_findings
-                            if f.get("status") == "false_positive")
+                            if f.get("status") == "false_positive"
+                               or (f.get("validation_status") or "")
+                                   == "false_positive")
     excluded_fixed_count = sum(1 for f in all_findings
                                if f.get("status") == "fixed")
     excluded_accepted_count = sum(1 for f in all_findings
@@ -457,12 +471,12 @@ def _gather(assessment_id: int) -> Optional[dict]:
     filter_info = bool(a.get("filter_info"))
     excluded_info_count = (
         sum(1 for f in all_findings
-            if f.get("status") not in _PDF_TRIAGED
+            if not _pdf_is_triaged(f)
                and f.get("severity") == "info")
         if filter_info else 0
     )
     findings = [f for f in all_findings
-                if f.get("status") not in _PDF_TRIAGED
+                if not _pdf_is_triaged(f)
                    and not (filter_info and f.get("severity") == "info")]
 
     # Decode raw_data JSON for each finding (used for reproduction details).

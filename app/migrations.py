@@ -522,7 +522,53 @@ MIGRATIONS: list = [
     # genuine lower-version siblings in the group are still flipped).
     ("2026_05_02_fp_lower_version_fingerprint_dupes_v4",
      m_2026_05_02_fp_lower_version_fingerprint_dupes),
+    # 2026-05-03: back-fill rows where validation_status='false_positive'
+    # but findings.status is still 'open' (or 'confirmed'). Earlier
+    # versions of the LLM fidelity grader wrote only validation_status
+    # when refuting a finding; the workspace filter then missed them
+    # because it only checked .status. New code (server.py:_is_finding_triaged
+    # and the matching reports.py / api.py guards) handles this in
+    # both fields, but the back-fill keeps the data invariant true so
+    # any future code path that only inspects .status is also right.
+    ("2026_05_03_backfill_status_from_validation_status",
+     lambda: __import__("__main__")),  # placeholder, real fn below
 ]
+
+
+def m_2026_05_03_backfill_status_from_validation_status() -> str:
+    """Promote rows with validation_status='false_positive' AND
+    status NOT IN ('false_positive','fixed','accepted_risk') so the
+    overall status field also reflects the FP verdict.
+
+    Idempotent on subsequent runs (UPDATE-with-WHERE that no longer
+    matches once back-filled). Safe to leave in MIGRATIONS forever
+    as a self-healing guard.
+
+    The migration ID was registered in MIGRATIONS via a placeholder
+    lambda, then re-bound here. Pylint will frown but Python's late
+    binding lets us define the function after the registration list.
+    """
+    rows = db.query_all(
+        "SELECT id, severity, status, validation_status FROM findings "
+        "WHERE validation_status='false_positive' "
+        "  AND status NOT IN ('false_positive','fixed','accepted_risk')")
+    if not rows:
+        return "no half-flipped FPs found — nothing to back-fill"
+    db.execute(
+        "UPDATE findings SET status='false_positive' "
+        "WHERE validation_status='false_positive' "
+        "  AND status NOT IN ('false_positive','fixed','accepted_risk')")
+    return f"back-filled {len(rows)} half-flipped FP row(s) to status='false_positive'"
+
+
+# Re-bind the placeholder in MIGRATIONS now that the function exists.
+# The registration list is built at import time so we patch it here
+# rather than re-ordering the file (the dedup migrations need their
+# m_* helpers defined first too).
+for _i, (_id, _fn) in enumerate(MIGRATIONS):
+    if _id == "2026_05_03_backfill_status_from_validation_status":
+        MIGRATIONS[_i] = (_id, m_2026_05_03_backfill_status_from_validation_status)
+        break
 
 
 # ---- public entry point ----------------------------------------------------

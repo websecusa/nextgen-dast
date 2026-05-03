@@ -1448,9 +1448,7 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
             fs = findings_by_aid.get(r["id"], [])
             # Filter out triaged-away findings before grading -- the
             # PDF body does the same, so the grade input must match.
-            graded_set = [f for f in fs
-                          if (f.get("status") or "open")
-                              not in EXCLUDED_FROM_SCORE]
+            graded_set = [f for f in fs if not _is_finding_triaged(f)]
             r["open_findings"] = len(graded_set)
             r["risk_score"] = (live_per_aid.get(r["id"])
                                if r["id"] in live_per_aid
@@ -2934,23 +2932,30 @@ def assessment_detail(request: Request, aid: int,
     filter_info = bool(a.get("filter_info"))
     for f in rows:
         st = f.get("status") or "open"
-        if st == "false_positive":   fp_count += 1
+        # FP/Resolved/Archived counters use the union of status AND
+        # validation_status so a row half-flipped by a probe but not
+        # yet by the analyst still gets counted on the right pile.
+        is_fp = (st == "false_positive"
+                 or (f.get("validation_status") or "") == "false_positive")
+        if is_fp:                    fp_count += 1
         elif st == "fixed":          resolved_count += 1
         elif st == "accepted_risk":  archived_count += 1
-        # Status-tab counts EXCLUDE triaged rows (false_positive,
-        # fixed, accepted_risk). The "All" tab thus shows actionable
-        # findings only; triaged rows are reachable via the dedicated
-        # "False positives" / "Resolved" / "Fixed" / "Archive"
-        # options in the severity dropdown. Keeps the workspace
-        # focused on what's still open while preserving every path
-        # back to the triaged subsets.
-        if st not in EXCLUDED_FROM_SCORE:
+        # Status-tab counts EXCLUDE triaged rows. _is_finding_triaged
+        # checks BOTH status AND validation_status — a finding
+        # refuted by a probe (validation_status=false_positive) is
+        # treated as triaged even if its status field hasn't caught
+        # up yet. The "All" tab thus shows actionable findings only;
+        # triaged rows are reachable via the dedicated "False
+        # positives" / "Resolved" / "Fixed" / "Archive" options in
+        # the severity dropdown.
+        triaged = _is_finding_triaged(f)
+        if not triaged:
             counts_by_status["all"] += 1
             if st in ("open", "confirmed"):
                 counts_by_status["open"] += 1
             else:
                 counts_by_status["closed"] += 1
-        if st in EXCLUDED_FROM_SCORE:
+        if triaged:
             continue
         if filter_info and f.get("severity") == "info":
             info_hidden += 1
@@ -3022,7 +3027,7 @@ def assessment_detail(request: Request, aid: int,
         # above already short-circuited their own paths so picking
         # "False positives" still surfaces them as expected.
         if sev in ("", "critical", "high", "medium", "low", "info") \
-                and st in ("false_positive", "fixed", "accepted_risk"):
+                and _is_finding_triaged(f):
             continue
 
         # Status tabs
@@ -3079,6 +3084,33 @@ def assessment_detail(request: Request, aid: int,
 
 EXCLUDED_FROM_SCORE = ("false_positive", "fixed", "accepted_risk")
 
+
+def _is_finding_triaged(f: dict) -> bool:
+    """Return True if the finding has been triaged out — i.e. should
+    not appear in actionable views (severity rollup, "All severities"
+    list, risk score, PDF report, etc.).
+
+    A finding is triaged if EITHER:
+      - findings.status is in EXCLUDED_FROM_SCORE
+        (false_positive / fixed / accepted_risk — set by analyst
+        action, /challenge_inline auto-FP, /challenge_fast auto-FP,
+        the LLM fidelity grader, or back-fill migrations), OR
+      - findings.validation_status == 'false_positive'
+        (set by any probe/LLM that refutes the finding).
+
+    The two-field check is defensive: ANY code path that flips
+    validation_status to false_positive should also flip status, but
+    if it ever forgets, this helper still gives the right answer in
+    every read path. The companion migration `_backfill_status_from_validation_status`
+    runs on boot and keeps the data invariant true at the storage
+    layer too. Use this helper EVERYWHERE you would have written
+    `f['status'] in EXCLUDED_FROM_SCORE`."""
+    if (f.get("status") or "open") in EXCLUDED_FROM_SCORE:
+        return True
+    if (f.get("validation_status") or "") == "false_positive":
+        return True
+    return False
+
 # Demerit weights for the live risk-score derivation. Higher = worse,
 # so the resulting number matches the LLM's risk_score convention
 # (0 = no meaningful issues, 100 = critical / treat as incident).
@@ -3100,7 +3132,7 @@ def _live_risk_score(findings: list[dict]) -> int:
     """
     risk = 0.0
     for f in findings or []:
-        if (f.get("status") or "open") in EXCLUDED_FROM_SCORE:
+        if _is_finding_triaged(f):
             continue
         sev = f.get("severity") or "info"
         validated = (f.get("validation_status") == "validated")
