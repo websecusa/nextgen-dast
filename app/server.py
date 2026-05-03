@@ -4675,6 +4675,13 @@ def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
             return _finding_test_cipher_fast(host, port, rid, finding)
     if rid in _VULN_FAST_TESTSSL_PROBES:
         return _finding_test_vuln_fast(host, port, rid, finding)
+    # DNS_CAArecord (and the " <hostCert#N>" variant suffix testssl
+    # appends when a host serves multiple certs) → one DNS query
+    # via dnspython, sub-second. Keep this last because the regex
+    # is broad and we want the more specific id-table dispatches
+    # above to win first.
+    if re.match(r"^DNS_CAArecord(?:\s|$)", rid):
+        return _finding_test_dns_caa_fast(host, port, rid, finding)
     return None
 
 
@@ -4762,6 +4769,8 @@ def _finding_has_fast_path(finding: dict) -> bool:
         if suffix in _CIPHERLIST_OPENSSL_NAME:
             return True
     if rid in _VULN_FAST_TESTSSL_PROBES:
+        return True
+    if re.match(r"^DNS_CAArecord(?:\s|$)", rid):
         return True
     return False
 
@@ -5065,6 +5074,115 @@ def _finding_test_vuln_fast(host: str, port: int, testssl_id: str,
             "finding": finding_text,
         }],
         "stdout_excerpt": out[:1500],
+        "stderr_excerpt": "",
+    })
+
+
+def _finding_test_dns_caa_fast(host: str, port: int,
+                                  testssl_id: str,
+                                  finding: dict) -> JSONResponse:
+    """DNS CAA (RFC 6844) lookup. testssl emits DNS_CAArecord LOW
+    when the queried domain has no CAA record. The check reduces to
+    one DNS query — sub-second with dnspython instead of testssl.sh's
+    multi-second TLS+DNS workflow.
+
+    Verdict:
+      reproduced     — no CAA records returned (matches the testssl
+                       claim); CAA is recommended even at LOW.
+      not_reproduced — at least one CAA record present (finding is
+                       remediated).
+      inconclusive   — DNS resolution failed (NXDOMAIN, timeout,
+                       network error)."""
+    import time as _time
+    try:
+        import dns.resolver as _dns_resolver
+        import dns.exception as _dns_exception
+    except ImportError:
+        return JSONResponse({
+            "ok": False, "error": "no_dnspython",
+            "message": "dnspython not installed in the container.",
+        }, status_code=500)
+
+    cmd_label = f"dnspython resolve CAA {host}"
+    reproduce_curl = f"dig +short CAA {host}"
+
+    t0 = _time.monotonic()
+    records: list[str] = []
+    err_text = None
+    rcode_name = ""
+    try:
+        resolver = _dns_resolver.Resolver()
+        resolver.lifetime = 8.0
+        answer = resolver.resolve(host, "CAA")
+        for r in answer:
+            # CAA rdata stringifies as: "0 issue \"letsencrypt.org\""
+            records.append(str(r))
+        rcode_name = "NOERROR"
+    except _dns_resolver.NoAnswer:
+        # Domain exists but no CAA records — the finding is reproduced.
+        rcode_name = "NOANSWER"
+    except _dns_resolver.NXDOMAIN:
+        rcode_name = "NXDOMAIN"
+        err_text = f"DNS NXDOMAIN — host {host!r} does not resolve"
+    except _dns_exception.Timeout:
+        rcode_name = "TIMEOUT"
+        err_text = "DNS query timed out after 8s"
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"
+    elapsed_ms = int((_time.monotonic() - t0) * 1000)
+
+    if err_text:
+        return JSONResponse({
+            "ok": True, "kind": "tls",
+            "host": host, "port": port,
+            "command": cmd_label, "reproduce_command": reproduce_curl,
+            "elapsed_ms": elapsed_ms, "exit_code": -1,
+            "flag": "fast-path",
+            "flag_label": cmd_label,
+            "testssl_id": testssl_id,
+            "verdict": "inconclusive",
+            "matched_rows": [{
+                "id": testssl_id, "severity": "INFO",
+                "finding": (f"DNS query failed: {err_text}. Run "
+                            f"`dig CAA {host}` manually to confirm."),
+            }],
+            "stdout_excerpt": "", "stderr_excerpt": err_text,
+        })
+
+    if not records:
+        verdict = "reproduced"
+        severity_out = "LOW"
+        finding_text = (f"No CAA records for {host} ({rcode_name}). "
+                        f"CAA is recommended (RFC 6844) — without it, "
+                        f"any CA can issue certificates for the "
+                        f"domain. Original testssl finding still "
+                        f"applies.")
+    else:
+        verdict = "not_reproduced"
+        severity_out = "INFO"
+        finding_text = (f"CAA records present for {host}: "
+                        f"{records!r}. CA issuance is restricted; "
+                        f"the original testssl finding looks "
+                        f"remediated.")
+
+    return JSONResponse({
+        "ok": True, "kind": "tls",
+        "host": host, "port": port,
+        "command": cmd_label, "reproduce_command": reproduce_curl,
+        "elapsed_ms": elapsed_ms, "exit_code": 0,
+        "flag": "fast-path",
+        "flag_label": cmd_label,
+        "testssl_id": testssl_id,
+        "verdict": verdict,
+        "matched_rows": [{
+            "id": testssl_id,
+            "severity": severity_out,
+            "finding": finding_text,
+        }] + [
+            {"id": f"caa:{i}", "severity": "INFO", "finding": rec}
+            for i, rec in enumerate(records)
+        ],
+        "stdout_excerpt": "\n".join(records),
         "stderr_excerpt": "",
     })
 
