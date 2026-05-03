@@ -859,5 +859,20 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **`csrf_validation` probe — auth-wall detection.** Mirrors the
+  exact scenario that produces the wapiti CSRF false positive on
+  endpoints behind authentication. When the probe is pointed at a
+  state-changing endpoint (e.g. `/admin/transfer`) without a valid
+  session, the auth middleware short-circuits every POST with a
+  redirect to the login page; with redirect-following enabled, the
+  probe sees a 200 + login HTML for the baseline AND every tampering
+  test. The login body has no CSRF / auth keywords, so the older
+  classifier called all of them `processed`, populated
+  `smoking_guns`, and rubber-stamped wapiti's bypass claim. The
+  probe now records each POST's final URL and, when every test
+  (baseline + tampering) lands at the login page while the POST
+  endpoint differs, returns `validated=None` with a clear "endpoint
+  is auth-gated; re-run from an authenticated session" message
+  instead of a false `validated=True`.
 - Tier-3 advanced LLM consolidation pass (per-flow deep analysis hook
   is wired in `consolidation.run` but not yet enabled).

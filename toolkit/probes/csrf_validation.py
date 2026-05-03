@@ -76,6 +76,28 @@ through. Only 4xx responses that signal a CSRF/Origin/token problem
 (403, 419, 422 plus body keywords like 'csrf', 'forbidden', 'cross-
 origin', 'missing token') count as CSRF rejection.
 
+Auth-wall detection
+-------------------
+
+When the probe is aimed at a state-changing endpoint that itself
+sits behind authentication (e.g. /admin/transfer) without a valid
+session, the auth middleware short-circuits every POST with a
+redirect to the login page. With redirect-following enabled (the
+default), the probe sees a 200 response carrying the login form
+HTML for the baseline AND every tampering test -- token, no-token,
+garbage-token, cross-origin: all identical, because the CSRF check
+never executed. Wapiti hits the same wall and reports the bypass
+as "real" (the textbook "response unchanged on tampering"
+heuristic). The truth is just that the request never reached the
+CSRF gate.
+
+The probe detects this by comparing each POST's final URL to the
+login page URL. When the POST endpoint differs from the login
+page, but every test response lands back on the login page, we
+flag the run as auth-gated and return validated=None with guidance
+to re-run from an authenticated session. This avoids the
+false-positive Wapiti would otherwise hand off to us unchanged.
+
 Examples
 --------
 
@@ -262,6 +284,19 @@ def _cookie_header(jar: dict) -> str:
     return "; ".join(f"{k}={v}" for k, v in jar.items() if v is not None)
 
 
+def _url_path_key(url: str) -> tuple[str, str, str]:
+    """Return a (scheme, host, path) tuple for cross-redirect URL
+    comparison. Strips query string and fragment so URLs that differ
+    only on a trailing ?error=1 still compare equal -- the auth-wall
+    detection wants to match on 'we landed on the login page' even
+    when the redirect target carries an error query. Trailing slashes
+    are normalized so /login and /login/ compare equal."""
+    p = urlparse(url or "")
+    return (p.scheme.lower(),
+            p.netloc.lower(),
+            p.path.rstrip("/") or "/")
+
+
 # ---- Response classification ----------------------------------------------
 
 # Status codes that indicate the request was rejected on a security
@@ -430,6 +465,11 @@ class CsrfValidationProbe(Probe):
                            evidence={"login_page": login_page})
         _merge_cookie_jar(sess_a, r_a.headers)
         samesite_a = _samesite_attrs_from_headers(r_a.headers)
+        # The user-supplied --login-page-url may itself redirect (e.g.
+        # http -> https or to a canonical /login path). Track the URL
+        # the form actually lives at so the auth-wall check below
+        # compares POST landings against the right reference.
+        login_final_url = r_a.final_url or login_page
         form_a = _scrape_form(r_a.text)
         if not form_a or not form_a.inputs:
             return Verdict(ok=False, validated=None,
@@ -558,6 +598,12 @@ class CsrfValidationProbe(Probe):
                 "label": label,
                 "status": resp.status,
                 "size": resp.size,
+                # final_url is where the response actually came from
+                # after any redirect chain. Auth-gated endpoints emit
+                # 302 -> /login that urllib follows transparently;
+                # without this field we can't tell that POST and GET
+                # both ended up at the login page.
+                "final_url": resp.final_url,
                 "classification": kind,
                 "reason": why,
             }
@@ -628,6 +674,56 @@ class CsrfValidationProbe(Probe):
                     "samesite": samesite_a,
                 },
             )
+
+        # Auth-wall short-circuit. If the POST endpoint is NOT the
+        # login page itself (i.e. we're targeting a state-changing
+        # endpoint behind authentication, not the login form), and
+        # every test response -- baseline included -- ends up at the
+        # login page after redirect-following, then the request never
+        # reached the CSRF check: the auth middleware bounced it
+        # first. This is the exact scenario that produces the wapiti
+        # false positive ("response unchanged on tampering, therefore
+        # no token validation"). Without the check below, the probe
+        # would classify every login-page response as 'processed' (no
+        # CSRF reject keywords in the body), see the smoking-gun
+        # tests come back 'processed' too, and falsely confirm wapiti.
+        # Bail with validated=None and tell the operator to re-run
+        # with a working session.
+        login_url_key = _url_path_key(login_final_url)
+        post_url_key = _url_path_key(post_url)
+        if post_url_key != login_url_key:
+            all_results = [baseline] + tests
+            if all(_url_path_key(r.get("final_url") or "") == login_url_key
+                   for r in all_results):
+                return Verdict(
+                    ok=True, validated=None, confidence=0.0,
+                    summary=(
+                        "Every POST (baseline + tampering) was "
+                        "redirected to the login page at " +
+                        login_final_url + ". The endpoint at " +
+                        post_url + " is gated by authentication, so "
+                        "its CSRF check is unreachable without a "
+                        "valid session. The wapiti finding cannot be "
+                        "substantiated under these conditions: every "
+                        "POST -- token or not, valid or invalid -- "
+                        "yields the same auth-redirect response, "
+                        "which is exactly the signal wapiti's csrf "
+                        "module misreads as 'token not validated'. "
+                        "Re-run the probe from an authenticated "
+                        "session (or with --credentials that survive "
+                        "the login flow) so the CSRF logic is "
+                        "actually exercised."),
+                    evidence={
+                        "post_url": post_url,
+                        "login_page": login_final_url,
+                        "token_field": token_field,
+                        "has_token": has_token,
+                        "baseline": baseline,
+                        "tests": tests,
+                        "samesite": samesite_a,
+                        "auth_wall_detected": True,
+                    },
+                )
 
         # Classify each test as a "smoking-gun bypass", an
         # "informational gap", or "rejected (defense engaged)".
