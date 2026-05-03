@@ -859,6 +859,20 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **`csrf_validation` probe — multi-form page selection.** Real-world
+  pages routinely render multiple forms (a header logout/login form
+  alongside the actual state-changing form). The earlier scraper
+  grabbed only the first `<form>` it encountered, so on a page like
+  `/vendor-srs-details.php` -- where the header renders a logout
+  form whose action is `/login.php` -- the probe wound up testing
+  the LOGIN form's CSRF behavior and emitting a verdict for the
+  wrong endpoint. On finding 625 (assessment 15) that produced a
+  `validated=true` from a "no token field" smoking-gun fired against
+  the login form. The scraper now collects every form on the page
+  and selects the one whose resolved action path matches the wapiti
+  target URL's path. When no form matches, the probe bails with
+  `validated=None` and an explicit "could not locate the target form
+  on this page" message instead of silently testing the wrong form.
 - **`csrf_validation` probe — auth-wall detection.** Mirrors the
   exact scenario that produces the wapiti CSRF false positive on
   endpoints behind authentication. When the probe is pointed at a
