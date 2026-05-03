@@ -859,6 +859,21 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **`csrf_validation` probe — auth-wall + SameSite refutes wapiti
+  CSRF.** When the probe's anonymous GET lands on a login page
+  (URL path contains `/login`/`/signin`/`/auth`, or any form on
+  the page has a password input) AND the response sets
+  `SameSite=Lax/Strict` on a cookie, the probe now returns
+  `validated=False` with confidence 0.85 instead of bailing as
+  inconclusive. Rationale: the textbook cross-site CSRF vector
+  wapiti's csrf module checks for is already defeated by (a) the
+  auth wall (an unauthenticated attacker can't reach the
+  endpoint) and (b) SameSite enforcement (a cross-site forged
+  POST can't carry the victim's session cookie). 0.85 is above
+  the dispatcher's 0.8 threshold for `false_positive`, so the
+  finding flips correctly. This was the verdict that finding 625
+  on assessment 15 should have produced after the multi-form
+  selector fix kept it from misfiring on the wrong form.
 - **`csrf_validation` probe — multi-form page selection.** Real-world
   pages routinely render multiple forms (a header logout/login form
   alongside the actual state-changing form). The earlier scraper
