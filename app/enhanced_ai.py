@@ -105,7 +105,14 @@ def build_telemetry(aid: int) -> dict:
     """
     a = db.query_one(
         "SELECT id, fqdn, profile, scan_http, scan_https, "
-        "creds_username, login_url FROM assessments WHERE id=%s",
+        "creds_username, login_url, "
+        # Role-aware Enhanced-AI-Testing inputs. Both NULL on assessments
+        # that didn't opt into the role-aware pass; render_role_context()
+        # below collapses to an empty placeholder block in that case so
+        # operator-edited prompts that reference the placeholder still
+        # render cleanly.
+        "role_scope_description, role_restrictions "
+        "FROM assessments WHERE id=%s",
         (aid,))
     if not a:
         return {}
@@ -225,6 +232,15 @@ def build_telemetry(aid: int) -> dict:
         for f in parsed
     )
 
+    # Role-aware Enhanced-AI-Testing inputs. Both fields are populated
+    # only when the operator opted into the role-aware pass and the
+    # orchestrator's gate (premium + advanced + checkbox) reached this
+    # module. Strings are stripped + length-capped at submit time
+    # (server.py / api.py), so we trust them here without re-validating.
+    role_scope_text = (a.get("role_scope_description") or "").strip()
+    role_restrict_text = (a.get("role_restrictions") or "").strip()
+    has_role_context = bool(role_scope_text and role_restrict_text)
+
     summary = {
         "fqdn": a.get("fqdn") or "",
         "profile": a.get("profile") or "standard",
@@ -238,6 +254,12 @@ def build_telemetry(aid: int) -> dict:
         "has_high_value_endpoint": has_high_value_endpoint,
         "has_state_mutating_endpoint": has_state_mutating_endpoint,
         "has_tenant_identifier": has_tenant_identifier,
+        "has_role_context": has_role_context,
+        # Raw text fields, surfaced as placeholders so an operator-
+        # edited prompt can quote them directly. The composed
+        # role_context_block (built below) is the convenience form.
+        "role_scope_description": role_scope_text,
+        "role_restrictions": role_restrict_text,
         # Private key (leading underscore) — never substituted as a
         # placeholder, only consulted by post-processing in
         # _insert_weakness_findings to re-check LLM-emitted URLs.
@@ -302,8 +324,35 @@ def build_telemetry(aid: int) -> dict:
                           or "graphql" in (f.get("title") or "").lower())
     summary["spa_fallback_warning"] = _render_spa_fallback_warning(
         fingerprinter)
+    summary["role_context_block"] = _render_role_context(
+        role_scope_text, role_restrict_text)
 
     return summary
+
+
+def _render_role_context(scope_text: str, restrict_text: str) -> str:
+    """Compose the AUTHORIZED ROLE block fed into both prompt passes.
+
+    Returns an empty string when either field is empty so an operator-
+    edited prompt that references {role_context_block} on a non-role-
+    aware scan still renders cleanly. When populated, the block is a
+    bounded, clearly-delimited section the LLM can quote from when
+    deciding whether an observed capability is in-scope or an abuse.
+
+    The prefix lines ("AUTHORIZED ROLE", "OUT OF SCPOPE …") are the
+    contract the FIDELITY_SYSTEM prompt and the per-scenario user
+    templates rely on, so do not rename without updating both.
+    """
+    if not (scope_text and restrict_text):
+        return ""
+    return (
+        "AUTHORIZED ROLE (the user whose session captured this telemetry)\n"
+        "================================================================\n"
+        f"{scope_text}\n\n"
+        "OUT OF SCOPE (capabilities this user must NOT have)\n"
+        "===================================================\n"
+        f"{restrict_text}\n"
+    )
 
 
 def _render_spa_fallback_warning(fp: spa_fallback.Fingerprinter) -> str:
@@ -877,11 +926,35 @@ def _build_runtime_user_prompt(template: str, summary: dict) -> str:
     runtime safety preamble. The preamble carries the SPA-fallback
     warning and the verbatim-evidence rule so they apply even if an
     operator removed the corresponding placeholder from the
-    user_template."""
+    user_template.
+
+    When the assessment supplied role-aware context, the AUTHORIZED
+    ROLE block is appended after the safety preamble (and before the
+    operator template) so every weakness-discovery scenario sees it
+    regardless of whether the operator quoted {role_context_block} in
+    their template. The block is empty (and therefore a no-op) on
+    assessments that did not opt into the role-aware pass."""
     rendered = render_user_prompt(template, summary)
     preamble = _RUNTIME_SAFETY_PREAMBLE.format(
         spa_fallback_warning=summary.get("spa_fallback_warning", ""))
-    return preamble + rendered
+    role_block = summary.get("role_context_block") or ""
+    if role_block:
+        # Wrap the rendered role context in a small reminder so the
+        # weakness-discovery model treats authorized capabilities as
+        # non-findings. The fidelity prompt has its own, more detailed,
+        # treatment of the same idea -- this keeps the weakness pass
+        # from emitting findings the fidelity pass would only have to
+        # downgrade.
+        role_block = (
+            "=== AUTHORIZED USER CONTEXT (suppress findings within scope) ===\n"
+            + role_block
+            + "Capabilities the AUTHORIZED ROLE is permitted to perform are "
+              "EXPECTED behavior; do NOT emit findings for them. Emit "
+              "findings only for capabilities listed in OUT OF SCOPE, or "
+              "for vulnerabilities (XSS, SQLi, IDOR, etc.) that go beyond "
+              "anything the role is authorized to do.\n"
+              "=== END AUTHORIZED USER CONTEXT ===\n\n")
+    return preamble + role_block + rendered
 
 
 # ---- LLM call wrapper with debug-log capture --------------------------------
@@ -1722,9 +1795,16 @@ def _run_fidelity(aid: int, endpoint: dict, telemetry: dict,
         batch = findings[i:i + batch_size]
         batch_text = _render_fidelity_batch(batch)
         sys_prompt = (prompt_row["system_prompt"] or "")
+        # Carry the AUTHORIZED ROLE block into the fidelity prompt so
+        # the LLM can return verdict='expected_behavior' for findings
+        # that merely demonstrate a capability the role is authorized
+        # for. Empty string when the operator did not supply role
+        # context, so operator-edited templates that quote
+        # {role_context_block} render cleanly in both modes.
         user = render_user_prompt(prompt_row["user_template"], {
             "fqdn": telemetry.get("fqdn", ""),
             "findings_batch": batch_text,
+            "role_context_block": telemetry.get("role_context_block", ""),
         })
         approx_in = (len(sys_prompt) + len(user)) // 4
         approx_cost = llm_mod.cost(approx_in, FIDELITY_MAX_OUTPUT_TOKENS,
@@ -1812,6 +1892,13 @@ _VERDICT_TO_STATUS = {
     "validated": "validated",
     "false_positive": "false_positive",
     "inconclusive": "inconclusive",
+    # 'expected_behavior' is treated as a high-confidence true-positive
+    # whose impact is nullified by the authenticated user's authorized
+    # role. We map it to validation_status='validated' (the finding is
+    # real) but the auto-flip branch ALSO forces severity='info' and
+    # records the role-scope verdict via a distinct validation_probe
+    # ('enhanced_ai_role_scope') so the analyst can filter for these.
+    "expected_behavior": "validated",
 }
 
 
@@ -1819,15 +1906,25 @@ def _apply_fidelity_verdicts(batch: list[dict],
                                 verdicts: list) -> dict:
     """Update validation_status on the findings we just graded.
 
-    Auto-flip only when verdict is 'validated' or 'false_positive' AND
-    confidence >= 0.8. Anything else (low confidence, malformed verdict,
-    'inconclusive') is annotated into validation_evidence with the LLM's
-    reasoning, but the status is left alone so a human picks it up.
+    Auto-flip only when verdict is 'validated', 'false_positive', or
+    'expected_behavior' AND confidence >= 0.8. Anything else (low
+    confidence, malformed verdict, 'inconclusive') is annotated into
+    validation_evidence with the LLM's reasoning, but the status is
+    left alone so a human picks it up.
+
+    For 'expected_behavior' the finding is a real true-positive whose
+    impact is nullified by the authorized user role; severity is
+    forced to 'info' and validation_probe is set to
+    'enhanced_ai_role_scope' so the analyst can filter for the
+    role-scope verdicts separately from a regular validated finding.
+    The overall `status` is left as-is (not flipped to false_positive)
+    so the row still appears in info-severity rollups -- the analyst
+    sees what the AI noticed, just at the right severity.
 
     Severity raise / lower from suggested_severity is NOT auto-applied
-    in this first cut — the analyst can do it from the finding page if
-    they agree. Recording the suggestion in raw_data is enough signal
-    for now."""
+    in this first cut for the regular 'validated' verdict — the
+    analyst can do it from the finding page if they agree. Recording
+    the suggestion in raw_data is enough signal for now."""
     by_id = {f["id"]: f for f in batch}
     out = {"evaluated": 0, "auto_flipped": 0}
     for v in verdicts:
@@ -1857,7 +1954,7 @@ def _apply_fidelity_verdicts(batch: list[dict],
             f"(suggested={sev_suggest or '-'})\n"
             f"  reasoning: {reasoning}")
         # Always record the LLM's reasoning, regardless of auto-flip.
-        if (verdict in ("validated", "false_positive")
+        if (verdict in ("validated", "false_positive", "expected_behavior")
                 and confidence >= 0.8):
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             # Also apply suggested_severity when the LLM returned a
@@ -1867,7 +1964,9 @@ def _apply_fidelity_verdicts(batch: list[dict],
             # XSS is actually `info` because the input is sanitized
             # downstream, we apply that. Only fires when verdict is
             # 'validated' — for false_positive we suppress the row
-            # entirely, severity is moot.
+            # entirely, and for expected_behavior we always force
+            # info (handled in its own branch below), so severity
+            # adjustments are moot in those cases.
             apply_severity = None
             if (verdict == "validated"
                     and sev_adjust in ("raise", "lower")
@@ -1882,7 +1981,24 @@ def _apply_fidelity_verdicts(batch: list[dict],
             # without an analyst having to click "Mark false positive"
             # by hand. validated/inconclusive verdicts do NOT touch
             # `status` (we only auto-suppress, never auto-promote).
-            if verdict == "false_positive":
+            if verdict == "expected_behavior":
+                # In-scope behavior for the authorized user role.
+                # Force severity to 'info' so it stops counting in the
+                # critical/high/medium rollups, and tag with a distinct
+                # validation_probe so an analyst can filter the role-
+                # scope verdicts separately from a regular validated
+                # finding. status is left alone (the row stays visible
+                # at info-severity, with the LLM's reasoning explaining
+                # why it was demoted) so the analyst can review the
+                # demotion if desired.
+                db.execute(
+                    "UPDATE findings SET validation_status='validated', "
+                    "validation_probe='enhanced_ai_role_scope', "
+                    "validation_run_at=%s, validation_evidence=%s, "
+                    "severity='info' "
+                    "WHERE id=%s",
+                    (now, evidence_blob[:65000], fid))
+            elif verdict == "false_positive":
                 db.execute(
                     "UPDATE findings SET validation_status=%s, "
                     "validation_probe='enhanced_ai_testing', "

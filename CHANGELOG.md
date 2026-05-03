@@ -248,6 +248,37 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-03** — **Role-aware Enhanced-AI-Testing**. New opt-in
+  on the assess form (and `POST /api/v1/scans` body) gated to the
+  premium + advanced corner: when `profile=premium` AND
+  `llm_tier=advanced`, an `enhanced_ai_testing` checkbox appears.
+  Checking it makes `creds_username` / `creds_password` / `login_url`
+  and two free-text fields — *Describe the user role and what this
+  user's scope is* and *What the user should NOT be able to do in
+  the test* — required to submit (HTML `required` + 400 from the
+  server / API). The orchestrator's existing `enhanced_ai` gate
+  (was: `llm_tier == 'advanced'`) tightens to require all three of
+  premium + advanced + checkbox; the role textareas are persisted on
+  the `assessments` row (and on `scan_schedules` for recurring
+  scans) and travel with Re-scan prefill. Both Enhanced-AI prompt
+  passes consume the role context: the weakness-discovery preamble
+  prepends an AUTHORIZED USER CONTEXT block instructing the model
+  to suppress findings that merely demonstrate authorized
+  capabilities, and the fidelity grader gains a fourth verdict —
+  `expected_behavior` — that auto-tags in-scope findings with
+  `validation_probe='enhanced_ai_role_scope'`, severity forced to
+  `info`, leaving real out-of-scope abuses (XSS / SQLi / IDOR / SSRF
+  / privilege escalation) at their original severity. Migration
+  `2026_05_03_refresh_fidelity_prompt_for_role_scope` updates
+  existing 2.1.1 databases' seeded fidelity prompt to the v2 text
+  (operator-edited rows are detected and left alone). Schema:
+  `assessments` and `scan_schedules` each grow `enhanced_ai_testing`
+  TINYINT(1), `role_scope_description` TEXT, `role_restrictions`
+  TEXT — declared in `db/schema.sql` (CREATE TABLE bodies + §2
+  ALTER block) and surfaced in `scripts/verify_schema.py` so the
+  schema-drift auto-healer creates them on existing 2.1.1 DBs the
+  first time the new image boots.
+
 - **2026-05-02** — **Empirically-chosen TLS / cipher / protocol fast
   paths + assessment-UA observance + drop overall_grade noise.**
   Benchmarked four tools on a real production target (HTTP/2 502

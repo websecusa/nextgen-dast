@@ -142,8 +142,22 @@ PLACEHOLDERS_BY_SLOT: dict[str, set[str]] = {
         # the same content unconditionally so removing the placeholder
         # only loses one extra mention, not the safety floor.
         "spa_fallback_warning",
+        # Role-aware Enhanced-AI-Testing inputs. Empty strings on
+        # assessments that did not opt into the role-aware pass.
+        # role_context_block is the composed AUTHORIZED ROLE / OUT OF
+        # SCOPE block; the two raw fields are exposed individually in
+        # case an operator wants to quote them in a different shape.
+        "role_scope_description", "role_restrictions",
+        "role_context_block",
     },
-    SLOT_FIDELITY: {"fqdn", "findings_batch"},
+    SLOT_FIDELITY: {
+        "fqdn", "findings_batch",
+        # Same composed AUTHORIZED ROLE block as the weakness slot.
+        # FIDELITY_USER quotes it so the model sees the role context
+        # alongside each batch and can emit verdict='expected_behavior'
+        # for in-scope capabilities.
+        "role_context_block",
+    },
 }
 
 
@@ -923,18 +937,19 @@ FIDELITY_SYSTEM = """\
 You are a Senior Application Security Engineer triaging findings from an authorized DAST scan. Evaluate the FIDELITY (true-positive likelihood) of each input finding based on the supporting evidence captured.
 
 For each finding, emit exactly one verdict element. Verdicts:
-  - "validated"      — evidence clearly supports the finding; confidence >=0.8 means it is a true positive
-  - "false_positive" — evidence clearly refutes the finding; confidence >=0.8 means it is scanner noise
-  - "inconclusive"   — evidence is ambiguous, contradictory, or insufficient
+  - "validated"          — evidence clearly supports the finding; confidence >=0.8 means it is a true positive
+  - "false_positive"     — evidence clearly refutes the finding; confidence >=0.8 means it is scanner noise
+  - "expected_behavior"  — the finding describes a capability that the AUTHORIZED ROLE (when supplied with the batch) is permitted to perform. The behavior is real, but it is NOT a security issue against this user role. Use this only when (a) an AUTHORIZED ROLE block is supplied AND (b) the capability falls clearly inside the role's scope and is not listed in OUT OF SCOPE. Confidence >=0.8 will auto-tag the finding as info-severity, validated, with probe=enhanced_ai_role_scope.
+  - "inconclusive"       — evidence is ambiguous, contradictory, or insufficient
 
-Be conservative. When in doubt, return "inconclusive". Do NOT mark "validated" unless a specific quote from raw_data, the reconstructed request, or the reconstructed response directly demonstrates the issue.
+Be conservative. When in doubt, return "inconclusive". Do NOT mark "validated" unless a specific quote from raw_data, the reconstructed request, or the reconstructed response directly demonstrates the issue. Do NOT mark "expected_behavior" if the capability appears in OUT OF SCOPE, or if the finding is a vulnerability class (XSS, SQLi, IDOR, SSRF, auth bypass, etc.) that goes beyond authorized actions — those keep their original severity even when the user nominally has access to the affected feature.
 
 Respond with a JSON array — one element per input finding, in the same order. Each element:
 {
   "finding_id": <integer copy of the input finding's id>,
-  "verdict": "validated|false_positive|inconclusive",
+  "verdict": "validated|false_positive|expected_behavior|inconclusive",
   "confidence": 0.0,
-  "reasoning": "<=400 chars: name the specific evidence and why it supports the verdict",
+  "reasoning": "<=400 chars: name the specific evidence and why it supports the verdict. For expected_behavior, quote the AUTHORIZED ROLE phrase that grants this capability.",
   "severity_adjustment": "none|raise|lower",
   "suggested_severity": "critical|high|medium|low|info|null"
 }
@@ -947,11 +962,12 @@ TARGET
 ======
 {fqdn}
 
+{role_context_block}
 FINDINGS TO EVALUATE
 ======================
 {findings_batch}
 
-Apply the verdict criteria from the system prompt and emit exactly one element per finding, in input order.
+Apply the verdict criteria from the system prompt and emit exactly one element per finding, in input order. When an AUTHORIZED ROLE block is present above, prefer verdict='expected_behavior' for findings that merely demonstrate authorized capabilities (NOT for findings that show abuse beyond scope or for vulnerability classes like XSS/SQLi/IDOR/SSRF — those keep their original severity).
 """
 
 

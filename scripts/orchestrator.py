@@ -789,15 +789,27 @@ def main() -> int:
         except Exception as e:
             update(aid, error_text=f"auto_validate crashed: {e!r}")
 
-        # Enhanced-AI-Testing pass — advanced tier only. Runs after
-        # challenge_runner so the fidelity sub-pass can re-grade only
-        # the findings the read-only probes couldn't decide on
-        # (validation_status in unvalidated/inconclusive). Emits new
-        # weakness-discovery findings as source_tool='enhanced_ai_testing'
-        # under a per-scan budget cap. Failures are isolated inside
-        # enhanced_ai.run; this try/except catches anything that escapes
-        # so the orchestrator finalize path always reaches done/error.
-        if a.get("llm_tier") == "advanced":
+        # Enhanced-AI-Testing pass. Runs only when the operator opted
+        # in via the role-aware gate: profile=premium AND llm_tier=
+        # advanced AND enhanced_ai_testing=1. The first two are user-
+        # facing scan settings; the third is the explicit checkbox the
+        # operator ticks in the assess form (or sends in the API
+        # body). Earlier 2.1.1 builds gated this purely on
+        # llm_tier=='advanced'; the tightened gate ensures the role
+        # context (role_scope_description / role_restrictions) on the
+        # assessment row is the supported input shape -- without those
+        # two fields the fidelity pass has nothing to triage findings
+        # against. Runs after challenge_runner so the fidelity sub-
+        # pass can re-grade only the findings the read-only probes
+        # couldn't decide on (validation_status in unvalidated /
+        # inconclusive). Emits new weakness-discovery findings as
+        # source_tool='enhanced_ai_testing' under a per-scan budget
+        # cap. Failures are isolated inside enhanced_ai.run; this
+        # try/except catches anything that escapes so the orchestrator
+        # finalize path always reaches done/error.
+        if (a.get("llm_tier") == "advanced"
+                and a.get("profile") == "premium"
+                and int(a.get("enhanced_ai_testing") or 0) == 1):
             update(aid, current_step="enhanced_ai_testing: weakness + fidelity")
             try:
                 import enhanced_ai as enhanced_ai_mod

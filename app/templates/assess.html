@@ -69,7 +69,11 @@ ports, check only the scheme that actually listens on that port.</p>
        is_default). #}
     {% set profile_sel = prefill.profile or 'standard' %}
     <label>Profile
-      <select name="profile">
+      {# onchange fires the role-aware Enhanced-AI visibility helper at
+         the bottom of the form so the checkbox + textareas appear/hide
+         when the operator switches between premium and other profiles. #}
+      <select name="profile" id="profile_select"
+              onchange="ngdToggleEnhancedAiRole()">
         <option value="quick"     {% if profile_sel == 'quick' %}selected{% endif %}>quick — testssl + nuclei (curated tags). ~5 min.</option>
         <option value="standard"  {% if profile_sel == 'standard' %}selected{% endif %}>standard — testssl + nuclei + nikto + wapiti default. ~30–60 min.</option>
         <option value="thorough"  {% if profile_sel == 'thorough' %}selected{% endif %}>thorough — standard + wapiti -m all + sqlmap on detected forms. hours.</option>
@@ -79,8 +83,11 @@ ports, check only the scheme that actually listens on that port.</p>
 
     {% set tier_sel = prefill.llm_tier or 'none' %}
     <label>LLM tier
+      {# onchange runs the existing Enhanced-AI budget toggle AND the
+         new role-aware visibility helper so the new fieldset appears
+         only when premium + advanced are both selected. #}
       <select name="llm_tier" id="llm_tier_select"
-              onchange="document.getElementById('advanced-ai-fields').style.display = (this.value === 'advanced') ? '' : 'none'">
+              onchange="document.getElementById('advanced-ai-fields').style.display = (this.value === 'advanced') ? '' : 'none'; ngdToggleEnhancedAiRole()">
         {# Default selection is `none`. Pulling in the LLM is opt-in so a
            caller never accrues LLM cost (or sends scan output off-box)
            without explicitly choosing a tier. #}
@@ -128,6 +135,67 @@ ports, check only the scheme that actually listens on that port.</p>
           since prompts can include captured cookies/tokens/PII.
         </small>
       </label>
+    </fieldset>
+
+    {# Role-aware Enhanced-AI-Testing controls. The whole fieldset is
+       conditional on (profile == premium AND llm_tier == advanced) and
+       is shown/hidden by ngdToggleEnhancedAiRole() at the bottom of the
+       form -- the helper also runs once on DOMContentLoaded so a Re-scan
+       prefill arrives in the right state.
+
+       When the enhanced_ai_testing checkbox is on, ALL of:
+         - creds_username, creds_password, login_url
+         - role_scope_description, role_restrictions
+       become required to submit. The browser enforces this via the
+       `required` attribute, which the helper toggles in lockstep with
+       the checkbox; the server re-validates the same combo so a
+       tampered DOM cannot bypass it.
+
+       Scope/restrictions text is fed verbatim into the weakness-discovery
+       and fidelity-grading prompts so the LLM can suppress findings that
+       merely demonstrate authorized capabilities (auto-tagged as
+       'expected_behavior' info-severity) while preserving real
+       privilege escalations beyond scope at full severity. #}
+    {% set ear_sel = (prefill.enhanced_ai_testing or 0) %}
+    <fieldset id="enhanced-ai-role-fields"
+              style="border:1px solid var(--border); border-radius:6px;
+                     padding:.8em 1em; margin-top:.6em;
+                     display: {% if profile_sel == 'premium' and tier_sel == 'advanced' %}block{% else %}none{% endif %}">
+      <legend style="padding:0 .4em; color: var(--muted)">Role-aware Enhanced-AI-Testing</legend>
+      <label class="check">
+        <input type="checkbox" name="enhanced_ai_testing"
+               id="enhanced_ai_testing_chk"
+               value="1"
+               {% if ear_sel %}checked{% endif %}
+               onchange="ngdToggleEnhancedAiRole()">
+        Scan with enhanced_ai_testing
+        <small class="muted">
+          — Runs the role-aware Enhanced-AI pass: scanner findings are
+          re-graded against the authorized user role described below, so
+          authorized capabilities are auto-tagged as <em>expected_behavior</em>
+          (info-severity) and only real out-of-scope abuses surface as
+          findings. Requires credentialed scan.
+        </small>
+      </label>
+      <div id="enhanced-ai-role-textareas"
+           style="margin-top:.8em;
+                  display: {% if ear_sel %}block{% else %}none{% endif %}">
+        <label>Describe the user role and what this user's scope is
+          <textarea name="role_scope_description" rows="4"
+                    style="width:100%; box-sizing:border-box; resize:vertical"
+                    placeholder="e.g. Auditor — has read-only access to every assessment, finding, and report in the application. Can view dashboards, export PDFs, and download CSVs.">{{ prefill.role_scope_description or '' }}</textarea>
+        </label>
+        <label style="margin-top:.4em">What the user should NOT be able to do in the test
+          <textarea name="role_restrictions" rows="4"
+                    style="width:100%; box-sizing:border-box; resize:vertical"
+                    placeholder="e.g. Must NOT be able to: create or modify users, launch new scans, edit or delete findings, change branding, manage API tokens, alter LLM endpoints, or modify scheduled scans.">{{ prefill.role_restrictions or '' }}</textarea>
+        </label>
+        <small class="muted">
+          Both boxes are read verbatim into the Enhanced-AI prompts. Be
+          specific — the more concrete the role and restrictions, the
+          fewer false positives the model emits.
+        </small>
+      </div>
     </fieldset>
 
     <label>LLM endpoint
@@ -244,6 +312,58 @@ ports, check only the scheme that actually listens on that port.</p>
     <button type="submit">Start assessment</button>
   </form>
 </section>
+
+<script>
+  // Role-aware Enhanced-AI-Testing visibility + conditional-required
+  // helper. Triggered from the profile and llm_tier <select>s, the
+  // enhanced_ai_testing checkbox, and once on DOMContentLoaded so a
+  // Re-scan prefill arrives in the right state.
+  //
+  // Visibility rules (mirror the server-side validation in
+  // app/server.py:assess_start):
+  //   1. The enhanced-ai-role-fields fieldset is shown only when
+  //      profile == 'premium' AND llm_tier == 'advanced'.
+  //   2. Inside it, the role textareas are shown only when the
+  //      enhanced_ai_testing checkbox is on.
+  //   3. When the checkbox is on, creds_username / creds_password /
+  //      login_url AND the two role textareas are all marked as
+  //      required (HTML form-validation prevents submit).
+  //   4. When the checkbox is off, the same fields are not required;
+  //      the operator can still launch an unauthenticated premium+
+  //      advanced scan -- it just won't run the role-aware pass.
+  function ngdToggleEnhancedAiRole() {
+    var prof = (document.getElementById('profile_select') || {}).value;
+    var tier = (document.getElementById('llm_tier_select') || {}).value;
+    var fieldset = document.getElementById('enhanced-ai-role-fields');
+    var textareas = document.getElementById('enhanced-ai-role-textareas');
+    var chk = document.getElementById('enhanced_ai_testing_chk');
+    if (!fieldset || !textareas || !chk) { return; }
+
+    var gateOk = (prof === 'premium' && tier === 'advanced');
+    fieldset.style.display = gateOk ? 'block' : 'none';
+
+    // When the gate closes, force the checkbox off so a stale tick from
+    // a prior selection cannot survive into the submitted form.
+    if (!gateOk) { chk.checked = false; }
+
+    var on = gateOk && chk.checked;
+    textareas.style.display = on ? 'block' : 'none';
+
+    // Conditional-required toggles. Mirror server-side validation so
+    // the browser catches missing fields before the POST round-trip.
+    var fields = [
+      'creds_username', 'creds_password', 'login_url',
+      'role_scope_description', 'role_restrictions',
+    ];
+    fields.forEach(function(name) {
+      var el = document.querySelector('[name="' + name + '"]');
+      if (!el) { return; }
+      if (on) { el.setAttribute('required', 'required'); }
+      else    { el.removeAttribute('required'); }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', ngdToggleEnhancedAiRole);
+</script>
 
 <section>
   <h2>Recent assessments</h2>

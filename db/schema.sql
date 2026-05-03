@@ -204,6 +204,18 @@ CREATE TABLE IF NOT EXISTS assessments (
   -- short-circuits the remaining work when this cap is reached, keeping
   -- partial findings produced so far.
   enhanced_ai_budget_usd DECIMAL(8,2) NULL,
+  -- Role-aware Enhanced-AI-Testing opt-in. The orchestrator only runs
+  -- the enhanced_ai pass when ALL three of: profile='premium',
+  -- llm_tier='advanced', enhanced_ai_testing=1. The two TEXT columns
+  -- below carry the operator's description of the authenticated user's
+  -- authorized scope and what that user must NOT be able to do, so the
+  -- weakness-discovery and fidelity passes can suppress findings that
+  -- merely demonstrate authorized capabilities (auto-tagged as
+  -- 'expected_behavior' info-severity) while preserving real privilege
+  -- escalations beyond scope at their original severity.
+  enhanced_ai_testing TINYINT(1) NOT NULL DEFAULT 0,
+  role_scope_description TEXT NULL,
+  role_restrictions TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
   finished_at DATETIME,
@@ -608,6 +620,11 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
   -- semantics. Only meaningful when llm_tier='advanced'; ignored otherwise.
   llm_debug TINYINT(1) NOT NULL DEFAULT 0,
   enhanced_ai_budget_usd DECIMAL(8,2) NULL,
+  -- Carried into every materialized assessment. See assessments table
+  -- for the semantics of these three columns.
+  enhanced_ai_testing TINYINT(1) NOT NULL DEFAULT 0,
+  role_scope_description TEXT NULL,
+  role_restrictions TEXT NULL,
   next_run_at DATETIME NULL,
   last_run_at DATETIME NULL,
   last_assessment_id INT NULL,
@@ -736,6 +753,27 @@ ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS llm_debug
   TINYINT(1) NOT NULL DEFAULT 0;
 ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS enhanced_ai_budget_usd
   DECIMAL(8,2) NULL;
+
+-- Role-aware Enhanced-AI-Testing additions (2026-05-03). The new
+-- enhanced_ai_testing flag is the third gate (alongside profile=premium
+-- and llm_tier=advanced) that the orchestrator checks before running
+-- the enhanced_ai pass. The two TEXT columns carry the authenticated
+-- user's authorized scope and explicit out-of-scope restrictions, fed
+-- into both the weakness-discovery and fidelity prompt passes so the
+-- model can suppress findings that merely demonstrate authorized
+-- behavior (auto-tagged as 'expected_behavior' info-severity).
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS enhanced_ai_testing
+  TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS role_scope_description
+  TEXT NULL;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS role_restrictions
+  TEXT NULL;
+ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS enhanced_ai_testing
+  TINYINT(1) NOT NULL DEFAULT 0;
+ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS role_scope_description
+  TEXT NULL;
+ALTER TABLE scan_schedules ADD COLUMN IF NOT EXISTS role_restrictions
+  TEXT NULL;
 
 -- llm_analyses additions. Widen target_type so the new pipelines
 -- (enrichment, enhanced_ai_weakness, enhanced_ai_fidelity) can write to
