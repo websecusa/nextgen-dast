@@ -2933,15 +2933,23 @@ def assessment_detail(request: Request, aid: int,
     info_hidden = 0
     filter_info = bool(a.get("filter_info"))
     for f in rows:
-        counts_by_status["all"] += 1
         st = f.get("status") or "open"
         if st == "false_positive":   fp_count += 1
         elif st == "fixed":          resolved_count += 1
         elif st == "accepted_risk":  archived_count += 1
-        if st in ("open", "confirmed"):
-            counts_by_status["open"] += 1
-        else:
-            counts_by_status["closed"] += 1
+        # Status-tab counts EXCLUDE triaged rows (false_positive,
+        # fixed, accepted_risk). The "All" tab thus shows actionable
+        # findings only; triaged rows are reachable via the dedicated
+        # "False positives" / "Resolved" / "Fixed" / "Archive"
+        # options in the severity dropdown. Keeps the workspace
+        # focused on what's still open while preserving every path
+        # back to the triaged subsets.
+        if st not in EXCLUDED_FROM_SCORE:
+            counts_by_status["all"] += 1
+            if st in ("open", "confirmed"):
+                counts_by_status["open"] += 1
+            else:
+                counts_by_status["closed"] += 1
         if st in EXCLUDED_FROM_SCORE:
             continue
         if filter_info and f.get("severity") == "info":
@@ -3169,6 +3177,13 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
     testable, _why, kind = _finding_testable(f, a_for_scope)
     io["testable"] = testable
     io["test_kind"] = kind   # 'http' or 'tls' — used for the button label
+    # `has_fast_path` tells the templates whether the Challenge button
+    # should drive the unified fast-path dispatch (sub-second urllib /
+    # openssl / nmap) instead of either the toolkit probe or the LLM
+    # fidelity prompt. True for any finding whose title or testssl_id
+    # matches a header / cookie / cipher / protocol / cert / vuln
+    # classifier — regardless of source_tool. False for everything else.
+    io["has_fast_path"] = _finding_has_fast_path(f)
     return {"f": f, "e": e, "repro": repro, "probe": probe, "io": io}
 
 
@@ -4567,6 +4582,158 @@ def _detect_header_check_target(finding: dict) -> Optional[str]:
     return None
 
 
+def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
+    """Single source of truth for "does this finding have a sub-second
+    deterministic verification path?" If yes, run it and return the
+    JSONResponse. If no, return None — caller falls back to whatever
+    its non-fast-path strategy is (toolkit probe, LLM fidelity,
+    generic HTTP echo, etc.).
+
+    Used by:
+      - GET-flavored: finding_test() (the Test button) — read-only.
+      - POST-flavored: finding_challenge_inline() and the bulk
+        Challenge runner — verdict written back to validation_status
+        by their callers.
+      - finding_validate() — same.
+
+    Order matches what _finding_has_fast_path() checks; keep them
+    in sync. Tool-agnostic dispatch intentionally fires BEFORE the
+    testssl-id table because a "missing HSTS" finding from nikto or
+    the LLM should use the same urllib path as a testssl HSTS row."""
+    url = (finding.get("evidence_url") or "").strip()
+    if not url:
+        return None
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    # 1. Title-pattern detectors (work regardless of source_tool).
+    detected_header = _detect_header_check_target(finding)
+    if detected_header:
+        return _finding_test_header_fast(host, port, detected_header, finding)
+    detected_cookie = _detect_cookie_check_target(finding)
+    if detected_cookie:
+        return _finding_test_cookie_fast(host, port, detected_cookie, finding)
+
+    # 2. testssl-id-keyed dispatch (only when raw_data carries an id,
+    #    typically source_tool == 'testssl').
+    raw = finding.get("raw") or {}
+    rid = (raw.get("id") or "").strip()
+    if not rid:
+        return None
+    if rid.lower() in _HEADER_FAST_ID_TO_HEADER:
+        return _finding_test_header_fast(host, port, rid, finding)
+    if rid in _CERT_FAST_TESTSSL_IDS:
+        return _finding_test_cert_fast(host, port, rid, finding)
+    if rid in _PROTOCOL_TESTSSL_TO_OPENSSL_FLAG:
+        return _finding_test_protocol_fast(host, port, rid, finding)
+    if (rid == "cipher_negotiated" or rid == "cipher_order"
+            or rid.startswith("cipher_order-tls1")):
+        return _finding_test_cipher_enum_fast(host, port, rid, finding)
+    if re.match(r"^cipher-tls1(?:_[123])?_x[0-9a-fA-F]+$", rid):
+        return _finding_test_cipher_enum_fast(host, port, rid, finding)
+    if rid.startswith("cipherlist_"):
+        suffix = rid[len("cipherlist_"):]
+        if suffix in _CIPHERLIST_OPENSSL_NAME:
+            return _finding_test_cipher_fast(host, port, rid, finding)
+    if rid in _VULN_FAST_TESTSSL_PROBES:
+        return _finding_test_vuln_fast(host, port, rid, finding)
+    return None
+
+
+def _fast_path_response_to_verdict(resp: JSONResponse) -> dict:
+    """Translate a fast-path JSONResponse into a Verdict-shaped dict
+    that matches what toolkit probes return (`ok`, `validated`,
+    `confidence`, `summary`, `evidence`). Used by the unified
+    `_run_finding_recheck` helper to share one verdict shape across
+    fast-path, toolkit-probe, and LLM-fidelity dispatches."""
+    try:
+        body = json.loads(resp.body)
+    except Exception:
+        return {"ok": False, "validated": None, "confidence": 0.0,
+                "summary": "fast-path returned non-JSON body",
+                "evidence": {}, "error": "non_json"}
+    if not body.get("ok"):
+        return {"ok": False, "validated": None, "confidence": 0.0,
+                "summary": body.get("message") or body.get("error")
+                            or "fast-path refused",
+                "evidence": body, "error": body.get("error")}
+    verdict_str = body.get("verdict") or ""
+    if verdict_str == "reproduced":
+        validated, confidence = True, 0.95
+    elif verdict_str == "not_reproduced":
+        validated, confidence = False, 0.95
+    else:
+        validated, confidence = None, 0.5
+    rows = body.get("matched_rows") or []
+    summary = (rows[0].get("finding") if rows else "") or body.get("command", "")
+    return {
+        "ok": True,
+        "validated": validated,
+        "confidence": confidence,
+        "summary": summary,
+        "evidence": body,
+        "audit_log": [],
+        "severity_uplift": None,
+        "error": None,
+    }
+
+
+def _finding_has_fast_path(finding: dict) -> bool:
+    """Return True if the finding can be re-tested via one of the
+    sub-second fast paths (urllib header / urllib cookie /
+    Python ssl cert / openssl s_client protocol or cipher /
+    nmap cipher-enum / openssl handshake vuln-class).
+
+    Tool-agnostic on purpose: the Challenge button uses this to pick
+    the right verb regardless of source_tool. A "missing HSTS" finding
+    deserves the urllib fast path whether nikto, wapiti, nuclei,
+    enhanced_testing, or the LLM emitted it. The LLM fidelity prompt
+    is a last-resort fallback when the finding genuinely doesn't fit
+    any deterministic test (business-logic conjecture, BFLA
+    extrapolation, etc.).
+
+    Mirrors the dispatch order in _finding_test_tls + finding_test
+    so the two stay in sync. Add a new fast-path classifier? Update
+    both this helper AND the dispatch."""
+    # Title-pattern detectors fire across every source tool.
+    if _detect_header_check_target(finding):
+        return True
+    if _detect_cookie_check_target(finding):
+        return True
+    # testssl-id-keyed dispatch (only relevant when raw_data carries
+    # an id, typically source_tool == 'testssl').
+    raw = finding.get("raw") or {}
+    rid = (raw.get("id") or "").strip()
+    if not rid:
+        return False
+    rid_lower = rid.lower()
+    if rid_lower in _HEADER_FAST_ID_TO_HEADER:
+        return True
+    if rid in _CERT_FAST_TESTSSL_IDS:
+        return True
+    if rid in _PROTOCOL_TESTSSL_TO_OPENSSL_FLAG:
+        return True
+    if rid == "cipher_negotiated" or rid == "cipher_order":
+        return True
+    if rid.startswith("cipher_order-tls1"):
+        return True
+    if re.match(r"^cipher-tls1(?:_[123])?_x[0-9a-fA-F]+$", rid):
+        return True
+    if rid.startswith("cipherlist_"):
+        suffix = rid[len("cipherlist_"):]
+        if suffix in _CIPHERLIST_OPENSSL_NAME:
+            return True
+    if rid in _VULN_FAST_TESTSSL_PROBES:
+        return True
+    return False
+
+
 def _resolve_assessment_user_agent(aid: int) -> str:
     """Resolve the User-Agent the assessment expects its fast-path
     probes to send. Mirrors scripts/orchestrator.py:686-693 so the
@@ -5736,37 +5903,17 @@ def finding_test(request: Request, fid: int):
     # GET against the host wouldn't exercise the same surface, so we
     # re-run testssl.sh with a narrowly scoped flag for the specific
     # check id and surface the JSON row(s) that match.
+    # Unified fast-path dispatch. Same classifier the Challenge button
+    # and the bulk Challenge runner use, so a header/cookie/cipher
+    # finding gets the same sub-second path no matter which entry
+    # point the analyst clicks. Falls through to kind-specific
+    # dispatch below if no fast path applies.
+    fast_resp = _dispatch_finding_fast_path(f)
+    if fast_resp is not None:
+        return fast_resp
+
     if kind == "tls":
         return _finding_test_tls(f, parsed)
-
-    # Tool-agnostic header-missing fast path. Whether the finding came
-    # from nikto ("Suggested security header missing: x-frame-options"),
-    # wapiti ("HTTP Strict Transport Security (HSTS)"), nuclei ("HTTP
-    # Missing Security Headers"), enhanced_testing
-    # (config_*_missing), or the LLM ("missing X header") — they all
-    # reduce to "fetch the URL once, look at the headers". Route to
-    # the verdict-producing _finding_test_header_fast() so the analyst
-    # gets "Header X is absent — finding reproduced" instead of a raw
-    # HTTP dump they have to eyeball. Wins over nuclei subprocess and
-    # the generic HTTP path for these specifically.
-    detected_header = _detect_header_check_target(f)
-    if detected_header:
-        host = (parsed.hostname or "").lower()
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        return _finding_test_header_fast(
-            host, port, detected_header, f)
-
-    # Same idea for cookie-attribute findings — nuclei "Missing
-    # Cookie SameSite", nikto "Cookie X without httponly flag", and
-    # the LLM all reduce to "fetch URL, parse Set-Cookie, check the
-    # attribute on each cookie." Sub-second urllib path with a
-    # cookie-by-cookie verdict table.
-    detected_cookie = _detect_cookie_check_target(f)
-    if detected_cookie:
-        host = (parsed.hostname or "").lower()
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        return _finding_test_cookie_fast(
-            host, port, detected_cookie, f)
 
     # Nuclei test: re-run nuclei narrowly with the original template-id
     # so the matcher logic actually executes against the live target.
@@ -7130,13 +7277,26 @@ def _resolve_challenge_cookie(finding: dict,
 def _run_finding_probe(finding: dict, probe: dict,
                        cookie: Optional[str] = None,
                        extra: Optional[dict] = None) -> dict:
-    """Thin wrapper around toolkit.build_finding_config + run_probe.
+    """Run the recheck for a finding. Single entry point used by every
+    challenge / validate path (Challenge button, Validate button,
+    /challenge_inline, /validate_inline, bulk /challenge_all).
 
-    Kept as a function so existing callers (and the route signatures)
-    don't need to be touched, but the actual config setup now lives in
-    toolkit.build_finding_config so the bulk Challenge runner shares
-    one source of truth. See that helper for what gets populated and
-    why."""
+    Dispatch order — testssl is LAST RESORT:
+      1. Sub-second deterministic fast path (urllib header / urllib
+         cookie / Python ssl cert / openssl s_client protocol or
+         cipher / nmap cipher-enum / openssl handshake vuln). Fires
+         tool-agnostically — a "missing HSTS" finding from nikto,
+         wapiti, nuclei, enhanced_testing, or the LLM all use the
+         same urllib path. Returns a Verdict-shaped dict translated
+         from the fast-path JSON.
+      2. Toolkit probe — the named probe (e.g. testssl_recheck,
+         sca_finding_validate) is invoked as a subprocess. Used
+         only when no fast path matches the finding shape.
+
+    Both paths return the same dict shape so callers don't branch."""
+    fast_resp = _dispatch_finding_fast_path(finding)
+    if fast_resp is not None:
+        return _fast_path_response_to_verdict(fast_resp)
     config = toolkit_mod.build_finding_config(
         finding, probe, cookie=cookie, extra=extra)
     return toolkit_mod.run_probe(
@@ -7418,6 +7578,99 @@ def finding_challenge_inline(request: Request, fid: int):
         "last_status": last_req.get("status"),
         "error": verdict.get("error"),
     })
+
+
+@app.post("/finding/{fid}/challenge_fast")
+def finding_challenge_fast(request: Request, fid: int):
+    """Deterministic-fast-path Challenge. Picks the right tool by what
+    the finding IS (header / cookie / cipher / cert / protocol / vuln
+    handshake) and writes the verdict back to validation_status.
+
+    Beats both /challenge_inline (toolkit probe) and /challenge_llm
+    (LLM fidelity) for findings that have a fast-path classifier
+    match — sub-second deterministic urllib / openssl / nmap work
+    instead of subprocess fork or LLM call. Tool-agnostic: a
+    "missing HSTS" finding from nikto, wapiti, nuclei, the LLM, or
+    testssl all use the same path.
+
+    Returns the same JSON envelope as /challenge_inline so the
+    frontend modal/aside renderer doesn't have to branch."""
+    user = current_user(request) or {}
+    if user.get("role") not in ("admin", "superadmin"):
+        return JSONResponse(
+            {"ok": False, "error": "forbidden",
+             "message": "Challenge requires admin role."},
+            status_code=403)
+    f = db.query_one("SELECT * FROM findings WHERE id=%s", (fid,))
+    if not f:
+        raise HTTPException(404)
+    # Decode raw_data once so the dispatcher sees structured fields.
+    if f.get("raw_data") and not f.get("raw"):
+        try:
+            f["raw"] = json.loads(f["raw_data"])
+        except Exception:
+            f["raw"] = None
+
+    fast_resp = _dispatch_finding_fast_path(f)
+    if fast_resp is None:
+        return JSONResponse(
+            {"ok": False, "error": "no_fast_path",
+             "message": ("This finding has no deterministic fast-path "
+                         "classifier. Use the toolkit Challenge or "
+                         "Challenge-with-LLM buttons instead.")},
+            status_code=409)
+
+    # Translate verdict shape and write back to validation_status.
+    try:
+        body = json.loads(fast_resp.body)
+    except Exception:
+        body = {"ok": False}
+    if not body.get("ok"):
+        return fast_resp
+
+    verdict_str = body.get("verdict") or ""
+    if verdict_str == "reproduced":
+        new_validation_status = "validated"
+        new_status = None
+    elif verdict_str == "not_reproduced":
+        new_validation_status = "false_positive"
+        # Auto-flip the finding's overall status to false_positive
+        # because the deterministic test refuted the original claim
+        # — same rule the live-probe echo-match auto-flip uses.
+        new_status = "false_positive"
+    else:
+        new_validation_status = "inconclusive"
+        new_status = None
+
+    # Stash the full fast-path response in validation_evidence so the
+    # finding-detail page can show what was actually checked.
+    audit = {
+        "kind": "challenge-fast-path",
+        "user": user.get("username"),
+        "verdict": verdict_str,
+        "summary": (body.get("matched_rows") or [{}])[0].get("finding")
+                    or body.get("command"),
+        "command": body.get("command"),
+        "reproduce_command": body.get("reproduce_command"),
+        "elapsed_ms": body.get("elapsed_ms"),
+        "set_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if new_status:
+        db.execute(
+            "UPDATE findings SET status=%s, validation_status=%s, "
+            "validation_probe=%s, validation_run_at=NOW(), "
+            "validation_evidence=%s WHERE id=%s",
+            (new_status, new_validation_status, "fast_path",
+             json.dumps(audit, default=str)[:65000], fid))
+    else:
+        db.execute(
+            "UPDATE findings SET validation_status=%s, "
+            "validation_probe=%s, validation_run_at=NOW(), "
+            "validation_evidence=%s WHERE id=%s",
+            (new_validation_status, "fast_path",
+             json.dumps(audit, default=str)[:65000], fid))
+
+    return fast_resp
 
 
 @app.get("/finding/{fid}/challenge_llm/preview")

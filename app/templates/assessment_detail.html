@@ -432,6 +432,50 @@
     return false;
   }
 
+  // Deterministic-fast-path Challenge. Picks the right tool by what
+  // the finding IS (header / cookie / cipher / cert / protocol / vuln)
+  // and writes the verdict to validation_status. Sub-second; same
+  // dispatch the Test button uses, but persists the verdict.
+  async function runChallengeFast(fid) {
+    const modal = document.getElementById('io-modal');
+    const titleEl = document.getElementById('io-modal-title');
+    const validateEl = document.getElementById('io-validate-body');
+    const ioBody = document.getElementById('io-modal-body');
+    if (!modal || !validateEl) return;
+    titleEl.textContent = 'Challenge · finding #' + fid + '…';
+    ioBody.hidden = true;
+    validateEl.hidden = false;
+    const copyBtn = document.getElementById('io-copy-btn');
+    if (copyBtn) copyBtn.hidden = true;
+    validateEl.innerHTML = '<p class="muted">Running…</p>';
+    if (typeof modal.showModal === 'function') modal.showModal();
+    try {
+      const r = await fetch(BASE + "/finding/" + fid + "/challenge_fast", {
+        method: "POST", credentials: "same-origin",
+      });
+      const data = await r.json();
+      titleEl.textContent = "Challenge · finding #" + fid;
+      if (!r.ok || !data.ok) {
+        validateEl.innerHTML = '<p class="warn">' +
+          escapeHTML(data.message || data.error || "Challenge failed.") +
+          '</p>';
+        return;
+      }
+      validateEl.innerHTML = renderTestBody(data);
+      // Refresh the right-rail aside so the FP/Validated badge updates.
+      try {
+        const aside = await fetch(BASE + "/finding/" + fid + "/aside",
+                                  { credentials: "same-origin" })
+                            .then(r => r.text());
+        const slot = document.getElementById("fw-aside");
+        if (slot) slot.innerHTML = aside;
+      } catch (_) { /* non-fatal */ }
+    } catch (err) {
+      validateEl.innerHTML = '<p class="warn">Challenge request failed: ' +
+                              escapeHTML(String(err)) + '</p>';
+    }
+  }
+
   // Two-step Challenge-with-LLM flow:
   //   1. GET /challenge_llm/preview — pull the rendered system + user
   //      prompts. The system prompt renders in a collapsible details

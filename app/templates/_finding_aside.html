@@ -129,8 +129,40 @@
    possible (a non-AI finding with a probe), the toolkit probe wins
    because it's more deterministic. The result badge below reads off
    f.validation_status either way. #}
+{# Challenge button routing — picks the right tool by what the finding
+   IS, not by what tool emitted it. Decision tree:
+     1. If the finding has a fast-path classifier match (header /
+        cookie / cipher / protocol / cert / vuln), Challenge drives
+        the same sub-second urllib / openssl / nmap path the Test
+        button uses, AND writes the verdict back to validation_status.
+        This wins over both toolkit probe AND LLM fidelity for AI
+        findings about security headers, etc.
+     2. Else if a toolkit probe is matched (and the finding isn't AI),
+        Challenge runs that probe.
+     3. Else if the finding is AI-emitted with no deterministic test,
+        fall back to "Challenge with LLM" (fidelity prompt).
+     4. Else: button disabled. #}
 {% set is_ai_finding = (f.source_tool == 'enhanced_ai_testing') %}
-{% if probe and not is_ai_finding %}
+{% set has_fast_path = io and io.has_fast_path %}
+{% if has_fast_path %}
+<button type="button" class="action-btn"
+        onclick="runChallengeFast({{ f.id }})"
+        {% if not is_admin %}disabled title="Read-only account"{% endif %}>
+  {{ scale_balanced_svg }}
+  Challenge
+  {% if f.validation_run_at %}
+    {% if f.validation_status == 'validated' %}
+      <span class="badge done" style="margin-left:auto">✓ Confirmed</span>
+    {% elif f.validation_status == 'false_positive' %}
+      <span class="badge warn" style="margin-left:auto">FP – Excluded</span>
+    {% elif f.validation_status == 'errored' %}
+      <span class="badge error" style="margin-left:auto">⚠ Errored</span>
+    {% elif f.validation_status == 'inconclusive' %}
+      <span class="badge" style="margin-left:auto">— Inconclusive</span>
+    {% endif %}
+  {% endif %}
+</button>
+{% elif probe and not is_ai_finding %}
 <form method="post" action="{{ base }}/finding/{{ f.id }}/challenge"
       onsubmit="return runChallengeAside(event, {{ f.id }})">
   <button type="submit" class="action-btn"

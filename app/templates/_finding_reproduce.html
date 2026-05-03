@@ -111,10 +111,19 @@
           Challenge with <code>{{ io.probe_name }}</code>
         </button>
       {% endif %}
-      {# AI findings have no toolkit probe, but the analyst can still
-         re-grade them by re-running the fidelity prompt. Renders next
-         to (or instead of) the toolkit Challenge button. #}
-      {% if f.source_tool == 'enhanced_ai_testing' %}
+      {# Challenge routing here mirrors _finding_aside.html — pick by
+         what the finding is, not by who emitted it. has_fast_path
+         beats source_tool=='enhanced_ai_testing' because a header /
+         cookie / cipher finding deserves the deterministic urllib /
+         openssl / nmap path even when the LLM was the one who flagged
+         it. LLM fidelity stays as the last-resort fallback. #}
+      {% if io and io.has_fast_path %}
+        <button type="button" class="primary"
+                onclick="runChallengeFast({{ f.id }})"
+                title="Re-test this finding with the deterministic fast path (urllib / openssl / nmap). Writes verdict to validation_status. Admin role required.">
+          Challenge
+        </button>
+      {% elif f.source_tool == 'enhanced_ai_testing' %}
         <button type="button" class="primary"
                 onclick="runChallengeLLM({{ f.id }})"
                 title="Re-grade this finding with the LLM. Calls the configured fidelity prompt against this single row and writes the verdict back. Admin role required.">
