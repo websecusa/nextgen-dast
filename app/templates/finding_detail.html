@@ -752,6 +752,40 @@ async function runChallenge(fid, probeName, safetyClass,
   }
 }
 
+async function runChallengeFast(fid) {
+  // Same dispatch as the workspace's runChallengeFast (urllib /
+  // openssl / nmap fast path) but rendered in this page's modal.
+  // Persists the verdict to validation_status server-side.
+  const modal = document.getElementById('io-modal');
+  const titleEl = document.getElementById('io-modal-title');
+  const validateEl = document.getElementById('io-validate-body');
+  const ioBody = document.getElementById('io-modal-body');
+  if (!modal || !validateEl) return;
+  titleEl.textContent = 'Challenge · finding #' + fid + '…';
+  ioBody.hidden = true;
+  validateEl.hidden = false;
+  document.getElementById('io-copy-btn').hidden = true;
+  validateEl.innerHTML = '<p class="muted">Running…</p>';
+  if (typeof modal.showModal === 'function') modal.showModal();
+  try {
+    const r = await fetch(BASE + '/finding/' + fid + '/challenge_fast', {
+      method: 'POST', credentials: 'same-origin',
+    });
+    const data = await r.json();
+    titleEl.textContent = 'Challenge · finding #' + fid;
+    if (!r.ok || !data.ok) {
+      validateEl.innerHTML = '<p class="warn">' +
+        escapeHTML(data.message || data.error || 'Challenge failed.') +
+        '</p>';
+      return;
+    }
+    validateEl.innerHTML = renderTestBody(data);
+  } catch (err) {
+    validateEl.innerHTML = '<p class="warn">Challenge request failed: ' +
+                            escapeHTML(String(err)) + '</p>';
+  }
+}
+
 async function runChallengeLLM(fid) {
   // Two-step Challenge with LLM:
   //   1. GET /challenge_llm/preview to fetch the rendered system + user

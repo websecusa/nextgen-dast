@@ -1860,6 +1860,20 @@ def _apply_fidelity_verdicts(batch: list[dict],
         if (verdict in ("validated", "false_positive")
                 and confidence >= 0.8):
             now = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Also apply suggested_severity when the LLM returned a
+            # concrete adjustment ("raise" or "lower" + a valid
+            # severity name). The model's job in the fidelity grade
+            # is to re-evaluate impact; if it says a `high` reflected
+            # XSS is actually `info` because the input is sanitized
+            # downstream, we apply that. Only fires when verdict is
+            # 'validated' — for false_positive we suppress the row
+            # entirely, severity is moot.
+            apply_severity = None
+            if (verdict == "validated"
+                    and sev_adjust in ("raise", "lower")
+                    and sev_suggest in _SEV_ALLOWED
+                    and sev_suggest != (f.get("severity") or "").lower()):
+                apply_severity = sev_suggest
             # On a high-confidence false_positive verdict, ALSO update
             # the finding's overall `status` to 'false_positive' — same
             # action the toolkit-probe /challenge_inline endpoint takes
@@ -1877,6 +1891,15 @@ def _apply_fidelity_verdicts(batch: list[dict],
                     "WHERE id=%s",
                     (_VERDICT_TO_STATUS[verdict], now,
                       evidence_blob[:65000], fid))
+            elif apply_severity:
+                db.execute(
+                    "UPDATE findings SET validation_status=%s, "
+                    "validation_probe='enhanced_ai_testing', "
+                    "validation_run_at=%s, validation_evidence=%s, "
+                    "severity=%s "
+                    "WHERE id=%s",
+                    (_VERDICT_TO_STATUS[verdict], now,
+                      evidence_blob[:65000], apply_severity, fid))
             else:
                 db.execute(
                     "UPDATE findings SET validation_status=%s, "
