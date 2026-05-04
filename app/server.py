@@ -951,21 +951,29 @@ def ctx(request: Request, **extra) -> dict:
 
 
 def _resolve_user_theme(user: Optional[dict]) -> str:
-    """Return 'dark' or 'light' for the supplied user. Reads the theme
-    column off the users row; returns 'dark' on any failure (no user,
-    DB error, missing column on a stale schema). Centralised so the
-    dark fallback rule lives in exactly one place."""
+    """Return 'dark' or 'light' for the supplied user.
+
+    Resolution order:
+      1. Per-user `users.theme` value when the user is signed in and the
+         row carries a valid choice.
+      2. Operator-configured system default (config.default_theme).
+      3. Hard-coded 'dark' if both lookups fail (DB unhealthy, etc.).
+
+    Centralised so the fallback rule lives in exactly one place; both
+    the login page and signed-in views call through here so they never
+    disagree about which palette and which logo slot to render."""
+    sysd = branding_mod.get_default_theme()
     if not user:
-        return "dark"
+        return sysd
     try:
         row = db.query_one(
             "SELECT theme FROM users WHERE id=%s", (user.get("id"),))
     except Exception:
-        return "dark"
+        return sysd
     if not row:
-        return "dark"
-    val = (row.get("theme") or "dark").strip().lower()
-    return val if val in ("dark", "light") else "dark"
+        return sysd
+    val = (row.get("theme") or "").strip().lower()
+    return val if val in ("dark", "light") else sysd
 
 
 def _dashboard_data(trend_filter: Optional[str] = None,
@@ -6410,19 +6418,14 @@ def login_page(request: Request, next: str = "", error: str = ""):
     payload = sessions.verify(cookie)
     if payload and payload.get("csrf"):
         return RedirectResponse(next or f"{ROOT_PATH}/", status_code=303)
-    # Pull just enough branding for the login chrome to match the rest of
-    # the app (logo + product name). Wrapped in try/except so a DB outage
-    # doesn't make the login page itself unreachable — the template hides
-    # the <img> with onerror and falls back to "nextgen-dast" for the name.
-    try:
-        brand = branding_mod.get() if db.healthy() else {}
-    except Exception:
-        brand = {}
-    return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "base": ROOT_PATH, "next": next,
-         "error": error, "brand": brand},
-    )
+    # Render with the same context the rest of the app uses so the login
+    # splash inherits the operator-configured default theme, the matching
+    # web-logo slot (light vs dark), and the resolved web color palette.
+    # ctx() handles unauthenticated visitors (user is None) by falling back
+    # to the system default theme stored in config.default_theme; a DB
+    # outage degrades gracefully to the dark defaults inside ctx().
+    context = ctx(request, next=next, error=error)
+    return templates.TemplateResponse("login.html", context)
 
 
 @app.post("/login")
@@ -6732,10 +6735,14 @@ def admin_branding_landing(request: Request, msg: str = ""):
 
 @app.get("/admin/branding/web", response_class=HTMLResponse)
 def admin_branding_web_page(request: Request, msg: str = ""):
+    # default_theme is the system-wide UI default (config row); surfaced
+    # to the template so the dropdown can pre-select the active value.
     return templates.TemplateResponse(
         "admin/branding_web.html",
         ctx(request, brand=branding_mod.get(),
-            web=branding_mod.get_web(), msg=msg),
+            web=branding_mod.get_web(),
+            default_theme=branding_mod.get_default_theme(),
+            msg=msg),
     )
 
 
@@ -6778,6 +6785,7 @@ def admin_branding_save_web(
     web_sev_medium: str = Form(""),
     web_sev_low: str = Form(""),
     web_sev_info: str = Form(""),
+    default_theme: str = Form("dark"),
 ):
     if web_mode not in ("dark", "custom"):
         web_mode = "dark"
@@ -6792,6 +6800,11 @@ def admin_branding_save_web(
         "web_sev_low": web_sev_low,
         "web_sev_info": web_sev_info,
     })
+    # Persist the operator-chosen default theme alongside the rest of the
+    # web branding form. branding_mod.set_default_theme() handles
+    # validation; an unknown value collapses back to 'dark' rather than
+    # raising so a tampered form can't 500 the admin page.
+    branding_mod.set_default_theme(default_theme)
     return redirect("/admin/branding/web?msg=web+branding+saved")
 
 
@@ -6889,13 +6902,16 @@ def admin_toolkit_page(request: Request):
 def theme_page(request: Request, msg: str = ""):
     """Render the theme preference page. Unauthenticated visitors are
     redirected to login; the page itself only shows the current choice
-    + a save form."""
+    + a save form. `default_theme` is surfaced so the template can label
+    whichever option matches the operator-configured default."""
     user = current_user(request)
     if not user:
         return redirect("/login?next=/theme")
     return templates.TemplateResponse(
         "theme.html",
-        ctx(request, msg=msg, current_theme=_resolve_user_theme(user)))
+        ctx(request, msg=msg,
+            current_theme=_resolve_user_theme(user),
+            default_theme=branding_mod.get_default_theme()))
 
 
 @app.post("/theme")

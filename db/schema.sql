@@ -834,4 +834,11 @@ INSERT IGNORE INTO config (`key`, value) VALUES
   -- Editable on /admin/llm by superadmin only. Per-user max_spend_usd
   -- (users.max_spend_usd) clamps below this when set, so a user without
   -- a personal cap inherits the system default at submit time.
-  ('advanced_ai_budget_default_usd', '25');
+  ('advanced_ai_budget_default_usd', '25'),
+  -- System-wide default UI theme (one of: 'dark', 'light'). Drives the
+  -- pre-login experience (login page palette + which web-logo slot is
+  -- chosen on the login screen) and also serves as the fallback for any
+  -- signed-in user who has not picked a personal theme. Each user can
+  -- still override their own preference via /theme; this row only sets
+  -- the default that new visitors and unauthenticated views see.
+  ('default_theme', 'dark');

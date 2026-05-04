@@ -1,16 +1,44 @@
 {#
   Author: Tim Rice <tim.j.rice@hackrange.com>
   Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Pre-login splash. The page paints the operator-configured default
+  theme (dark or light) so the splash matches what the rest of the app
+  will look like once the user signs in -- and so the matching
+  light- vs dark-theme logo slot is the one selected.
+
+  Theming approach mirrors base.html: the body carries
+  `class="theme-{{ user_theme }}"`, an inline <style> block re-binds
+  the brand CSS variables from the resolved web theme, and style.css
+  re-binds the canvas / panel / text variables for the light variant.
+  Without that, the inline form colors fall back to the dark :root
+  defaults regardless of which body class is set.
 #}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Sign in — nextgen-dast</title>
-  <link rel="stylesheet" href="{{ base }}/static/style.css">
+  <title>Sign in — {{ (brand.company_name if brand else None) or "nextgen-dast" }}</title>
+  {# Same cache-bust value as base.html so a CSS-only redeploy invalidates
+     the login page at the same time. #}
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260504a">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --accent:   {{ web.primary }};
+      --accent-2: {{ web.accent }};
+      --green:    {{ web.accent }};
+    }
+    body { font-family: {{ web.font|safe }}; }
+    /* The pre-login canvas needs to actually paint the chosen theme.
+       The body class swaps the CSS variables (see style.css), but the
+       form's `<main>` here doesn't sit inside an `.app` flex shell, so
+       we apply the canvas / text colors directly to <body> for both
+       themes. */
+    body { background: var(--bg); color: var(--text); margin: 0; }
+  </style>
 </head>
-<body>
+<body class="theme-{{ user_theme | default('dark') }}">
 <main style="max-width:420px; margin:6em auto; padding:0 1.2em">
   {# Prefer the resolved web-logo slot (light- vs dark-theme aware,
      surfaced via ctx() in server.py). Fall back to the legacy PDF

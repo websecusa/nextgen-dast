@@ -133,6 +133,49 @@ def get_web() -> dict:
     }
 
 
+# --- System-wide default theme -------------------------------------------
+# Stored in the generic config k/v table rather than a dedicated column on
+# `branding` because it's a single scalar with no companion fields. The
+# default is exposed via getter/setter so callers don't have to know which
+# table backs it; if we ever move it to a typed column the helpers stay.
+_DEFAULT_THEME_KEY = "default_theme"
+_VALID_THEMES = ("dark", "light")
+
+
+def get_default_theme() -> str:
+    """Return the operator-configured default UI theme ('dark' or 'light').
+
+    Used as the fallback for visitors who have not made a personal choice
+    (login page, brand-new users) and as the seed value for new accounts.
+    Returns 'dark' when the DB is unhealthy or the config row is missing,
+    so the login page never blanks out on a transient backend hiccup."""
+    try:
+        if not db.healthy():
+            return "dark"
+        row = db.query_one(
+            "SELECT value FROM config WHERE `key`=%s",
+            (_DEFAULT_THEME_KEY,))
+    except Exception:
+        return "dark"
+    if not row:
+        return "dark"
+    val = (row.get("value") or "").strip().lower()
+    return val if val in _VALID_THEMES else "dark"
+
+
+def set_default_theme(value: str) -> None:
+    """Persist the operator-configured default UI theme. Validates against
+    the allowed set so a tampered form value cannot smuggle arbitrary text
+    into the config row."""
+    choice = (value or "").strip().lower()
+    if choice not in _VALID_THEMES:
+        choice = "dark"
+    db.execute(
+        "INSERT INTO config (`key`, value) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE value = VALUES(value)",
+        (_DEFAULT_THEME_KEY, choice))
+
+
 def resolve_web_header_logo_kind(theme: str) -> Optional[str]:
     """Pick the right web-logo `kind` for the viewer's current theme,
     falling back to the other slot when only one is uploaded.
