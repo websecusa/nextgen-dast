@@ -13,10 +13,15 @@ from typing import Optional
 import db
 
 LOGO_DIR = Path("/data/branding")
-# Logo "kinds" — three slots so web nav and PDF cover/footer can each have
-# their own image. Old `header` / `footer` names kept for back-compat with
-# previously-uploaded files.
-ALLOWED_KINDS = ("web_header", "pdf_header", "pdf_footer", "header", "footer")
+# Logo "kinds" -- four web/pdf slots. The web nav has a light-mode
+# slot AND a dark-mode slot so an operator can ship a logo tuned
+# for each sidebar; base.html selects the right one based on the
+# viewer's theme. PDF cover / footer keep their own slots. Old
+# `header` / `footer` names stay in the allowlist for back-compat
+# with previously-uploaded files.
+ALLOWED_KINDS = ("web_header", "web_header_dark",
+                 "pdf_header", "pdf_footer",
+                 "header", "footer")
 
 # Dark-mode (default) palette. When web_mode='dark', the web UI uses these
 # regardless of any web_* color values that may be set. Switch web_mode to
@@ -91,6 +96,12 @@ def get_web() -> dict:
     used (falling back to defaults for empty cells)."""
     b = get()
     mode = (b.get("web_mode") or "dark").lower()
+    # Two header-logo slots: light and dark. Both are surfaced to the
+    # template; base.html picks the right one based on the viewer's
+    # theme. On a single-logo deployment whichever slot is set wins
+    # (see resolve_web_header_logo_kind).
+    light_logo = b.get("web_header_logo_filename")
+    dark_logo  = b.get("web_header_logo_dark_filename")
     if mode == "dark":
         d = DARK_DEFAULTS
         return {
@@ -103,7 +114,8 @@ def get_web() -> dict:
             "sev_medium":   d["sev_medium"],
             "sev_low":      d["sev_low"],
             "sev_info":     d["sev_info"],
-            "header_logo_filename": b.get("web_header_logo_filename"),
+            "header_logo_filename": light_logo,
+            "header_logo_dark_filename": dark_logo,
         }
     d = DARK_DEFAULTS
     return {
@@ -116,8 +128,33 @@ def get_web() -> dict:
         "sev_medium":   b.get("web_sev_medium")   or d["sev_medium"],
         "sev_low":      b.get("web_sev_low")      or d["sev_low"],
         "sev_info":     b.get("web_sev_info")     or d["sev_info"],
-        "header_logo_filename": b.get("web_header_logo_filename"),
+        "header_logo_filename": light_logo,
+        "header_logo_dark_filename": dark_logo,
     }
+
+
+def resolve_web_header_logo_kind(theme: str) -> Optional[str]:
+    """Pick the right web-logo `kind` for the viewer's current theme,
+    falling back to the other slot when only one is uploaded.
+
+    Returns the `kind` string (e.g. "web_header" / "web_header_dark")
+    that base.html should use to construct the /branding/logo/<kind>
+    URL, or None when no web logo is configured at all (in which
+    case the template falls back to the legacy pdf header logo)."""
+    b = get()
+    light = b.get("web_header_logo_filename")
+    dark  = b.get("web_header_logo_dark_filename")
+    if (theme or "dark").lower() == "dark":
+        if dark:
+            return "web_header_dark"
+        if light:
+            return "web_header"
+    else:
+        if light:
+            return "web_header"
+        if dark:
+            return "web_header_dark"
+    return None
 
 
 def _hex_to_rgba(h: str, alpha: float) -> str:
@@ -240,13 +277,15 @@ def save_logo(kind: str, data: bytes) -> dict:
 
 def _logo_column_for(kind: str) -> str:
     """Map a logo kind to its DB column. Legacy 'header'/'footer' kinds map
-    to the original PDF logo columns so old uploads keep working."""
+    to the original PDF logo columns so old uploads keep working.
+    `web_header_dark` is the dark-mode-only slot added in 2026-05-04."""
     return {
-        "header":      "header_logo_filename",
-        "footer":      "footer_logo_filename",
-        "pdf_header":  "header_logo_filename",
-        "pdf_footer":  "footer_logo_filename",
-        "web_header":  "web_header_logo_filename",
+        "header":           "header_logo_filename",
+        "footer":           "footer_logo_filename",
+        "pdf_header":       "header_logo_filename",
+        "pdf_footer":       "footer_logo_filename",
+        "web_header":       "web_header_logo_filename",
+        "web_header_dark":  "web_header_logo_dark_filename",
     }[kind]
 
 

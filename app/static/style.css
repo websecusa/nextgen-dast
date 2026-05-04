@@ -51,19 +51,37 @@
    accessibility win of consistent severity mapping outweighs the
    slight aesthetic mismatch. */
 body.theme-light {
-  --bg:        #f5f6f8;
+  --bg:        #f6f7f9;
   --panel:     #ffffff;
-  --panel-2:   #f0f2f5;
-  --elevated:  #e9ecf1;
-  --border:    rgba(0, 0, 0, .08);
-  --border-strong: rgba(0, 0, 0, .15);
+  --panel-2:   #eef0f4;
+  --elevated:  #e3e7ed;
+  --border:    rgba(15, 23, 42, .09);
+  --border-strong: rgba(15, 23, 42, .18);
 
-  --text:      #1c2026;
-  --text-soft: #2c333d;
-  --muted:     #5c636d;
-  --muted-2:   #8b929b;
+  --text:      #111827;
+  --text-soft: #1f2937;
+  --muted:     #4b5563;
+  --muted-2:   #9ca3af;
 }
-body.theme-light a { color: var(--accent-2); }
+/* Anchor color in the light palette uses the brand primary (blue)
+   rather than the secondary accent (which is green by default).
+   The previous rule (`color: var(--accent-2)`) was what made the
+   Re-scan button render as green-on-blue: anchors inheriting the
+   green link color while the .button background painted the
+   primary blue. Hover stays on the secondary so the anchor still
+   has a visible state change. */
+body.theme-light a        { color: var(--accent); }
+body.theme-light a:hover  { color: var(--accent-2); }
+/* `<a class="button">` (Re-scan, Save, …) MUST keep the button's
+   contrasting text color regardless of the theme's link rules.
+   `body.theme-light a.button` has higher specificity than
+   `body.theme-light a`, so it wins the cascade. Without this rule
+   the anchor link color leaks into the button text, producing the
+   green-on-blue Re-scan bug. */
+body.theme-light a.button,
+body.theme-light a.button:hover { color: #07111a; }
+body.theme-light a.button.ghost,
+body.theme-light a.button.ghost:hover { color: var(--text); }
 /* Form controls in the light palette need a visible default fill so
    inputs and selects don't blend into the page background. Border
    stays the existing strong-border variable for consistency. */
@@ -186,9 +204,47 @@ html, body {
 
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-2); text-decoration: underline; }
+
+/* Code / pre baseline styling. Unified across themes -- the same
+   subtle panel-on-text look in both dark and light mode so code
+   reads as a callout without dominating the page. The CSS
+   variables `--code-bg` / `--code-fg` / `--code-border` track the
+   surrounding theme automatically (panel-2 / text / border are
+   already re-bound by `body.theme-light`), so the code block sits
+   one shade off the surrounding card in either palette. */
 code, pre {
-  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
   font-size: .92em;
+}
+:root {
+  --code-bg:     var(--panel-2);
+  --code-fg:     var(--text);
+  --code-border: var(--border-strong);
+}
+code {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
+  padding: .08em .32em;
+  border-radius: 3px;
+}
+pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
+  padding: .85em 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
 }
 
 /* ---- App shell: sidebar + main --------------------------------------- */
@@ -603,10 +659,14 @@ dd { margin: 0; word-break: break-all; }
 .ok    { color: var(--green); }
 .err   { color: var(--red); }
 
-/* Logs / pre blocks */
+/* Logs / pre blocks. Inherit the code-block palette set above so
+   dark mode renders black + terminal green and light mode stays
+   subtle. Override only the things that are log-specific (max-
+   height + smaller font + tighter break rule). */
 pre.log {
-  background: #06070a;
-  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
   border-radius: 10px;
   padding: .9em 1em;
   overflow: auto;
@@ -1075,31 +1135,21 @@ table.sortable-table th .sort-arrow {
   margin: 1em 0 .35em;
   line-height: 1.25;
 }
+/* Inline code inside markdown bodies inherits the global code
+   styling (above) plus a tiny vertical-padding nudge so it sits
+   nicely on a line of prose. We don't re-declare bg/fg/border
+   here so the dark/light parity holds across plain `code` and
+   markdown-rendered code. */
 .markdown-body code {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  font-size: .92em;
   padding: .12em .35em;
-  background: var(--panel-2, #f4f5f7);
-  border: 1px solid var(--border, #d8dadd);
-  border-radius: 3px;
 }
 .markdown-body pre {
   margin: .5em 0 .9em;
-  padding: .85em 1em;
-  background: var(--panel-2, #f4f5f7);
-  border: 1px solid var(--border, #d8dadd);
-  border-left: 3px solid var(--accent, #2266cc);
-  border-radius: 4px;
-  overflow-x: auto;
+  border-left: 3px solid var(--accent);
   font-size: .92em;
-  line-height: 1.45;
 }
 .markdown-body pre code {
   display: block;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
   font-size: 1em;
 }
 .markdown-body blockquote {
