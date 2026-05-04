@@ -41,7 +41,7 @@
       <h3 style="margin-top:0">Light-theme logo</h3>
       <p class="muted small">Shown to users on the light theme. Tip: dark / color-on-transparent works best on the white sidebar.</p>
       {% if web.header_logo_filename %}
-        <p><img src="{{ base }}/branding/logo/web_header" alt=""
+        <p><img src="{{ base }}/branding/logo/web_header?v={{ logo_v('web_header') }}" alt=""
                 style="max-height:60px; max-width:100%; width:auto; height:auto;
                        object-fit:contain; background:#fff; padding:.4em;
                        border-radius:4px"></p>
@@ -63,7 +63,7 @@
       <h3 style="margin-top:0">Dark-theme logo</h3>
       <p class="muted small">Shown to users on the dark theme. Tip: light / color-on-transparent works best on the dark sidebar.</p>
       {% if web.header_logo_dark_filename %}
-        <p><img src="{{ base }}/branding/logo/web_header_dark" alt=""
+        <p><img src="{{ base }}/branding/logo/web_header_dark?v={{ logo_v('web_header_dark') }}" alt=""
                 style="max-height:60px; max-width:100%; width:auto; height:auto;
                        object-fit:contain; background:#0a0b0d; padding:.4em;
                        border-radius:4px"></p>

@@ -355,6 +355,29 @@ def get_logo_path(kind: str) -> Optional[Path]:
     return p if p.exists() else None
 
 
+def get_logo_mtime(kind: str) -> int:
+    """Return the on-disk modification time of `kind`'s logo as an int
+    (seconds since epoch), or 0 when no logo is uploaded.
+
+    Used by templates to append a `?v=<mtime>` cache-buster to
+    /branding/logo/<kind> URLs. The endpoint already emits
+    Cache-Control: no-cache so fresh requests revalidate via etag, but
+    that header doesn't help entries the browser cached *before* we
+    added it -- those keep their heuristic freshness lifetime. Changing
+    the URL itself sidesteps any stale heuristic cache: a re-upload
+    bumps mtime, the query-string flips, the browser sees a brand-new
+    URL and fetches fresh."""
+    if kind not in ALLOWED_KINDS:
+        return 0
+    p = get_logo_path(kind)
+    if not p:
+        return 0
+    try:
+        return int(p.stat().st_mtime)
+    except OSError:
+        return 0
+
+
 def get_content_type(filename: str) -> str:
     if filename.endswith(".png"):
         return "image/png"
