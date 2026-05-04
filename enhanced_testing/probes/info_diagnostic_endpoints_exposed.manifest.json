@@ -1,0 +1,32 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_diagnostic_endpoints_exposed",
+  "version": "1.0",
+  "summary": "Re-fetches the catalogue of framework / server diagnostic endpoints (trace.axd, elmah.axd, actuator, server-status, Tomcat manager, etc.) and asserts whether any still answer with a content-specific signature.",
+  "validates": [
+    "CWE-200",
+    "CWE-489",
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "info_diagnostic_endpoints_exposed",
+    "diagnostic endpoint exposed",
+    "actuator exposed",
+    "trace.axd exposed",
+    "elmah exposed",
+    "server-status exposed",
+    "tomcat manager exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 20,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Site origin to probe",
+    "--max-paths": "Cap on number of paths tested (default 20)"
+  }
+}

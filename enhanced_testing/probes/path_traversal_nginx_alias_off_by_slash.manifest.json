@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "path_traversal_nginx_alias_off_by_slash",
+  "version": "1.0",
+  "summary": "Re-runs the nginx alias off-by-slash probe against common location prefixes and asserts whether parent-directory files are still reachable.",
+  "validates": [
+    "CWE-22",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "path_traversal_nginx_alias_off_by_slash",
+    "nginx alias traversal",
+    "nginx off-by-slash",
+    "alias directive traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 24,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--location": "Additional location prefix (repeatable)"
+  }
+}

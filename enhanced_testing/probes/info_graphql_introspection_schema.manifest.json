@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_graphql_introspection_schema",
+  "version": "1.0",
+  "summary": "Re-runs the GraphQL introspection query and asserts whether the full schema is still returned to anonymous callers.",
+  "validates": [
+    "CWE-200",
+    "CWE-668",
+    "CWE-540"
+  ],
+  "matches_titles": [
+    "info_graphql_introspection_schema",
+    "graphql introspection",
+    "graphql schema disclosure",
+    "graphql introspection enabled"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Site origin to probe; the probe sweeps known GraphQL paths under it"
+  }
+}

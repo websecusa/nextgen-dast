@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_pagination_unbounded",
+  "version": "1.0",
+  "summary": "Re-runs the comparative pagination test (?limit=10 vs ?limit=10000) and asserts whether the server still honours an unbounded page size.",
+  "validates": [
+    "CWE-770",
+    "CWE-200",
+    "CWE-799"
+  ],
+  "matches_titles": [
+    "api_pagination_unbounded",
+    "unbounded pagination",
+    "unbounded limit",
+    "lack of resources rate limiting",
+    "no maximum page size"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Site origin to probe",
+    "--high-limit": "The large limit value (default 10000); validation requires >= 1000 rows in the response"
+  }
+}

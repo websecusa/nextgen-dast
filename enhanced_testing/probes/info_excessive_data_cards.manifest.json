@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_excessive_data_cards",
+  "version": "1.0",
+  "summary": "Re-fetches the payment-card listing and asserts whether a Luhn-valid full PAN is still returned to the caller.",
+  "validates": [
+    "CWE-200",
+    "CWE-359",
+    "CWE-311"
+  ],
+  "matches_titles": [
+    "info_excessive_data_cards",
+    "excessive data exposure cards",
+    "credit card number exposure",
+    "full pan exposed",
+    "unmasked pan returned"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe; the probe registers a throwaway user, logs in, and sweeps card endpoints"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_cache_poison_xforwarded_host",
+  "version": "1.0",
+  "summary": "Re-runs the cache-poisoning probe and asserts whether the X-Forwarded-Host marker is still reflected into a cacheable response in an exploitable context.",
+  "validates": [
+    "CWE-444",
+    "CWE-345",
+    "CWE-525"
+  ],
+  "matches_titles": [
+    "config_cache_poison_xforwarded_host",
+    "cache poisoning",
+    "x-forwarded-host poisoning",
+    "unkeyed header cache poisoning",
+    "host header cache poisoning"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional path to probe (repeatable)"
+  }
+}

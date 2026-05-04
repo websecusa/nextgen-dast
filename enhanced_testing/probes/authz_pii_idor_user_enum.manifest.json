@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_pii_idor_user_enum",
+  "version": "1.0",
+  "summary": "Re-runs the per-user PII IDOR probe and asserts whether sequential foreign-user-id requests still return PII fields to a non-admin authenticated caller.",
+  "validates": [
+    "CWE-639",
+    "CWE-284",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "authz_pii_idor_user_enum",
+    "user pii idor",
+    "user enumeration idor",
+    "broken object level authorization",
+    "bola user detail"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 12,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--max-id": "Highest user id to walk (default 10)"
+  }
+}

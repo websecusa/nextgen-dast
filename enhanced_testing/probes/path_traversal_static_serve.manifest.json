@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "path_traversal_static_serve",
+  "version": "1.0",
+  "summary": "Re-runs the path-traversal probe against static-file endpoints and asserts whether /etc/passwd is still readable via encoded traversal.",
+  "validates": [
+    "CWE-22",
+    "CWE-23",
+    "CWE-35"
+  ],
+  "matches_titles": [
+    "path_traversal_static_serve",
+    "path traversal static",
+    "directory traversal static",
+    "lfi static serve",
+    "local file inclusion static"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "nuclei",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--location": "Additional static-file mount point (e.g. '/cdn'); repeatable"
+  }
+}

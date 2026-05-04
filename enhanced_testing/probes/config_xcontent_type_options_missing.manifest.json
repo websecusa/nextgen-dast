@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_xcontent_type_options_missing",
+  "version": "1.0",
+  "summary": "Re-fetches user-content paths and asserts whether `X-Content-Type-Options: nosniff` is now present on sniffable content types.",
+  "validates": [
+    "CWE-693",
+    "CWE-430",
+    "CWE-79"
+  ],
+  "matches_titles": [
+    "config_xcontent_type_options_missing",
+    "x-content-type-options missing",
+    "nosniff missing",
+    "mime sniffing",
+    "missing nosniff header"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei",
+    "nikto",
+    "wapiti"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 10,
+  "request_budget_max": 18,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional user-content path (repeatable)"
+  }
+}
