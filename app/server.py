@@ -713,11 +713,27 @@ def _md_filter(text: str | None) -> _Markup:
     Empty/None passes through as empty string. The Markdown instance is
     long-lived; we call .reset() each time to clear any per-render
     state (footnote counters, etc.) so the same instance can be reused
-    across thousands of finding renders."""
+    across thousands of finding renders.
+
+    Pre-escapes < and > in the input. Without this, an LLM-emitted
+    sentence like "inject the nonce on every inline <script>" passes
+    `<script>` through to the workspace template as a real opening
+    HTML tag. The browser then treats everything between that token
+    and the next </script> (the page-level workspace JS) as script
+    content -- eating the right-rail .fw-aside markup AND breaking
+    the workspace JS so .fw-item click handlers silently fail. The
+    pre-escape converts angle brackets to entities so the rendered
+    output shows the four characters "<script>" as literal text;
+    fenced and inline code blocks keep working because markdown
+    re-escapes inside <code>/<pre> regardless. The trade-off is that
+    legitimate raw HTML inside the markdown source (a rare-to-never
+    case in our LLM-generated content) also becomes literal text --
+    we accept that to close the XSS-via-prompt-injection vector."""
     if not text:
         return _Markup("")
+    safe = str(text).replace("<", "&lt;").replace(">", "&gt;")
     _MD.reset()
-    return _Markup(_MD.convert(str(text)))
+    return _Markup(_MD.convert(safe))
 
 
 templates.env.filters["md"] = _md_filter
