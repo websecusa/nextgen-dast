@@ -31,11 +31,19 @@
     }
     body { font-family: {{ web.font|safe }}; }
     /* The pre-login canvas needs to actually paint the chosen theme.
-       The body class swaps the CSS variables (see style.css), but the
-       form's `<main>` here doesn't sit inside an `.app` flex shell, so
-       we apply the canvas / text colors directly to <body> for both
-       themes. */
-    body { background: var(--bg); color: var(--text); margin: 0; }
+       style.css sets `html, body { background: var(--bg) }` and only
+       re-binds --bg on `body.theme-light`, so the html element keeps
+       the dark :root value regardless of the body class. Inside the
+       app that's invisible because `.app` covers the viewport, but on
+       the login page `<main>` is a small centered column and the html
+       background shows around it -- producing a light card on a dark
+       page when the operator chose the light default theme. Zeroing
+       out the html background lets the body's (theme-aware) background
+       propagate to the viewport canvas, which is the standard CSS
+       behavior when html has no background of its own. */
+    html { background: transparent; }
+    body { background: var(--bg); color: var(--text); margin: 0;
+           min-height: 100vh; }
   </style>
 </head>
 <body class="theme-{{ user_theme | default('dark') }}">
