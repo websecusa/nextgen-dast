@@ -39,7 +39,7 @@
       <h3 style="margin-bottom:.4em">{{ label }}</h3>
       {% set fn = (brand.header_logo_filename if kind == "pdf_header" else brand.footer_logo_filename) %}
       {% if fn %}
-        <p><img src="{{ base }}/branding/logo/{{ kind }}" alt=""
+        <p><img src="{{ base }}/branding/logo/{{ kind }}?v={{ logo_v(kind) }}" alt=""
                 style="max-height:60px; max-width:100%; width:auto; height:auto;
                        object-fit:contain; background:#fff; padding:.4em;
                        border-radius:4px"></p>

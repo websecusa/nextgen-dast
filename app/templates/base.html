@@ -108,12 +108,14 @@
          overflow the sidebar even if the external stylesheet is blocked
          or stale. The stylesheet rule (style.css :: aside.sidebar .brand img)
          still wins when it loads — these inline values are a hard floor. #}
+      {# `?v=<mtime>` busts any browser cache when the slot is re-uploaded;
+         the URL itself changes so no heuristic-cached entry can win. #}
       {% if web_logo_kind %}
-        <img src="{{ base }}/branding/logo/{{ web_logo_kind }}" alt="" width="22" height="22"
+        <img src="{{ base }}/branding/logo/{{ web_logo_kind }}?v={{ logo_v(web_logo_kind) }}" alt="" width="22" height="22"
              style="max-height:56px; max-width:100%; width:auto; height:auto;
                     object-fit:contain; flex-shrink:0; display:block">
       {% elif brand and brand.header_logo_filename %}
-        <img src="{{ base }}/branding/logo/header" alt="" width="22" height="22"
+        <img src="{{ base }}/branding/logo/header?v={{ logo_v('header') }}" alt="" width="22" height="22"
              style="max-height:56px; max-width:100%; width:auto; height:auto;
                     object-fit:contain; flex-shrink:0; display:block">
       {% endif %}

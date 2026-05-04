@@ -722,6 +722,14 @@ def _md_filter(text: str | None) -> _Markup:
 
 templates.env.filters["md"] = _md_filter
 
+# Jinja global: returns the on-disk mtime (epoch seconds) of a logo
+# slot, used as a cache-buster on /branding/logo/<kind> URLs in
+# templates. `{{ '/branding/logo/web_header?v=' ~ logo_v('web_header') }}`
+# changes whenever the file is re-uploaded, sidestepping any browser
+# heuristic-cached entry that pre-dated our Cache-Control:no-cache
+# header on the serve endpoint. Returns 0 when the slot is empty.
+templates.env.globals["logo_v"] = branding_mod.get_logo_mtime
+
 # RESTful API (token-auth + IP whitelist). See app/api.py for the full
 # surface description. Mounted at /api/v1; the auth middleware below
 # whitelists /api/ so the router enforces its own token-based auth
