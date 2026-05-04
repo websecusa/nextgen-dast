@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_mass_assignment_widened",
+  "version": "1.0",
+  "summary": "Re-runs the mass-assignment probe with the widened privileged-field vocabulary (role / is_admin / permissions / groups / plan / tier / verified / balance / credit / accessLevel).",
+  "validates": [
+    "CWE-915",
+    "CWE-1320",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "authz_mass_assignment_widened",
+    "mass assignment",
+    "object property mass assignment",
+    "broken function level authorization"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe",
+    "--register-path": "Additional registration endpoint (repeatable)"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "python_django_debug_page",
+  "version": "1.0",
+  "summary": "Re-fetches a non-existent path and asserts whether the Django DEBUG=True technical-error template is still returned.",
+  "validates": [
+    "CWE-489",
+    "CWE-200",
+    "CWE-209"
+  ],
+  "matches_titles": [
+    "python_django_debug_page",
+    "django debug page",
+    "django debug=true",
+    "django technical error"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 3,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

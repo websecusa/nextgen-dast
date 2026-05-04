@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "iis_short_filename_disclosure",
+  "version": "1.0",
+  "summary": "Re-runs the IIS 8.3 short-filename disclosure probe and asserts whether known-prefix tilde-shape requests still produce a differential response.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "iis_short_filename_disclosure",
+    "iis short filename",
+    "8.3 short name disclosure",
+    "iis tilde enumeration"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 8,
+  "request_budget_max": 14,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

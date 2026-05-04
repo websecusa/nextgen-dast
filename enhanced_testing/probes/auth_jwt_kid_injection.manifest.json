@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_jwt_kid_injection",
+  "version": "1.0",
+  "summary": "Re-runs the JWT kid-injection probe and asserts whether forged tokens with traversal / SQL / URL kid values are still accepted.",
+  "validates": [
+    "CWE-345",
+    "CWE-287",
+    "CWE-94"
+  ],
+  "matches_titles": [
+    "auth_jwt_kid_injection",
+    "jwt kid injection",
+    "jwt kid path traversal",
+    "jwt kid sql injection",
+    "jwt key id injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 36,
+  "request_budget_max": 80,
+  "args": {
+    "--url": "Site origin to probe",
+    "--whoami-path": "Additional whoami path (repeatable)"
+  }
+}

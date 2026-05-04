@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "nosql_operator_injection_any_filter",
+  "version": "1.0",
+  "summary": "Re-runs the NoSQL operator-injection probe across filter endpoints and asserts whether $ne-injected requests still return markedly more rows than literal filters.",
+  "validates": [
+    "CWE-943",
+    "CWE-89",
+    "CWE-77"
+  ],
+  "matches_titles": [
+    "nosql_operator_injection_any_filter",
+    "nosql injection",
+    "nosql operator injection",
+    "mongo operator injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 18,
+  "request_budget_max": 40,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional path|param (e.g. '/api/foo|id'); repeatable"
+  }
+}

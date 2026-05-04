@@ -1,0 +1,30 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_resource_idor_walk",
+  "version": "1.0",
+  "summary": "Re-runs the per-resource IDOR walk and asserts whether sequential foreign-resource-id GETs still expose foreign-owner records.",
+  "validates": [
+    "CWE-639",
+    "CWE-284",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "authz_resource_idor_walk",
+    "idor",
+    "insecure direct object reference",
+    "broken object level authorization",
+    "bola"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 80,
+  "request_budget_max": 200,
+  "args": {
+    "--url": "Site origin to probe",
+    "--resource": "Additional resource name to walk (repeatable)",
+    "--max-id": "Highest id to probe per resource (default 8)"
+  }
+}

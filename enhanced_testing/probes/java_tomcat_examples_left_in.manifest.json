@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "java_tomcat_examples_left_in",
+  "version": "1.0",
+  "summary": "Re-fetches the Tomcat default webapps (docs / examples / manager / host-manager / snoop.jsp) and asserts whether any are still reachable.",
+  "validates": [
+    "CWE-200",
+    "CWE-489",
+    "CWE-1188"
+  ],
+  "matches_titles": [
+    "java_tomcat_examples_left_in",
+    "tomcat default webapp",
+    "tomcat examples exposed",
+    "tomcat docs exposed",
+    "tomcat manager exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

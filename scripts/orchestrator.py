@@ -533,6 +533,19 @@ _PROBES_NEEDING_POST = {
     "authz_pii_idor_user_enum":           "register/login then walk /api/Users/<id> for foreign PII",
     "config_cache_deception_path_extension": "register/login then GET /<base> + /<base>.css to compare",
     "auth_session_fixation_no_rotation":  "register/login with seeded session cookie to test rotation",
+    # ----- Round-10 batch (platform-targeted) -------------------------
+    "iis_webdav_methods_enabled":         "OPTIONS + PROPFIND to detect WebDAV methods",
+    "http_trace_method_enabled":          "TRACE / with marker header (XST detection)",
+    "http_dangerous_methods_allowed":     "OPTIONS read-only paths to enumerate Allow methods",
+    # ----- Round-11 batch (extract & generalize) ----------------------
+    "ssrf_url_field_persisted":           "register/login + multi-field PATCH/POST URL marker",
+    "authz_resource_idor_walk":           "register two users + GET /api/<resource>/<id> walk",
+    "xss_stored_via_request_headers":     "register + state-recording action with marker headers",
+    "xxe_any_xml_upload":                 "POST XXE payload to multiple XML-accepting endpoints",
+    "prototype_pollution_any_patch":      "register/login + PATCH/PUT __proto__ payload",
+    "redos_any_string_field":             "POST catastrophic-vs-benign payload comparison",
+    "ssti_any_template_engine":           "register/login + per-engine interpolation marker injection",
+    "authz_mass_assignment_widened":      "POST register with widened privileged-field set",
 }
 
 

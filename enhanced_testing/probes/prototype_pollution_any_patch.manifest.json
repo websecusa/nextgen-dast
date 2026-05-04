@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "prototype_pollution_any_patch",
+  "version": "1.0",
+  "summary": "Re-runs the prototype-pollution probe across PATCH/PUT endpoints and asserts whether the marker still leaks into an unrelated endpoint.",
+  "validates": [
+    "CWE-1321",
+    "CWE-915"
+  ],
+  "matches_titles": [
+    "prototype_pollution_any_patch",
+    "prototype pollution",
+    "object prototype pollution",
+    "__proto__ pollution"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 24,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--endpoint": "Additional 'path|METHOD' endpoint (repeatable)"
+  }
+}

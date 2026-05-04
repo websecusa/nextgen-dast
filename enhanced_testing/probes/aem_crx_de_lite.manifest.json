@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_crx_de_lite",
+  "version": "1.0",
+  "summary": "Re-fetches CRXDE / CRX Explorer paths and asserts whether the AEM repository browser is still reachable.",
+  "validates": [
+    "CWE-200",
+    "CWE-489",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "aem_crx_de_lite",
+    "crxde lite",
+    "crx explorer",
+    "aem crx exposed",
+    "aem repository browser"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 7,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional CRXDE path (repeatable)"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_querybuilder_full_dump",
+  "version": "1.0",
+  "summary": "Re-runs the AEM querybuilder probe and asserts whether the JCR content tree is still anonymously enumerable via /bin/querybuilder.json.",
+  "validates": [
+    "CWE-200",
+    "CWE-285",
+    "CWE-668"
+  ],
+  "matches_titles": [
+    "aem_querybuilder_full_dump",
+    "aem querybuilder",
+    "aem content tree exposure",
+    "sling querybuilder exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 5,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

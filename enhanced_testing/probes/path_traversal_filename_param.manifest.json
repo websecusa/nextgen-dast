@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "path_traversal_filename_param",
+  "version": "1.0",
+  "summary": "Re-runs the path-traversal-via-query-parameter probe and asserts whether traversal payloads still return /etc/passwd-shape content.",
+  "validates": [
+    "CWE-22",
+    "CWE-23",
+    "CWE-35"
+  ],
+  "matches_titles": [
+    "path_traversal_filename_param",
+    "path traversal",
+    "directory traversal",
+    "lfi",
+    "local file inclusion",
+    "filename parameter traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 80,
+  "request_budget_max": 250,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional path|param (repeatable)"
+  }
+}

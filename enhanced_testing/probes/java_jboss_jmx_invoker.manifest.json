@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "java_jboss_jmx_invoker",
+  "version": "1.0",
+  "summary": "Re-fetches JBoss JMX / web-console / invoker paths and asserts whether the legacy management surface is still reachable.",
+  "validates": [
+    "CWE-489",
+    "CWE-502",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "java_jboss_jmx_invoker",
+    "jboss jmx console",
+    "jboss web console",
+    "jboss invoker",
+    "jmx console exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional JBoss path (repeatable)"
+  }
+}

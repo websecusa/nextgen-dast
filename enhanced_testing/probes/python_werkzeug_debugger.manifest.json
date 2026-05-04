@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "python_werkzeug_debugger",
+  "version": "1.0",
+  "summary": "Re-fetches Werkzeug debugger paths and asserts whether the interactive in-browser debugger is still reachable.",
+  "validates": [
+    "CWE-489",
+    "CWE-78",
+    "CWE-94"
+  ],
+  "matches_titles": [
+    "python_werkzeug_debugger",
+    "werkzeug debugger",
+    "flask debug mode",
+    "flask debugger exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 5,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional debugger path (repeatable)"
+  }
+}

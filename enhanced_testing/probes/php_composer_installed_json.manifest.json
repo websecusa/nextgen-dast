@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "php_composer_installed_json",
+  "version": "1.0",
+  "summary": "Re-fetches Composer dependency-manifest paths and asserts whether the structural Composer signature is still returned.",
+  "validates": [
+    "CWE-200",
+    "CWE-540",
+    "CWE-1059"
+  ],
+  "matches_titles": [
+    "php_composer_installed_json",
+    "composer installed.json",
+    "composer manifest exposed",
+    "vendor folder exposed",
+    "composer.lock exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}
