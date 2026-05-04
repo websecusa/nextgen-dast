@@ -22,7 +22,7 @@
      counter (not the docker tag); bump it when style.css meaningfully
      changes. Has no effect on the served file -- StaticFiles ignores
      the query string. #}
-  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260502f">
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260504a">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -92,16 +92,24 @@
 
 <div class="app">
   <aside class="sidebar">
-    {# Sidebar logo. The dedicated web logo (web_header_logo_filename) wins
-       when set; we fall back to the legacy PDF header logo so a single
-       uploaded image still works for users who haven't migrated. #}
+    {# Sidebar logo. We pick a logo slot per the viewer's theme:
+       dark theme -> web_header_dark (falling back to web_header),
+       light theme -> web_header (falling back to web_header_dark).
+       That way an admin who only uploaded one logo still sees it
+       in both themes; an admin who uploaded both gets the correct
+       variant for the active theme. The resolution happens server-
+       side in ctx() (see branding.resolve_web_header_logo_kind);
+       the template just needs the resolved kind name. We still
+       fall back to the legacy PDF `header` logo when no web logo
+       is configured at all, so an upgrade from a single-logo
+       deployment doesn't suddenly show no logo. #}
     <a href="{{ base }}/" class="brand">
       {# Inline style on the <img> so a wide / tall uploaded logo cannot
          overflow the sidebar even if the external stylesheet is blocked
          or stale. The stylesheet rule (style.css :: aside.sidebar .brand img)
          still wins when it loads — these inline values are a hard floor. #}
-      {% if brand and brand.web_header_logo_filename %}
-        <img src="{{ base }}/branding/logo/web_header" alt="" width="22" height="22"
+      {% if web_logo_kind %}
+        <img src="{{ base }}/branding/logo/{{ web_logo_kind }}" alt="" width="22" height="22"
              style="max-height:56px; max-width:100%; width:auto; height:auto;
                     object-fit:contain; flex-shrink:0; display:block">
       {% elif brand and brand.header_logo_filename %}

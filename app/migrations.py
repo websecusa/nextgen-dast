@@ -546,6 +546,13 @@ MIGRATIONS: list = [
     # backfill-status migration uses.
     ("2026_05_03_refresh_fidelity_prompt_for_role_scope",
      lambda: __import__("__main__")),
+    # 2026-05-04: add the dark-mode web logo column. Existing 2.1.1
+    # databases shipped with only `web_header_logo_filename` (which
+    # is now the LIGHT-mode logo); operators uploading a dark-mode
+    # variant need the new column to land before the upload form
+    # POSTs to it. Idempotent ALTER TABLE -- safe to re-run.
+    ("2026_05_04_add_web_header_logo_dark_filename",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -633,6 +640,34 @@ def m_2026_05_03_backfill_status_from_validation_status() -> str:
     return f"back-filled {len(rows)} half-flipped FP row(s) to status='false_positive'"
 
 
+def m_2026_05_04_add_web_header_logo_dark_filename() -> str:
+    """Add `web_header_logo_dark_filename` to the `branding` table on
+    existing 2.1.1 deployments.
+
+    The column was added to schema.sql in the same release that ships
+    this migration, so a fresh install never runs the ALTER. On an
+    upgrade the migration adds the column iff it's not already there.
+    Idempotent: information_schema is consulted first so a re-run on
+    an already-migrated DB is a no-op.
+
+    The migration is bookkeeping only -- once the column exists,
+    branding.save_logo() / .delete_logo() handle the new
+    'web_header_dark' kind without further code changes."""
+    row = db.query_one(
+        "SELECT 1 AS exists_ FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() "
+        "  AND table_name = 'branding' "
+        "  AND column_name = 'web_header_logo_dark_filename'")
+    if row and row.get("exists_"):
+        return "branding.web_header_logo_dark_filename already present"
+    db.execute(
+        "ALTER TABLE branding "
+        "ADD COLUMN web_header_logo_dark_filename VARCHAR(255) "
+        "AFTER web_header_logo_filename")
+    return ("added branding.web_header_logo_dark_filename "
+            "(dark-mode web logo)")
+
+
 # Re-bind the placeholders in MIGRATIONS now that the functions exist.
 # The registration list is built at import time so we patch it here
 # rather than re-ordering the file (the dedup migrations need their
@@ -642,6 +677,8 @@ _LATE_BIND = {
         m_2026_05_03_backfill_status_from_validation_status,
     "2026_05_03_refresh_fidelity_prompt_for_role_scope":
         m_2026_05_03_refresh_fidelity_prompt_for_role_scope,
+    "2026_05_04_add_web_header_logo_dark_filename":
+        m_2026_05_04_add_web_header_logo_dark_filename,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:

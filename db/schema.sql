@@ -60,7 +60,12 @@ CREATE TABLE IF NOT EXISTS branding (
   web_sev_medium VARCHAR(16),
   web_sev_low VARCHAR(16),
   web_sev_info VARCHAR(16),
+  -- Web logos. Two slots so an admin can upload a logo tuned for the
+  -- dark sidebar and another tuned for the light one; base.html picks
+  -- the right file based on the viewer's theme. On a single-logo
+  -- deployment whichever slot is set wins for both themes.
   web_header_logo_filename VARCHAR(255),
+  web_header_logo_dark_filename VARCHAR(255),
   -- PDF report branding overrides.
   pdf_font_family VARCHAR(255),
   pdf_sev_critical VARCHAR(16),
@@ -701,6 +706,7 @@ ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_sev_medium VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_sev_low VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_sev_info VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_header_logo_filename VARCHAR(255);
+ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_header_logo_dark_filename VARCHAR(255);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_font_family VARCHAR(255);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_sev_critical VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_sev_high VARCHAR(16);

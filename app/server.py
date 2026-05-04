@@ -905,12 +905,24 @@ def ctx(request: Request, **extra) -> dict:
             brand, web_theme = {}, branding_mod.DARK_DEFAULTS
     except Exception:
         brand, web_theme = {}, branding_mod.DARK_DEFAULTS
+    user_theme = _resolve_user_theme(user)
+    # Resolve which web-logo slot to render given the viewer's theme,
+    # so base.html doesn't have to re-implement the fallback rule.
+    # Returns "web_header" / "web_header_dark" / None.
+    try:
+        web_logo_kind = branding_mod.resolve_web_header_logo_kind(user_theme)
+    except Exception:
+        web_logo_kind = None
     return {
         "request": request,
         "base": ROOT_PATH,
         "state": state,
         "proxy_running": proxy_pid() is not None,
         "user": user,
+        # Resolved web-logo slot for this request's theme. None means
+        # no web logo is uploaded; templates fall back to the legacy
+        # PDF header logo or the company-name text.
+        "web_logo_kind": web_logo_kind,
         # is_admin is the coarse "can mutate" gate consulted by every
         # admin-only screen. Both 'admin' and the new 'superadmin' tier
         # pass this check — superadmin is a strict superset of admin.
@@ -933,7 +945,7 @@ def ctx(request: Request, **extra) -> dict:
         # immediately without a session re-issue. Falls back to 'dark'
         # for unauthenticated visitors and any DB read error so the
         # login page never flashes a theme variant.
-        "user_theme": _resolve_user_theme(user),
+        "user_theme": user_theme,
         **extra,
     }
 
@@ -6822,7 +6834,7 @@ def _branding_section_for(kind: str) -> str:
     and delete redirects land back on the page the user was actually
     looking at (web vs PDF) — landing on the branding index makes the new
     logo appear absent because the index doesn't render the logo at all."""
-    if kind == "web_header":
+    if kind in ("web_header", "web_header_dark"):
         return "/admin/branding/web"
     # pdf_header, pdf_footer and the legacy header/footer aliases all live
     # on the PDF page.
