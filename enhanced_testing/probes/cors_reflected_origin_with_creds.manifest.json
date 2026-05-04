@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "cors_reflected_origin_with_creds",
+  "version": "1.0",
+  "summary": "Re-runs the reflected-origin CORS probe and asserts whether the server still echoes the request Origin into Access-Control-Allow-Origin alongside Allow-Credentials: true.",
+  "validates": [
+    "CWE-942",
+    "CWE-346",
+    "CWE-693"
+  ],
+  "matches_titles": [
+    "cors_reflected_origin_with_creds",
+    "reflected origin cors",
+    "cors origin reflection",
+    "cors any origin with credentials"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 9,
+  "request_budget_max": 18,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional path to probe (repeatable)"
+  }
+}

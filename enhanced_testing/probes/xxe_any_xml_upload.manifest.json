@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "xxe_any_xml_upload",
+  "version": "1.0",
+  "summary": "Re-runs the XXE probe across XML-accepting upload / parse endpoints and asserts whether an external-entity payload still retrieves a host file.",
+  "validates": [
+    "CWE-611",
+    "CWE-776",
+    "CWE-827"
+  ],
+  "matches_titles": [
+    "xxe_any_xml_upload",
+    "xml external entity",
+    "xxe",
+    "external entity injection",
+    "xxe file upload"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 24,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--endpoint": "Additional upload / parse endpoint (repeatable)"
+  }
+}

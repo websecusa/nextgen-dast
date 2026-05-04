@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "http_trace_method_enabled",
+  "version": "1.0",
+  "summary": "Re-runs the TRACE probe and asserts whether the marker request header is still echoed in the response body.",
+  "validates": [
+    "CWE-693",
+    "CWE-16"
+  ],
+  "matches_titles": [
+    "http_trace_method_enabled",
+    "trace method enabled",
+    "http trace allowed",
+    "xst",
+    "cross-site tracing"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

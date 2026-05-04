@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "angular_dev_mode_in_prod",
+  "version": "1.0",
+  "summary": "Re-fetches the JS bundles and asserts whether Angular dev-mode markers (ngDevMode, unminified framework source, dev-only strings) are still present.",
+  "validates": [
+    "CWE-489",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "angular_dev_mode_in_prod",
+    "angular dev mode",
+    "angular development mode",
+    "ngdevmode"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 10,
+  "request_budget_max": 18,
+  "args": {
+    "--url": "Site origin to probe",
+    "--bundle": "Additional JS bundle URL/path (repeatable)"
+  }
+}

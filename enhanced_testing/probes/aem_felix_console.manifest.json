@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_felix_console",
+  "version": "1.0",
+  "summary": "Re-fetches Apache Felix console paths and asserts whether the OSGi runtime-management UI is still reachable on the public origin.",
+  "validates": [
+    "CWE-489",
+    "CWE-285",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "aem_felix_console",
+    "felix console",
+    "apache felix web console",
+    "osgi console exposed",
+    "aem system console"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 7,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional Felix-console path (repeatable)"
+  }
+}

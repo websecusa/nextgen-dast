@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_admin_login_at_common_paths",
+  "version": "1.0",
+  "summary": "Re-runs the admin-login-on-public-path probe and asserts whether a login form is still reachable at any well-known admin path.",
+  "validates": [
+    "CWE-1059",
+    "CWE-200",
+    "CWE-693"
+  ],
+  "matches_titles": [
+    "info_admin_login_at_common_paths",
+    "admin login exposed",
+    "management interface exposed",
+    "admin panel public"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 22,
+  "request_budget_max": 35,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional admin path (repeatable)"
+  }
+}

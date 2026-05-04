@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "iis_webdav_methods_enabled",
+  "version": "1.0",
+  "summary": "Re-runs the WebDAV detection probe (OPTIONS + PROPFIND) and asserts whether WebDAV methods are still reachable on the public origin.",
+  "validates": [
+    "CWE-552",
+    "CWE-285",
+    "CWE-749"
+  ],
+  "matches_titles": [
+    "iis_webdav_methods_enabled",
+    "webdav enabled",
+    "webdav exposed",
+    "propfind allowed",
+    "dav methods enabled"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Site origin to probe"
+  }
+}

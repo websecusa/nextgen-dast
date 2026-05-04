@@ -1,0 +1,32 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "ssrf_url_field_persisted",
+  "version": "1.0",
+  "summary": "Re-runs the URL-field SSRF probe and asserts whether a marker URL still round-trips through the application's profile / settings store.",
+  "validates": [
+    "CWE-918",
+    "CWE-441",
+    "CWE-601"
+  ],
+  "matches_titles": [
+    "ssrf_url_field_persisted",
+    "server-side request forgery",
+    "ssrf url field",
+    "ssrf profile image url",
+    "url field stored",
+    "ssrf"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 30,
+  "request_budget_max": 80,
+  "args": {
+    "--url": "Site origin to probe",
+    "--field": "Additional URL-shaped field name to try (repeatable)"
+  }
+}

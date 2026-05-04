@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "java_jenkins_script_console",
+  "version": "1.0",
+  "summary": "Re-fetches Jenkins script-console paths and asserts whether the Groovy console is still reachable on the public origin.",
+  "validates": [
+    "CWE-489",
+    "CWE-78",
+    "CWE-94"
+  ],
+  "matches_titles": [
+    "java_jenkins_script_console",
+    "jenkins script console",
+    "jenkins groovy console",
+    "exposed jenkins"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional script-console path (repeatable)"
+  }
+}

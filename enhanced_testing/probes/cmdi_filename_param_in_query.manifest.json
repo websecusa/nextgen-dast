@@ -1,0 +1,30 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "cmdi_filename_param_in_query",
+  "version": "1.0",
+  "summary": "Re-runs the command-injection-via-query-parameter probe and asserts whether shell-metachar payloads still produce /etc/hostname-shape output.",
+  "validates": [
+    "CWE-78",
+    "CWE-77",
+    "CWE-88"
+  ],
+  "matches_titles": [
+    "cmdi_filename_param_in_query",
+    "command injection",
+    "os command injection",
+    "shell injection",
+    "command injection query parameter"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 60,
+  "request_budget_max": 200,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional path|param (e.g. '/cgi/run|cmd'); repeatable"
+  }
+}

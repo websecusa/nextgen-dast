@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_sling_dotjson_selectors",
+  "version": "1.0",
+  "summary": "Re-fetches Sling default selectors (.json / .tidy.json / .infinity.json) and asserts whether JCR content is still anonymously exposed.",
+  "validates": [
+    "CWE-200",
+    "CWE-285",
+    "CWE-668"
+  ],
+  "matches_titles": [
+    "aem_sling_dotjson_selectors",
+    "sling default selectors",
+    "aem json selector exposed",
+    "aem infinity.json exposed",
+    "aem tidy.json"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 18,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional selector path (repeatable)"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "php_wp_user_enumeration",
+  "version": "1.0",
+  "summary": "Re-runs the WordPress user-enumeration probe (?author=N redirect + /wp-json/wp/v2/users) and asserts whether anonymous callers can still enumerate usernames.",
+  "validates": [
+    "CWE-200",
+    "CWE-203",
+    "CWE-204"
+  ],
+  "matches_titles": [
+    "php_wp_user_enumeration",
+    "wordpress user enumeration",
+    "wp user enumeration",
+    "wp-json users",
+    "wordpress author enumeration"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 8,
+  "request_budget_max": 14,
+  "args": {
+    "--url": "Site origin to probe",
+    "--max-author": "Highest author id to probe (default 5)"
+  }
+}

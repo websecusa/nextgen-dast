@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "php_phpinfo_exposed",
+  "version": "1.0",
+  "summary": "Re-fetches the phpinfo() candidate paths and asserts whether the phpinfo signature still appears in the response body.",
+  "validates": [
+    "CWE-200",
+    "CWE-540",
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "php_phpinfo_exposed",
+    "phpinfo exposed",
+    "php info disclosure",
+    "phpinfo.php"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 9,
+  "request_budget_max": 18,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional phpinfo path (repeatable)"
+  }
+}

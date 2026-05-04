@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "ssti_any_template_engine",
+  "version": "1.0",
+  "summary": "Re-runs the SSTI probe with per-engine interpolation markers and asserts whether the arithmetic result `1337` still appears in any rendered response.",
+  "validates": [
+    "CWE-94",
+    "CWE-1336",
+    "CWE-95"
+  ],
+  "matches_titles": [
+    "ssti_any_template_engine",
+    "server-side template injection",
+    "ssti",
+    "template injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 60,
+  "request_budget_max": 200,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional 'path|METHOD|field' (repeatable)"
+  }
+}

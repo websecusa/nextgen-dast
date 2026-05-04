@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "http_dangerous_methods_allowed",
+  "version": "1.0",
+  "summary": "Re-runs the OPTIONS probe across read-only paths and asserts whether the Allow / Public headers still advertise PUT / DELETE / PATCH / PROPFIND / MKCOL / MOVE / COPY.",
+  "validates": [
+    "CWE-693",
+    "CWE-749",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "http_dangerous_methods_allowed",
+    "dangerous methods allowed",
+    "options dangerous methods",
+    "put method allowed",
+    "delete method allowed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 9,
+  "request_budget_max": 14,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional read-only path (repeatable)"
+  }
+}
