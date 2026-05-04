@@ -294,16 +294,35 @@ def verdict_to_status(verdict: dict) -> str:
     froze the finding out of subsequent bulk passes. Soft refusals
     are now `inconclusive`; only hard crashes are `errored`.
 
-    The 0.8 confidence threshold on `validated=False` is what
-    separates a confident "this isn't real" (false_positive) from
-    a tentative one (inconclusive)."""
+    Confidence thresholds (Round-9 fidelity hardening):
+      - `validated=True`  : require confidence >= 0.7. Below the
+        floor, a True verdict is too weak to stamp a green
+        'validated' badge on the finding -- fall through to
+        'inconclusive' so the analyst (or a tighter probe) can
+        decide. Without this floor, a probe that returned
+        `validated=True, confidence=0.2` silently validated the
+        finding -- the reason a 0.2-confidence finding was visible
+        in the UI before this fix landed.
+      - `validated=False` : require confidence >= 0.8 to bucket as
+        false_positive. Below the floor, treat as inconclusive
+        (the probe ran but couldn't refute decisively).
+    The two thresholds intentionally differ -- a confident refutation
+    is harder evidentially than a confident confirmation, since the
+    probe has to prove the absence of every plausible exploit shape;
+    asymmetric thresholds reflect that reality."""
     if verdict.get("error"):
         return "errored"
     if not verdict.get("ok", True):
         return "inconclusive"
     v = verdict.get("validated")
     if v is True:
-        return "validated"
+        # Floor on the True branch: a probe that returned True with
+        # confidence < 0.7 is too tentative to validate the finding.
+        # Treat as inconclusive so the analyst sees the soft verdict
+        # rather than a green badge it didn't earn.
+        if (verdict.get("confidence") or 0) >= 0.7:
+            return "validated"
+        return "inconclusive"
     if v is False:
         if (verdict.get("confidence") or 0) >= 0.8:
             return "false_positive"

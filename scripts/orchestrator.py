@@ -525,6 +525,14 @@ _PROBES_NEEDING_POST = {
     "config_session_cookie_flags":       "POST trigger login + inspect Set-Cookie",
     "auth_password_change_no_current":   "GET/POST change-password without current (gated)",
     "info_graphql_endpoint":             "POST introspection query to /graphql",
+    # ----- Round-9 batch (drive-by + cache + new auth) ----------------
+    "info_excessive_data_users_password": "register/login then GET /api/Users to look for hash field",
+    "info_excessive_data_cards":          "register/login then GET /api/Cards to look for full PAN",
+    "info_graphql_introspection_schema":  "POST __schema introspection query",
+    "auth_host_header_password_reset":    "register throwaway then POST reset with marker Host header",
+    "authz_pii_idor_user_enum":           "register/login then walk /api/Users/<id> for foreign PII",
+    "config_cache_deception_path_extension": "register/login then GET /<base> + /<base>.css to compare",
+    "auth_session_fixation_no_rotation":  "register/login with seeded session cookie to test rotation",
 }
 
 

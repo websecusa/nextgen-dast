@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_csp_missing_or_unsafe",
+  "version": "1.0",
+  "summary": "Re-fetches the page and asserts whether Content-Security-Policy is now present and its script-src locks out inline / eval'd scripts.",
+  "validates": [
+    "CWE-693",
+    "CWE-1021",
+    "CWE-79"
+  ],
+  "matches_titles": [
+    "config_csp_missing_or_unsafe",
+    "csp missing",
+    "content-security-policy missing",
+    "weak content security policy",
+    "unsafe-inline csp"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei",
+    "nikto",
+    "wapiti"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 5,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional path to probe (repeatable)"
+  }
+}

@@ -200,6 +200,98 @@ themselves grant access but lower the cost of every other attack.
 
 ---
 
+## Backlog — Round 9 (drive-by + cache + new auth)
+
+See `action_plan_enhanced_testing.md` for the full spec and step
+ordering. Each entry below names the probe filename and the
+detection signal that justifies a high-fidelity verdict.
+
+### Critical / High — direct compromise
+
+- [x] **info_excessive_data_users_password** →
+  `probes/info_excessive_data_users_password.py` —
+  `GET /api/Users` returns a `password` field whose value matches a
+  bcrypt / argon2 / scrypt / hex-hash regex.
+- [x] **info_excessive_data_cards** →
+  `probes/info_excessive_data_cards.py` —
+  `/api/Cards` returns a Luhn-valid 13-19 digit PAN.
+- [x] **info_graphql_introspection_schema** →
+  `probes/info_graphql_introspection_schema.py` —
+  POST `{__schema{types{name}}}` returns >= 5 named types.
+- [x] **api_pagination_unbounded** →
+  `probes/api_pagination_unbounded.py` —
+  `?limit=10000` returns >= 1000 rows AND >> the row count for
+  `?limit=10`.
+- [x] **auth_host_header_password_reset** →
+  `probes/auth_host_header_password_reset.py` —
+  Reset-request response body echoes a marker `Host:` value
+  verbatim into a generated reset URL.
+- [x] **xss_reflected_search_query** →
+  `probes/xss_reflected_search_query.py` —
+  GET `?q=<dast-marker-XXXX>` returns the marker un-HTML-encoded.
+- [x] **path_traversal_static_serve** →
+  `probes/path_traversal_static_serve.py` —
+  Encoded traversal at common static endpoints returns
+  `root:x:0:0:` body.
+- [x] **authz_pii_idor_user_enum** →
+  `probes/authz_pii_idor_user_enum.py` —
+  As a normal user, `/api/Users/<n>` for foreign n returns PII
+  fields (email + phone/dob/address/securityAnswer/role).
+- [x] **authz_api_legacy_v1_auth_bypass** →
+  `probes/authz_api_legacy_v1_auth_bypass.py` —
+  Anonymous `/api/v2/<route>` returns 401/403 AND `/api/v1/<route>`
+  returns 200 with body.
+
+### Cache / network / framing — drive-by compromise
+
+- [x] **config_cache_deception_path_extension** →
+  `probes/config_cache_deception_path_extension.py` —
+  `/profile.css` returns the same authenticated body as `/profile`
+  AND carries cacheable response headers.
+- [x] **config_cache_poison_xforwarded_host** →
+  `probes/config_cache_poison_xforwarded_host.py` —
+  `X-Forwarded-Host: <marker>` reflected into the response body
+  AND the response is cacheable.
+- [x] **config_clickjacking_frame_ancestors** →
+  `probes/config_clickjacking_frame_ancestors.py` —
+  Sensitive page lacks both `X-Frame-Options: DENY|SAMEORIGIN`
+  and a CSP `frame-ancestors` directive.
+- [x] **config_csp_missing_or_unsafe** →
+  `probes/config_csp_missing_or_unsafe.py` —
+  No CSP, OR `script-src` includes `'unsafe-inline'`/`'unsafe-eval'`
+  with no nonce/hash source.
+- [x] **config_websocket_origin_validation** →
+  `probes/config_websocket_origin_validation.py` —
+  WS upgrade with `Origin: http://attacker.example` returns 101
+  with a valid `Sec-WebSocket-Accept`.
+
+### Information disclosure
+
+- [x] **info_backup_files_root** →
+  `probes/info_backup_files_root.py` —
+  Per-file signature match on `.env` / `.git/config` / `dump.sql`
+  / `id_rsa` etc. (anchor-pattern, not just 200).
+- [x] **info_diagnostic_endpoints_exposed** →
+  `probes/info_diagnostic_endpoints_exposed.py` —
+  `trace.axd` / `elmah.axd` / `actuator/env` / `server-status`
+  return a content-specific signature.
+- [x] **path_traversal_nginx_alias_off_by_slash** →
+  `probes/path_traversal_nginx_alias_off_by_slash.py` —
+  `/static../app.py` returns parent-dir content via off-by-slash
+  alias misconfiguration.
+- [x] **config_basic_auth_over_http** →
+  `probes/config_basic_auth_over_http.py` —
+  Plaintext `http://` URL returns `WWW-Authenticate: Basic`.
+- [x] **config_xcontent_type_options_missing** →
+  `probes/config_xcontent_type_options_missing.py` —
+  HTML/SVG/JS-ish response without `X-Content-Type-Options:
+  nosniff` on user-content paths.
+- [x] **auth_session_fixation_no_rotation** →
+  `probes/auth_session_fixation_no_rotation.py` —
+  Session-cookie value byte-identical pre- and post-login.
+
+---
+
 ## Implementation order (historical)
 
 The roadmap was shipped over the following batches:
@@ -224,6 +316,24 @@ The roadmap was shipped over the following batches:
 
 5. **Rounds 5-8:** auth/session, injection long tail, modern-web
    specifics, and medium-severity posture findings.
+
+6. **Round 9 (drive-by + cache + new auth — 20 probes):**
+   info_excessive_data_users_password, info_excessive_data_cards,
+   info_graphql_introspection_schema, api_pagination_unbounded,
+   auth_host_header_password_reset, xss_reflected_search_query,
+   path_traversal_static_serve, authz_pii_idor_user_enum,
+   authz_api_legacy_v1_auth_bypass,
+   config_cache_deception_path_extension,
+   config_cache_poison_xforwarded_host,
+   config_clickjacking_frame_ancestors, config_csp_missing_or_unsafe,
+   config_websocket_origin_validation, info_backup_files_root,
+   info_diagnostic_endpoints_exposed,
+   path_traversal_nginx_alias_off_by_slash,
+   config_basic_auth_over_http,
+   config_xcontent_type_options_missing,
+   auth_session_fixation_no_rotation. Paired with a one-time
+   verdict_to_status floor (confidence >= 0.7 to validate) so a
+   future low-confidence True can't silently stamp a green badge.
 
 All roadmap items are now shipped. Each new probe lands in `probes/`
 with a manifest, a row in `tests/test_round3_probes.py`, and an entry

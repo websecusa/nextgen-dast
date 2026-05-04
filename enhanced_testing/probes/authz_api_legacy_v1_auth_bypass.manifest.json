@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_api_legacy_v1_auth_bypass",
+  "version": "1.0",
+  "summary": "Re-runs the v1-vs-v2 differential probe and asserts whether the legacy v1 endpoint still answers anonymously while v2 requires auth.",
+  "validates": [
+    "CWE-285",
+    "CWE-1059",
+    "CWE-1188"
+  ],
+  "matches_titles": [
+    "authz_api_legacy_v1_auth_bypass",
+    "legacy api v1 auth bypass",
+    "improper assets management",
+    "deprecated api version",
+    "v1 auth bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--resource": "Additional resource name to probe (repeatable)"
+  }
+}

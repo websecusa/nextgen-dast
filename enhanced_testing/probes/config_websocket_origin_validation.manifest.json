@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_websocket_origin_validation",
+  "version": "1.0",
+  "summary": "Re-runs the WebSocket-upgrade probe with a foreign Origin and asserts whether the handshake still completes (cross-site WebSocket hijacking).",
+  "validates": [
+    "CWE-346",
+    "CWE-1385",
+    "CWE-942"
+  ],
+  "matches_titles": [
+    "config_websocket_origin_validation",
+    "websocket origin",
+    "cross-site websocket hijacking",
+    "ws origin missing",
+    "websocket origin validation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 5,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Site origin to probe",
+    "--ws-path": "Additional WebSocket path (repeatable)"
+  }
+}

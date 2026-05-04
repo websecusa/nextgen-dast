@@ -1,0 +1,29 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_cache_deception_path_extension",
+  "version": "1.0",
+  "summary": "Re-runs the cache-deception probe and asserts whether sensitive routes still return the same body under a cacheable file-extension suffix.",
+  "validates": [
+    "CWE-525",
+    "CWE-200",
+    "CWE-444"
+  ],
+  "matches_titles": [
+    "config_cache_deception_path_extension",
+    "cache deception",
+    "web cache deception",
+    "extension confusion cache",
+    "cdn cache poisoning extension"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 16,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional sensitive base path (e.g. '/portfolio'); repeatable"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_clickjacking_frame_ancestors",
+  "version": "1.0",
+  "summary": "Re-fetches sensitive pages and asserts whether at least one anti-iframe header (X-Frame-Options or CSP frame-ancestors) is now present.",
+  "validates": [
+    "CWE-1021",
+    "CWE-693"
+  ],
+  "matches_titles": [
+    "config_clickjacking_frame_ancestors",
+    "clickjacking",
+    "missing x-frame-options",
+    "missing frame-ancestors",
+    "iframe protection missing"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nuclei",
+    "nikto",
+    "wapiti"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 6,
+  "request_budget_max": 14,
+  "args": {
+    "--url": "Site origin to probe",
+    "--path": "Additional sensitive path (repeatable)"
+  }
+}

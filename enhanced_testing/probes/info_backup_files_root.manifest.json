@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_backup_files_root",
+  "version": "1.0",
+  "summary": "Re-fetches the catalogue of backup / config / source-control files at the web root and asserts whether any still match the per-file signature.",
+  "validates": [
+    "CWE-538",
+    "CWE-200",
+    "CWE-540"
+  ],
+  "matches_titles": [
+    "info_backup_files_root",
+    "backup files exposed",
+    "backup file disclosure",
+    "exposed dotfile",
+    "dotenv exposed",
+    "git folder exposed"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "nikto",
+    "nuclei"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 24,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Site origin to probe",
+    "--max-paths": "Cap on number of paths tested (default 24)"
+  }
+}

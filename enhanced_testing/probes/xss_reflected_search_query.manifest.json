@@ -1,0 +1,31 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "xss_reflected_search_query",
+  "version": "1.0",
+  "summary": "Re-runs the reflected-XSS check against search / filter query parameters and asserts whether the marker still appears un-HTML-encoded in the response body.",
+  "validates": [
+    "CWE-79",
+    "CWE-80",
+    "CWE-116"
+  ],
+  "matches_titles": [
+    "xss_reflected_search_query",
+    "reflected xss search",
+    "reflected xss query parameter",
+    "search query xss",
+    "reflected cross-site scripting"
+  ],
+  "matches_tools": [
+    "enhanced_testing",
+    "wapiti",
+    "dalfox",
+    "nikto"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 4,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Site origin to probe",
+    "--target": "Additional path|param to test (e.g. '/feed|q'); repeatable"
+  }
+}

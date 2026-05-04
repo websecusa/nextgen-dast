@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_basic_auth_over_http",
+  "version": "1.0",
+  "summary": "Re-probes the catalogue of admin / management paths on the http:// scheme and asserts whether any still issue a `WWW-Authenticate: Basic` challenge.",
+  "validates": [
+    "CWE-319",
+    "CWE-523",
+    "CWE-311"
+  ],
+  "matches_titles": [
+    "config_basic_auth_over_http",
+    "basic auth over http",
+    "basic authentication plaintext",
+    "basic auth plain http",
+    "credentials over http"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "request_budget_typical": 12,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Site origin to probe (must be http:// for the probe to apply)",
+    "--path": "Additional path to probe (repeatable)"
+  }
+}
