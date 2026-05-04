@@ -87,6 +87,18 @@
 <section class="card">
   <h2>Theme</h2>
   <form method="post" action="{{ base }}/admin/branding/web">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Default theme
+      <select name="default_theme">
+        <option value="dark"  {% if default_theme == 'dark'  %}selected{% endif %}>Dark — used for login and as the fallback for new accounts</option>
+        <option value="light" {% if default_theme == 'light' %}selected{% endif %}>Light — used for login and as the fallback for new accounts</option>
+      </select>
+    </label>
+    <p class="muted small" style="margin-top:-.4em">Sets the pre-login
+      look and the starting choice for users who have not personalised
+      their theme. Each user can still override their own preference
+      from the Theme page in the sidebar.</p>
+
     <label>Mode
       <select name="web_mode" id="web_mode">
         <option value="dark" {% if web.mode == 'dark' %}selected{% endif %}>Dark (default — uses built-in palette, ignores custom colors)</option>

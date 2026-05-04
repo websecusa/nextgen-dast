@@ -26,8 +26,8 @@ selection is saved server-side and follows you across browsers.</p>
              {% if current_theme == 'dark' %}checked{% endif %}>
       <span class="theme-swatch theme-swatch-dark" aria-hidden="true"></span>
       <span class="theme-meta">
-        <strong>Dark</strong>
-        <span class="muted small">Default. High-contrast palette tuned
+        <strong>Dark{% if default_theme == 'dark' %} <span class="muted small">(site default)</span>{% endif %}</strong>
+        <span class="muted small">High-contrast palette tuned
           for long inspection sessions; matches the brand colors used
           on the cover page of generated reports.</span>
       </span>
@@ -38,7 +38,7 @@ selection is saved server-side and follows you across browsers.</p>
              {% if current_theme == 'light' %}checked{% endif %}>
       <span class="theme-swatch theme-swatch-light" aria-hidden="true"></span>
       <span class="theme-meta">
-        <strong>Light</strong>
+        <strong>Light{% if default_theme == 'light' %} <span class="muted small">(site default)</span>{% endif %}</strong>
         <span class="muted small">Lower-contrast neutral palette for
           well-lit environments and screen-shared review sessions.</span>
       </span>
