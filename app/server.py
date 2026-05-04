@@ -8492,11 +8492,24 @@ def finding_reopen(fid: int):
 @app.get("/branding/logo/{kind}")
 def branding_logo_serve(kind: str):
     """Public — needed so the login page and the report can show the logo
-    without an active session."""
+    without an active session.
+
+    Cache-Control: no-cache forces the browser to revalidate via the
+    existing ETag on every request. Logo URLs are slot-stable (the path
+    doesn't change when an admin re-uploads), so without this header
+    browsers heuristically cached the old image and a fresh upload
+    appeared to "do nothing" until the user manually hard-refreshed.
+    `no-cache` (validate, don't refetch unconditionally) keeps the
+    bandwidth cost minimal — the second request is a 304 once the etag
+    matches — while guaranteeing a re-upload is visible immediately."""
     p = branding_mod.get_logo_path(kind)
     if not p:
         raise HTTPException(404)
-    return FileResponse(str(p), media_type=branding_mod.get_content_type(p.name))
+    return FileResponse(
+        str(p),
+        media_type=branding_mod.get_content_type(p.name),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/health")
