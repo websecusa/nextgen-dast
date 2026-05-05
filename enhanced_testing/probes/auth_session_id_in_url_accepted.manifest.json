@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_session_id_in_url_accepted",
+  "version": "1.0",
+  "summary": "Detects servers that accept a session id supplied via URL query string (URL rewriting / trans-sid).",
+  "validates": [
+    "CWE-384"
+  ],
+  "matches_titles": [
+    "auth_session_id_in_url_accepted",
+    "session fixation",
+    "url rewriting session",
+    "trans-sid"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "eli_spring_ognl_canary",
+  "version": "1.0",
+  "summary": "Detects Spring EL / OGNL expression-language injection via safe arithmetic canaries (`${T(Math).max(7,7)}` and `%{7*7}`).",
+  "validates": [
+    "CWE-917"
+  ],
+  "matches_titles": [
+    "eli_spring_ognl_canary",
+    "expression language injection",
+    "spring el",
+    "ognl"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--target": "Additional path to probe (repeatable)",
+    "--param": "Query parameter name to carry the canary (default: q)"
+  }
+}

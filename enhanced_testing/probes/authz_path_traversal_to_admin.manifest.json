@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_path_traversal_to_admin",
+  "version": "1.0",
+  "summary": "Detects path-traversal that escapes a routing prefix to reach admin-only handlers.",
+  "validates": [
+    "CWE-22",
+    "CWE-285"
+  ],
+  "matches_titles": [
+    "authz_path_traversal_to_admin",
+    "path traversal authz",
+    "admin path bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--admin-path": "Additional admin path to try as the traversal target (repeatable)",
+    "--prefix-path": "Additional outer prefix path (repeatable)"
+  }
+}

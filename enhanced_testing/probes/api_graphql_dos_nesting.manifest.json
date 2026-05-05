@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_graphql_dos_nesting",
+  "version": "1.0",
+  "summary": "Detects absence of GraphQL depth-limit middleware by submitting a depth-6 introspection query and verifying full execution.",
+  "validates": [
+    "CWE-770",
+    "CWE-674"
+  ],
+  "matches_titles": [
+    "api_graphql_dos_nesting",
+    "graphql depth limit",
+    "graphql dos"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional GraphQL endpoint to probe (repeatable)"
+  }
+}

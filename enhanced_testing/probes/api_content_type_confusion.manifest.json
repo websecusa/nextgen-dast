@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_content_type_confusion",
+  "version": "1.0",
+  "summary": "Detects content-type-confusion mass-assignment — privileged fields stripped from JSON are accepted via XML or form-urlencoded body.",
+  "validates": [
+    "CWE-1287",
+    "CWE-269"
+  ],
+  "matches_titles": [
+    "api_content_type_confusion",
+    "content type confusion",
+    "json xml mass assignment"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--update-path": "Additional 'path|METHOD' to test (repeatable)"
+  }
+}

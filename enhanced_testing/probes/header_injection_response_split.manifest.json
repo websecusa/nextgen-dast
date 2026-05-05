@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "header_injection_response_split",
+  "version": "1.0",
+  "summary": "Detects HTTP response-header injection by injecting a uniquely-named canary header via CRLF in a reflected URL parameter.",
+  "validates": [
+    "CWE-113",
+    "CWE-93"
+  ],
+  "matches_titles": [
+    "header_injection_response_split",
+    "crlf injection",
+    "response splitting"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 6,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--target": "Additional 'path|param' to test (repeatable)"
+  }
+}

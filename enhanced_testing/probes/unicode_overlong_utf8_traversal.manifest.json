@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "unicode_overlong_utf8_traversal",
+  "version": "1.0",
+  "summary": "Detects path traversal that bypasses ASCII-only `..` filters via overlong-UTF-8 and Unicode encoding variants of the path separator.",
+  "validates": [
+    "CWE-176"
+  ],
+  "matches_titles": [
+    "unicode_overlong_utf8_traversal",
+    "overlong utf-8 traversal",
+    "unicode path traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--target": "Additional 'path|param' to test (repeatable)"
+  }
+}

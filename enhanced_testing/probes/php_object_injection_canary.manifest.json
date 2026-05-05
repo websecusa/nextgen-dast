@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "php_object_injection_canary",
+  "version": "1.0",
+  "summary": "Detects PHP `unserialize()` on user input by sending a benign stdClass canary and comparing against a malformed control.",
+  "validates": [
+    "CWE-502"
+  ],
+  "matches_titles": [
+    "php_object_injection_canary",
+    "php object injection",
+    "unserialize",
+    "php deserialization"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Path to test (default '/')"
+  }
+}

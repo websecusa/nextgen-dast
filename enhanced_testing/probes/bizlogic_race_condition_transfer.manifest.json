@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_race_condition_transfer",
+  "version": "1.0",
+  "summary": "Detects TOCTOU race in wallet / balance-transfer endpoints — N parallel debits cause double-spend.",
+  "validates": [
+    "CWE-362",
+    "CWE-367"
+  ],
+  "matches_titles": [
+    "bizlogic_race_condition_transfer",
+    "race condition",
+    "wallet double spend",
+    "TOCTOU"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 30,
+  "request_budget_max": 40,
+  "args": {
+    "--url": "Target origin URL",
+    "--parallel": "Number of parallel transfer POSTs (default 10, capped by budget)",
+    "--amount": "Per-transfer amount, kept small for safety (default 1)"
+  }
+}

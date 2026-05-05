@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_inventory_oversell_race",
+  "version": "1.0",
+  "summary": "Detects inventory oversell race — N parallel add-to-cart calls each claim the same low-stock SKU.",
+  "validates": [
+    "CWE-362",
+    "CWE-840"
+  ],
+  "matches_titles": [
+    "bizlogic_inventory_oversell_race",
+    "inventory race",
+    "stock oversell",
+    "race condition cart"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 50,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Target origin URL",
+    "--parallel": "Number of parallel buyer accounts (default 6, capped by budget)",
+    "--product-id": "Pin a specific product id; 0 = auto-discover stock=1 SKU"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_email_header_injection",
+  "version": "1.0",
+  "summary": "Detects email-header injection via CRLF in user-supplied email fields — attacker can inject Bcc / Subject / Content-Type into outgoing mail.",
+  "validates": [
+    "CWE-93",
+    "CWE-1281"
+  ],
+  "matches_titles": [
+    "bizlogic_email_header_injection",
+    "CRLF injection email",
+    "email header injection",
+    "Bcc injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

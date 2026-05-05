@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_zip_symlink",
+  "version": "1.0",
+  "summary": "Detects upload handlers that extract ZIP symlink entries and serve their dereferenced contents.",
+  "validates": [
+    "CWE-59",
+    "CWE-22"
+  ],
+  "matches_titles": [
+    "upload_zip_symlink",
+    "zip symlink upload",
+    "archive symlink"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)",
+    "--link-target": "Symlink target inside the test ZIP (default: /etc/hostname)"
+  }
+}

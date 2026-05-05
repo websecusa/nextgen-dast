@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_oauth_state_missing_or_replay",
+  "version": "1.0",
+  "summary": "Detects OAuth callback endpoints that accept missing or replayed `state` values (OAuth CSRF).",
+  "validates": [
+    "CWE-352"
+  ],
+  "matches_titles": [
+    "auth_oauth_state_missing_or_replay",
+    "oauth state",
+    "oauth csrf"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--callback-path": "Additional OAuth callback path to probe (repeatable)"
+  }
+}

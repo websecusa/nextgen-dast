@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "dotnet_elmah_axd_exposed",
+  "version": "1.0",
+  "summary": "Detects ELMAH error-log handler (/elmah.axd) publicly accessible -- per-exception request dumps leak session cookies.",
+  "validates": [
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "dotnet_elmah_axd_exposed",
+    "elmah",
+    "elmah.axd",
+    "asp.net diagnostic"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 3,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

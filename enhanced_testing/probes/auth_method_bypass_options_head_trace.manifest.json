@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_method_bypass_options_head_trace",
+  "version": "1.0",
+  "summary": "Detects auth filters that skip OPTIONS / HEAD / TRACE — those methods leak protected content or metadata.",
+  "validates": [
+    "CWE-285",
+    "CWE-289"
+  ],
+  "matches_titles": [
+    "auth_method_bypass_options_head_trace",
+    "method bypass",
+    "http method auth",
+    "trace method"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional protected path to test (repeatable)"
+  }
+}

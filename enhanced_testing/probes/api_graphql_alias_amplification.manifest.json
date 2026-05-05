@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_graphql_alias_amplification",
+  "version": "1.0",
+  "summary": "Detects GraphQL alias amplification — submits a 50-alias query and verifies the server processed all of them sub-linearly relative to a single-alias baseline.",
+  "validates": [
+    "CWE-770"
+  ],
+  "matches_titles": [
+    "api_graphql_alias_amplification",
+    "graphql alias dos",
+    "graphql amplification"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional GraphQL endpoint to probe (repeatable)"
+  }
+}

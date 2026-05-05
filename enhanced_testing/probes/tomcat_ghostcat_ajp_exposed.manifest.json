@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "tomcat_ghostcat_ajp_exposed",
+  "version": "1.0",
+  "summary": "Detects Tomcat AJP connector (port 8009) reachable -- Ghostcat (CVE-2020-1938) precondition.",
+  "validates": [
+    "CWE-200",
+    "CWE-749"
+  ],
+  "matches_titles": [
+    "tomcat_ghostcat_ajp_exposed",
+    "ghostcat",
+    "ajp",
+    "tomcat ajp",
+    "CVE-2020-1938"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target origin URL",
+    "--ajp-port": "AJP TCP port to probe (default 8009)"
+  }
+}

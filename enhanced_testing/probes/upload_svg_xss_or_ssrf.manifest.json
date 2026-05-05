@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_svg_xss_or_ssrf",
+  "version": "1.0",
+  "summary": "Detects upload handlers that accept SVG containing <script> and serve it back as image/svg+xml unsanitised.",
+  "validates": [
+    "CWE-79",
+    "CWE-918"
+  ],
+  "matches_titles": [
+    "upload_svg_xss_or_ssrf",
+    "svg upload xss",
+    "svg sanitization bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)"
+  }
+}

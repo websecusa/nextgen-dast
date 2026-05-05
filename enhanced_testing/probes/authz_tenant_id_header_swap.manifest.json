@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_tenant_id_header_swap",
+  "version": "1.0",
+  "summary": "Detects tenant isolation bypass: forged X-Tenant-ID / ?tenant_id= overrides return another tenant's data.",
+  "validates": [
+    "CWE-639"
+  ],
+  "matches_titles": [
+    "authz_tenant_id_header_swap",
+    "tenant isolation",
+    "multi-tenant authz"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--tenant-path": "Additional tenant-aware path to probe (repeatable)"
+  }
+}

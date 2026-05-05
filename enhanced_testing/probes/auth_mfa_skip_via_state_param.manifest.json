@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_mfa_skip_via_state_param",
+  "version": "1.0",
+  "summary": "Detects MFA flows that issue a token after first factor that already authenticates protected endpoints (MFA gate bypass).",
+  "validates": [
+    "CWE-287",
+    "CWE-303"
+  ],
+  "matches_titles": [
+    "auth_mfa_skip_via_state_param",
+    "mfa bypass",
+    "two factor bypass",
+    "step up auth"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--target-email": "Email used to test MFA-shape responses (default admin@juice-sh.op)"
+  }
+}

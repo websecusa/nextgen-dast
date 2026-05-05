@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "ldap_injection_login_bypass",
+  "version": "1.0",
+  "summary": "Detects LDAP-injection in login filters via classic filter-bypass payloads — flags only when 200 + session cookie / auth token are issued.",
+  "validates": [
+    "CWE-90"
+  ],
+  "matches_titles": [
+    "ldap_injection_login_bypass",
+    "ldap injection",
+    "auth bypass ldap"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--login-path": "Additional login endpoint to probe (repeatable)"
+  }
+}

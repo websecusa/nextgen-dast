@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_version_legacy_discovery",
+  "version": "1.0",
+  "summary": "Detects legacy API versions that return data without auth where the current version requires auth.",
+  "validates": [
+    "CWE-285",
+    "CWE-1059"
+  ],
+  "matches_titles": [
+    "api_version_legacy_discovery",
+    "legacy api version",
+    "api versioning"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 12,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target origin URL",
+    "--resource": "Additional resource path segment to sweep"
+  }
+}

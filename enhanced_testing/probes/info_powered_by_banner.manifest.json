@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_powered_by_banner",
+  "version": "1.0",
+  "summary": "Detects server / framework version banners in response headers (Server, X-Powered-By, X-AspNet-Version, etc.).",
+  "validates": [
+    "CWE-200",
+    "CWE-209"
+  ],
+  "matches_titles": [
+    "info_powered_by_banner",
+    "server header",
+    "x-powered-by",
+    "version disclosure",
+    "banner"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 2,
+  "request_budget_max": 3,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Path to GET (default '/')"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_dom_xss_sinks",
+  "version": "1.0",
+  "summary": "Detects DOM-write / dynamic-eval sinks fed by non-literal expressions across the linked JS bundles.",
+  "validates": [
+    "CWE-79"
+  ],
+  "matches_titles": [
+    "clientjs_dom_xss_sinks",
+    "DOM XSS",
+    "innerHTML",
+    "eval",
+    "document.write"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--bundle": "Additional bundle URL/path to scan (repeatable)"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "dotnet_viewstate_unencrypted",
+  "version": "1.0",
+  "summary": "Detects ASP.NET pages that emit `__VIEWSTATE` without MAC protection or encryption.",
+  "validates": [
+    "CWE-345",
+    "CWE-502"
+  ],
+  "matches_titles": [
+    "dotnet_viewstate_unencrypted",
+    "viewstate",
+    "asp.net viewstate",
+    "unsigned viewstate"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional .aspx path to inspect (repeatable)"
+  }
+}

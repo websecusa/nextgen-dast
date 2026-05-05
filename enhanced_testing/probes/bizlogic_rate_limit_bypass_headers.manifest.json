@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_rate_limit_bypass_headers",
+  "version": "1.0",
+  "summary": "Detects rate limiters keyed on a client-controlled forwarded-IP header — rotating the header per request circumvents the lockout.",
+  "validates": [
+    "CWE-770",
+    "CWE-799"
+  ],
+  "matches_titles": [
+    "bizlogic_rate_limit_bypass_headers",
+    "rate limit bypass",
+    "X-Forwarded-For bypass",
+    "header rotation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 30,
+  "request_budget_max": 50,
+  "args": {
+    "--url": "Target origin URL",
+    "--target-email": "Email used during the login attempts (must be a documented seed account)",
+    "--phase-requests": "Requests per phase (default 12; total = 2x this)"
+  }
+}

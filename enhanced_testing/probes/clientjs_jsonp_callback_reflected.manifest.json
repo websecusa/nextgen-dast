@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_jsonp_callback_reflected",
+  "version": "1.0",
+  "summary": "Detects JSONP endpoints that wrap their response with an attacker-supplied callback identifier and a JS Content-Type.",
+  "validates": [
+    "CWE-79"
+  ],
+  "matches_titles": [
+    "clientjs_jsonp_callback_reflected",
+    "JSONP",
+    "callback reflection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--candidate": "Additional candidate JSONP URL to test (repeatable)"
+  }
+}

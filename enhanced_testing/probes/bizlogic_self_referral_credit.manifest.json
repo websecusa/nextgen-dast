@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_self_referral_credit",
+  "version": "1.0",
+  "summary": "Detects referral-program self-credit — same user can register a second account using their own referral code and receive the referrer credit.",
+  "validates": [
+    "CWE-840"
+  ],
+  "matches_titles": [
+    "bizlogic_self_referral_credit",
+    "self referral",
+    "referral abuse",
+    "affiliate fraud"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

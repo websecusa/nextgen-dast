@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "ssrf_metadata_endpoint_sweep",
+  "version": "1.0",
+  "summary": "Detects SSRF on URL-accepting endpoints by sweeping cloud-metadata, loopback, and file:// canonical targets.",
+  "validates": [
+    "CWE-918"
+  ],
+  "matches_titles": [
+    "ssrf_metadata_endpoint_sweep",
+    "ssrf",
+    "server side request forgery",
+    "cloud metadata",
+    "url parameter"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 12,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target origin URL",
+    "--endpoint": "Additional 'path:param' pair to sweep (repeatable)"
+  }
+}

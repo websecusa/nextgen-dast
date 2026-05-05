@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_extension_bypass_double",
+  "version": "1.0",
+  "summary": "Detects upload handlers that accept extension-bypass filenames and serve them with a PHP-source MIME type.",
+  "validates": [
+    "CWE-434"
+  ],
+  "matches_titles": [
+    "upload_extension_bypass_double",
+    "file upload type bypass",
+    "double extension upload"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name carrying the file (default: file)"
+  }
+}

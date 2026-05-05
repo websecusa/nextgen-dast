@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_git_directory_exposed",
+  "version": "1.0",
+  "summary": "Detects `.git/` directory served by the web server (source-code disclosure via git-dumper).",
+  "validates": [
+    "CWE-538",
+    "CWE-540"
+  ],
+  "matches_titles": [
+    "info_git_directory_exposed",
+    "git directory",
+    ".git exposed",
+    "source code disclosure"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

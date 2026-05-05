@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_postmessage_no_origin_check",
+  "version": "1.0",
+  "summary": "Detects window.message handlers registered without a strict event.origin equality check in the same scope.",
+  "validates": [
+    "CWE-345",
+    "CWE-940"
+  ],
+  "matches_titles": [
+    "clientjs_postmessage_no_origin_check",
+    "postMessage",
+    "window message",
+    "origin check"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--bundle": "Additional bundle URL/path to scan (repeatable)"
+  }
+}
