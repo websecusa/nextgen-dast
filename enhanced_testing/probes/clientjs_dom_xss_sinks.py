@@ -12,7 +12,7 @@ becomes a DOM-XSS or open-redirect vector that the server's CSP cannot
 necessarily block.
 
 The probe is a static analyzer over the JS bundles linked from the
-target's index page. To stay high-fidelity we apply two filters that
+target's index page. To stay high-fidelity we apply four filters that
 together kill the common false-positive patterns:
 
   1. The right-hand-side of an assignment (or the first argument of a
@@ -20,15 +20,31 @@ together kill the common false-positive patterns:
      i.e. an identifier or member access. `el.innerHTML = "<b>hi</b>"`
      is a static template and is NOT flagged; `el.innerHTML = userText`
      IS flagged.
-  2. We require at least 2 distinct sink classes to fire across the
+  2. setTimeout / setInterval are flagged ONLY when the first argument
+     is string-shaped: a quoted literal, a template literal, or a
+     `name + ...` concat expression. The function-reference form,
+     which is the overwhelmingly common safe usage (e.g.
+     `setTimeout(updatePagination, 150)`), is NOT flagged. A function
+     reference is not "string-as-code" and does not deferred-eval.
+  3. Each candidate match is suppressed if a recognizable safety
+     guard token (`isSafe`, `isValid`, `validate`, `sanitize`,
+     `DOMPurify`, `encodeURIComponent`, `trustedTypes`, ...) appears
+     within ~280 chars upstream of the sink. This catches the common
+     `if (isSafeNavigationUrl(href)) { location.href = href; }` shape
+     and the `el.innerHTML = DOMPurify.sanitize(input)` shape without
+     needing a full AST + taint pass. We use `finditer` so a guarded
+     match does NOT consume the bundle's slot for that sink type --
+     a later, unguarded match in the same bundle will still surface.
+  4. We require at least 2 distinct sink classes to fire across the
      surveyed bundles before raising validated=True. A single hit on
      one bundle is reported as refuted with the candidate noted, since
      bundle-internal helpers (DOMPurify, framework runtimes) routinely
      contain one such sink that is internally guarded.
 
 Detection signal:
-  >=2 distinct sink categories, each on a non-literal RHS, observed
-  across the linked bundles of the origin's index page.
+  >=2 distinct sink categories, each on a non-literal RHS and not
+  guarded by a recognizable safety check, observed across the linked
+  bundles of the origin's index page.
 """
 from __future__ import annotations
 
@@ -52,6 +68,15 @@ SCRIPT_RE = re.compile(r'<script[^>]+src\s*=\s*"([^"]+\.js[^"]*)"', re.I)
 # matching `el.innerHTML = unsafeVar` or `el.innerHTML = data.body`.
 _IDENT_LEAD = r"[a-zA-Z_$]"
 
+# For setTimeout / setInterval, the actual deferred-eval bug requires
+# a STRING first arg, not a function reference. We match only when the
+# first arg is shaped like a string: a quoted literal (`'`, `"`,
+# backtick template) OR an identifier immediately followed by `+`
+# (string concatenation expression). A bare identifier like
+# `setTimeout(updatePagination, 150)` is a function reference and
+# safe -- it must NOT match.
+_STRING_LEAD = r"""(?:['"`]|[A-Za-z_$][\w$]*\s*\+)"""
+
 SINK_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(rf"\.innerHTML\s*=\s*{_IDENT_LEAD}"),
      "innerHTML = <expr>"),
@@ -65,14 +90,14 @@ SINK_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
      "eval(<expr>)"),
     (re.compile(rf"\bnew\s+Function\(\s*{_IDENT_LEAD}"),
      "new Function(<expr>)"),
-    # setTimeout / setInterval take a string-as-code as their first arg
-    # ONLY when the value is a string. We flag the call when the first
-    # arg is an identifier (could be a string variable) AND the second
-    # arg is a number-shaped delay -- the classic deferred-eval shape.
-    (re.compile(rf"\bsetTimeout\(\s*{_IDENT_LEAD}[^,)]*,\s*\d"),
-     "setTimeout(<expr>, <delay>)"),
-    (re.compile(rf"\bsetInterval\(\s*{_IDENT_LEAD}[^,)]*,\s*\d"),
-     "setInterval(<expr>, <delay>)"),
+    # setTimeout / setInterval: see _STRING_LEAD comment above. We
+    # accept a quoted/template/concat first arg followed (eventually)
+    # by a numeric delay -- the classic `setTimeout("alert(1)", 100)`
+    # / `setTimeout("foo " + bar, 100)` deferred-eval shape.
+    (re.compile(rf"\bsetTimeout\(\s*{_STRING_LEAD}[^)]*,\s*\d"),
+     "setTimeout(<string-as-code>, <delay>)"),
+    (re.compile(rf"\bsetInterval\(\s*{_STRING_LEAD}[^)]*,\s*\d"),
+     "setInterval(<string-as-code>, <delay>)"),
     (re.compile(rf"location\.href\s*=\s*{_IDENT_LEAD}"),
      "location.href = <expr>"),
     (re.compile(rf"location\.replace\(\s*{_IDENT_LEAD}"),
@@ -80,6 +105,40 @@ SINK_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
 )
 
 MAX_BUNDLES = 8
+
+# How far back (in chars) to look for a safety guard token before a
+# candidate sink match. 280 chars comfortably covers the typical
+# `if (isSafeFoo(x)) { sink = x; }` shape even after the file has been
+# minified down to a single long line, while staying tight enough that
+# we don't pick up an unrelated guard from a prior function block.
+GUARD_LOOKBACK_CHARS = 280
+
+# Substrings that, if seen within GUARD_LOOKBACK_CHARS upstream of a
+# sink match, indicate the value flowing into the sink has been
+# allowlisted, validated, sanitized, or wrapped in Trusted Types.
+# The presence of any of these tokens suppresses the match -- we'd
+# rather miss a real bug than ship the user a noisy report. The list
+# is deliberately permissive; tightening it further requires real
+# taint analysis, which this static-pass probe does not attempt.
+SAFE_GUARD_TOKENS: tuple[str, ...] = (
+    "isSafe",
+    "isValid",
+    "isAllowed",
+    "isAllowlisted",
+    "isWhitelisted",
+    "validate",
+    "sanitize",
+    "DOMPurify",
+    "encodeURI",
+    "encodeURIComponent",
+    "escapeHtml",
+    "escape_html",
+    "escapeHTML",
+    "trustedTypes",
+    "TrustedTypes",
+    "allowlist",
+    "whitelist",
+)
 
 
 def _excerpt(text: str, idx: int, span: int = 60) -> str:
@@ -89,6 +148,22 @@ def _excerpt(text: str, idx: int, span: int = 60) -> str:
     end = min(len(text), idx + span)
     snippet = text[start:end].replace("\n", " ").replace("\r", " ")
     return snippet.strip()[:160]
+
+
+def _is_guarded(text: str, match_start: int) -> bool:
+    """Return True iff a recognizable safety guard token appears within
+    GUARD_LOOKBACK_CHARS chars before the sink match.
+
+    This is the cheap counterpart to a real taint analysis: real bugs
+    rarely sit immediately downstream of an `isSafe*` / `DOMPurify` /
+    `encodeURIComponent` call, so a hit in the lookback window is far
+    more likely to be a guarded usage than a coincidence. Cost: we
+    will miss bugs where the developer used a guard NAME that happens
+    to be reassuring but the implementation is broken. Worth it; this
+    probe is one of many, and its job is to be high-fidelity."""
+    window_start = max(0, match_start - GUARD_LOOKBACK_CHARS)
+    window = text[window_start:match_start]
+    return any(tok in window for tok in SAFE_GUARD_TOKENS)
 
 
 class ClientJsDomXssSinksProbe(Probe):
@@ -131,13 +206,24 @@ class ClientJsDomXssSinksProbe(Probe):
             text = rb.text or ""
             local: list[dict] = []
             for pat, label in SINK_PATTERNS:
-                m = pat.search(text)
-                if not m:
+                # Walk every match in the bundle and pick the first
+                # one that is NOT preceded by a recognizable safety
+                # guard. If every match is guarded, the bundle does
+                # not contribute a hit for this sink class. Using
+                # finditer (not search) is what makes filter (3) in
+                # the module docstring actually useful: an early
+                # guarded match no longer hides a later real bug.
+                chosen_excerpt: str | None = None
+                for m in pat.finditer(text):
+                    if _is_guarded(text, m.start()):
+                        continue
+                    chosen_excerpt = _excerpt(text, m.start())
+                    break
+                if chosen_excerpt is None:
                     continue
-                excerpt = _excerpt(text, m.start())
-                local.append({"sink": label, "excerpt": excerpt})
+                local.append({"sink": label, "excerpt": chosen_excerpt})
                 sink_hits.setdefault(label, []).append({
-                    "bundle": url, "excerpt": excerpt,
+                    "bundle": url, "excerpt": chosen_excerpt,
                 })
             row["sinks"] = local
             attempts.append(row)
