@@ -248,6 +248,21 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-05** — **sca_runtime_check probe runtime fix.** The
+  premium-tier SCA gap-fill probe was crashing on every assessment with
+  `AttributeError: 'Response' object has no attribute 'status_code'`,
+  which meant no SCA evidence ever made it into the verdict bundle. The
+  probe was using the `requests` library's `.status_code` / `.content`
+  names against a `SafeClient.Response` object, which only exposes
+  `.status` / `.body` / `.text`. Switched to the SafeClient API; the
+  probe now runs cleanly and either fingerprints versioned JS URLs or
+  returns a `validated=False` "no versioned JS library URLs detected"
+  verdict (the latter is expected when the page only links a single
+  concatenated bundle whose libraries are not in their original
+  per-file path layout).
+  Files: `enhanced_testing/probes/sca_runtime_check.py:95-99`,
+  `src/enhanced_testing/probes/sca_runtime_check.py:95-99`.
+
 - **2026-05-05** — **Grade cap softened for isolated mediums + auto-validate
   picks up wapiti anomaly:5xx.** Two changes that work together to stop a
   single legitimate medium-severity finding from cratering an otherwise clean

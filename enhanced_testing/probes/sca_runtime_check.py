@@ -92,11 +92,17 @@ class SCARuntimeCheckProbe(Probe):
             return Verdict(ok=False, validated=None,
                            summary=f"failed to fetch {args.url}: {e}",
                            error=str(e))
-        body_bytes = r.content if hasattr(r, "content") else (r.body or b"")
-        if r.status_code >= 400 or not body_bytes:
+        # SafeClient.Response exposes .status / .body / .text. Earlier
+        # revisions of this probe used the requests-style .status_code /
+        # .content names, which crashed at runtime ("Response object has
+        # no attribute 'status_code'") and prevented any SCA evidence
+        # from being recorded. Use the SafeClient API directly.
+        status = getattr(r, "status", None)
+        body_bytes = r.body or b""
+        if status is None or status >= 400 or not body_bytes:
             return Verdict(ok=False, validated=None,
-                           summary=f"target returned HTTP {r.status_code}")
-        body = body_bytes.decode("utf-8", "replace")
+                           summary=f"target returned HTTP {status}")
+        body = r.text or body_bytes.decode("utf-8", "replace")
 
         # Collect every script-ish URL so the regex only has to scan
         # plausible candidates (instead of the whole HTML body).
