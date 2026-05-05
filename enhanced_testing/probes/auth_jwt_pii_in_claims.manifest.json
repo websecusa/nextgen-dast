@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_jwt_pii_in_claims",
+  "version": "1.0",
+  "summary": "Detects PII or secret-shaped data embedded in JWT payload claims (token contents are not encrypted).",
+  "validates": [
+    "CWE-200",
+    "CWE-522"
+  ],
+  "matches_titles": [
+    "auth_jwt_pii_in_claims",
+    "jwt pii",
+    "sensitive data jwt",
+    "jwt claims leak"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 3,
+  "args": {
+    "--url": "Target origin URL",
+    "--jwt": "JWT to inspect directly instead of registering a probe account"
+  }
+}

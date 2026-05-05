@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_csp_unsafe_directives",
+  "version": "1.0",
+  "summary": "Detects fine-grained CSP weaknesses (unsafe-inline / unsafe-eval / missing base-uri / missing object-src).",
+  "validates": [
+    "CWE-1021"
+  ],
+  "matches_titles": [
+    "clientjs_csp_unsafe_directives",
+    "CSP",
+    "Content-Security-Policy",
+    "unsafe-inline",
+    "unsafe-eval"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 2,
+  "request_budget_max": 3,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional path to probe (repeatable)"
+  }
+}

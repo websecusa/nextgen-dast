@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_service_worker_scope",
+  "version": "1.0",
+  "summary": "Detects a Service Worker that pulls remote scripts via importScripts over HTTP.",
+  "validates": [
+    "CWE-913",
+    "CWE-829"
+  ],
+  "matches_titles": [
+    "clientjs_service_worker_scope",
+    "service worker",
+    "importScripts"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 3,
+  "request_budget_max": 5,
+  "args": {
+    "--url": "Target origin URL",
+    "--sw-path": "Additional Service Worker path to probe (repeatable)"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_coupon_reuse_or_stack",
+  "version": "1.0",
+  "summary": "Detects coupon-reuse or coupon-stacking flaws — same code accepted multiple times, or distinct codes combining past intended cap.",
+  "validates": [
+    "CWE-840"
+  ],
+  "matches_titles": [
+    "bizlogic_coupon_reuse_or_stack",
+    "coupon abuse",
+    "promo code stacking",
+    "discount reuse"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--coupon": "Primary coupon code to test for reuse (default canary prefix)",
+    "--coupon-secondary": "Distinct second code for stacking test",
+    "--reuse-trials": "Number of same-code applications (default 5)"
+  }
+}

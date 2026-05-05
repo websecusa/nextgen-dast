@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_workflow_skip_payment",
+  "version": "1.0",
+  "summary": "Detects checkout state-machine bypass — order confirm endpoint accepts a 'paid' transition without the payment step having been completed.",
+  "validates": [
+    "CWE-840",
+    "CWE-841"
+  ],
+  "matches_titles": [
+    "bizlogic_workflow_skip_payment",
+    "checkout bypass",
+    "state machine bypass",
+    "skip payment"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 5,
+  "request_budget_max": 8,
+  "args": {
+    "--url": "Target origin URL",
+    "--allow-destroy": "Required — confirm-without-payment creates an order row"
+  }
+}

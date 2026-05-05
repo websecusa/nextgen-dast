@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "sqli_second_order_via_profile",
+  "version": "1.0",
+  "summary": "Detects second-order SQL injection by storing a distinctive SQL fragment in a profile field and watching downstream render surfaces for SQL errors.",
+  "validates": [
+    "CWE-89"
+  ],
+  "matches_titles": [
+    "sqli_second_order_via_profile",
+    "second-order sql injection",
+    "stored sqli"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--render-path": "Additional render path to GET after registering (repeatable)"
+  }
+}

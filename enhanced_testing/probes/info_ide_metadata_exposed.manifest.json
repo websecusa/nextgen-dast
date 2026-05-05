@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_ide_metadata_exposed",
+  "version": "1.0",
+  "summary": "Detects IDE / OS metadata files (.idea, .vscode, .DS_Store, Thumbs.db, .project) served from the web root.",
+  "validates": [
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "info_ide_metadata_exposed",
+    "ide metadata",
+    ".idea exposed",
+    ".vscode exposed",
+    ".DS_Store",
+    "Thumbs.db"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

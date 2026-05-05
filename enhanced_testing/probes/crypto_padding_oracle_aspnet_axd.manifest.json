@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "crypto_padding_oracle_aspnet_axd",
+  "version": "1.0",
+  "summary": "Detects an ASP.NET padding oracle via WebResource.axd / ScriptResource.axd response-class differential.",
+  "validates": [
+    "CWE-209",
+    "CWE-310"
+  ],
+  "matches_titles": [
+    "crypto_padding_oracle_aspnet_axd",
+    "padding oracle",
+    "asp.net poet"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 12,
+  "request_budget_max": 24,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

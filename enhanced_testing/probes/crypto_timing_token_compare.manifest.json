@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "crypto_timing_token_compare",
+  "version": "1.0",
+  "summary": "Detects token-verification endpoints whose response time scales with the matching prefix length — indicating a non-constant-time comparison.",
+  "validates": [
+    "CWE-208"
+  ],
+  "matches_titles": [
+    "crypto_timing_token_compare",
+    "timing attack token",
+    "constant time comparison"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 30,
+  "request_budget_max": 50,
+  "args": {
+    "--url": "Target origin URL",
+    "--token-path": "Additional verification endpoint to try (repeatable)"
+  }
+}

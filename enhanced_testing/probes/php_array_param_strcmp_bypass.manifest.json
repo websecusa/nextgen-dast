@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "php_array_param_strcmp_bypass",
+  "version": "1.0",
+  "summary": "Detects PHP login bypass when password / username is sent as an array parameter (`password[]=anything`).",
+  "validates": [
+    "CWE-697"
+  ],
+  "matches_titles": [
+    "php_array_param_strcmp_bypass",
+    "php strcmp bypass",
+    "array parameter",
+    "php type juggling"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--target-email": "Email / username to attempt against (default: admin@juice-sh.op)",
+    "--login-path": "Additional login endpoint to test (repeatable)"
+  }
+}

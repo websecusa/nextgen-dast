@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_zipslip_traversal",
+  "version": "1.0",
+  "summary": "Detects ZIP-Slip — archive extractor writes entries with `../` paths outside the intended unpack root.",
+  "validates": [
+    "CWE-22"
+  ],
+  "matches_titles": [
+    "upload_zipslip_traversal",
+    "zip slip",
+    "archive path traversal"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)"
+  }
+}

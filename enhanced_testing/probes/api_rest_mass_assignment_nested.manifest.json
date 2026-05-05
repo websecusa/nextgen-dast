@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "api_rest_mass_assignment_nested",
+  "version": "1.0",
+  "summary": "Detects REST mass-assignment via nested-object payloads — flat-field deny-lists miss privileged writes nested under a benign top-level key.",
+  "validates": [
+    "CWE-915"
+  ],
+  "matches_titles": [
+    "api_rest_mass_assignment_nested",
+    "nested mass assignment",
+    "rest mass assignment"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--update-path": "Additional 'path|METHOD' to test (repeatable)"
+  }
+}

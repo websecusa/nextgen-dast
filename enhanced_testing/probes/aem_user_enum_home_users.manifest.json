@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_user_enum_home_users",
+  "version": "1.0",
+  "summary": "Detects anonymous user / authorizable enumeration via AEM /home/users JSON listing.",
+  "validates": [
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "aem_user_enum_home_users",
+    "aem user enumeration",
+    "/home/users",
+    "rep:User"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional path to test (repeatable)"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_mfa_no_lockout_on_codes",
+  "version": "1.0",
+  "summary": "Detects MFA verify endpoints that accept unlimited incorrect codes (no per-account lockout).",
+  "validates": [
+    "CWE-307"
+  ],
+  "matches_titles": [
+    "auth_mfa_no_lockout_on_codes",
+    "mfa brute force",
+    "totp lockout",
+    "2fa rate limit"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 22,
+  "request_budget_max": 30,
+  "args": {
+    "--url": "Target origin URL",
+    "--trials": "Number of bad-code submissions (default 20)"
+  }
+}

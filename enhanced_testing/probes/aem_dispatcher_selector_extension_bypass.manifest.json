@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "aem_dispatcher_selector_extension_bypass",
+  "version": "1.0",
+  "summary": "Detects AEM dispatcher bypass via selector / extension tricks (.1.json, .-1.json, .html;%0a.css).",
+  "validates": [
+    "CWE-200",
+    "CWE-22"
+  ],
+  "matches_titles": [
+    "aem_dispatcher_selector_extension_bypass",
+    "aem dispatcher",
+    "sling selector bypass",
+    "aem bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 12,
+  "args": {
+    "--url": "Target origin URL",
+    "--baseline": "Additional baseline path to try (repeatable)"
+  }
+}

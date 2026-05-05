@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_imagemagick_mvg_canary",
+  "version": "1.0",
+  "summary": "Detects upload pipelines that pass MVG / SVG to ImageMagick and dereference external image references.",
+  "validates": [
+    "CWE-918",
+    "CWE-94"
+  ],
+  "matches_titles": [
+    "upload_imagemagick_mvg_canary",
+    "imagemagick mvg",
+    "imagetragick"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)",
+    "--latency-threshold-ms": "Latency floor that flags a likely server-side fetch (default 2000)"
+  }
+}

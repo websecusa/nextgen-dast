@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "upload_decompression_ratio",
+  "version": "1.0",
+  "summary": "Detects upload pipelines lacking a decompression-ratio limit — small archives expand to large payloads.",
+  "validates": [
+    "CWE-409",
+    "CWE-770"
+  ],
+  "matches_titles": [
+    "upload_decompression_ratio",
+    "decompression bomb",
+    "zip bomb"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 2,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)"
+  }
+}

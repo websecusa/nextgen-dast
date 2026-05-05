@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "dotnet_trace_axd_exposed",
+  "version": "1.0",
+  "summary": "Detects ASP.NET trace.axd publicly accessible -- recent-request log leaks session state.",
+  "validates": [
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "dotnet_trace_axd_exposed",
+    "trace.axd",
+    "asp.net trace",
+    "asp.net diagnostic"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 2,
+  "request_budget_max": 3,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

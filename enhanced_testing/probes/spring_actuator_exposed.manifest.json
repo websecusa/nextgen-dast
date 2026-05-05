@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "spring_actuator_exposed",
+  "version": "1.0",
+  "summary": "Detects Spring Boot Actuator endpoints exposed to anonymous callers (env / configprops / heapdump / threaddump etc.).",
+  "validates": [
+    "CWE-200",
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "spring_actuator_exposed",
+    "spring actuator",
+    "actuator/env",
+    "actuator/heapdump",
+    "spring boot management"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 14,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

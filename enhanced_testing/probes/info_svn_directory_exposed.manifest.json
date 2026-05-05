@@ -1,0 +1,25 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_svn_directory_exposed",
+  "version": "1.0",
+  "summary": "Detects `.svn/` directory served by the web server (source-code disclosure via svn-extractor).",
+  "validates": [
+    "CWE-538"
+  ],
+  "matches_titles": [
+    "info_svn_directory_exposed",
+    "svn directory",
+    ".svn exposed",
+    "subversion exposure"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 3,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "cmdi_upload_filename_metacharacter",
+  "version": "1.0",
+  "summary": "Detects command injection via uploaded filename — compares upload time for a metacharacter filename vs a control name and flags multi-second deltas.",
+  "validates": [
+    "CWE-78"
+  ],
+  "matches_titles": [
+    "cmdi_upload_filename_metacharacter",
+    "command injection upload",
+    "filename shell injection"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--upload-path": "Additional upload endpoint to try (repeatable)",
+    "--field": "Multipart field name (default: file)"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "auth_session_token_entropy",
+  "version": "1.0",
+  "summary": "Detects session tokens minted with a weak RNG by measuring Shannon entropy and repeating-prefix structure across many fresh tokens.",
+  "validates": [
+    "CWE-330",
+    "CWE-331"
+  ],
+  "matches_titles": [
+    "auth_session_token_entropy",
+    "weak session token",
+    "predictable session id",
+    "insecure rng"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 50,
+  "request_budget_max": 60,
+  "args": {
+    "--url": "Target origin URL",
+    "--samples": "Number of fresh tokens to harvest (default 50)"
+  }
+}

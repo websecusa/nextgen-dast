@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "bizlogic_points_negative_redeem",
+  "version": "1.0",
+  "summary": "Detects rewards/points redeem endpoint that accepts negative amounts, granting balance instead of deducting it.",
+  "validates": [
+    "CWE-840"
+  ],
+  "matches_titles": [
+    "bizlogic_points_negative_redeem",
+    "negative redeem",
+    "points abuse",
+    "rewards exploit"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 3,
+  "request_budget_max": 4,
+  "args": {
+    "--url": "Target origin URL",
+    "--negative-amount": "Negative integer used in the redeem call (default -1000)"
+  }
+}

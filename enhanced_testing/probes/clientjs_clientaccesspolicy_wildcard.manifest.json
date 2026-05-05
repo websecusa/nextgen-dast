@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "clientjs_clientaccesspolicy_wildcard",
+  "version": "1.0",
+  "summary": "Detects /clientaccesspolicy.xml that grants Silverlight / legacy cross-origin access to any domain via <domain uri=\"*\"/>.",
+  "validates": [
+    "CWE-942"
+  ],
+  "matches_titles": [
+    "clientjs_clientaccesspolicy_wildcard",
+    "clientaccesspolicy.xml",
+    "Silverlight policy"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 1,
+  "request_budget_max": 2,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

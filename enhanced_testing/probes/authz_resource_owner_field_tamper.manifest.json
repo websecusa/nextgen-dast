@@ -1,0 +1,24 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_resource_owner_field_tamper",
+  "version": "1.0",
+  "summary": "Detects writable owner_id field: a non-admin caller can transfer a resource to another user via PUT.",
+  "validates": [
+    "CWE-639"
+  ],
+  "matches_titles": [
+    "authz_resource_owner_field_tamper",
+    "owner id tamper",
+    "resource ownership manipulation"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 6,
+  "request_budget_max": 10,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

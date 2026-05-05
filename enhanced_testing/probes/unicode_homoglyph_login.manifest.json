@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "unicode_homoglyph_login",
+  "version": "1.0",
+  "summary": "Detects username normalisation bugs by attempting login with Cyrillic homoglyph variants of common privileged usernames.",
+  "validates": [
+    "CWE-176",
+    "CWE-1007"
+  ],
+  "matches_titles": [
+    "unicode_homoglyph_login",
+    "homoglyph attack",
+    "unicode normalisation bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 4,
+  "request_budget_max": 6,
+  "args": {
+    "--url": "Target origin URL",
+    "--login-path": "Additional login endpoint to probe (repeatable)"
+  }
+}
