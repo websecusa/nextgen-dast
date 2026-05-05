@@ -248,6 +248,53 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-05** — **Grade cap softened for isolated mediums + auto-validate
+  picks up wapiti anomaly:5xx.** Two changes that work together to stop a
+  single legitimate medium-severity finding from cratering an otherwise clean
+  engagement to a D, while making the noisiest 5xx false-positive class clear
+  itself before the analyst opens the workspace.
+
+  (1) `_exploitability_grade_cap` in `app/reports.py` raised the T3
+  (validated medium) threshold from 1 to 3. A single validated medium no
+  longer forces D — the per-category demerit math, the per-category cap, and
+  the validation floor decide the letter on their own. Three or more
+  validated mediums still cap at D because that's a pattern of mid-severity
+  exposure, not an isolated finding. T1 / T2 / T2b thresholds (any
+  toolkit-confirmed compromise, three+ validated criticals, two+ validated
+  highs, or any single validated critical/high) are unchanged. Validated
+  rule of thumb on the example that motivated the change: 1 validated
+  medium + 2 validated lows + 14 info-recon now grades A (was D).
+
+  (2) `toolkit/probes/anomaly_5xx_validation.manifest.json`'s `safety_class`
+  flipped from `"probe"` to `"read-only"`. The probe replays the captured
+  request that the originating scanner (wapiti / nuclei / nikto) already
+  sent during the scan pass — replay is not a state-mutating action in the
+  sense `safety_class` is meant to gate. With the read-only classification,
+  `challenge_runner.run(safe_only=True)` (the auto-validate pass that fires
+  immediately after ingestion, orchestrator.py:846) now picks up these
+  findings and clears the false-positive cluster before the assessment
+  flips to `done`. The destructive-method gate stays open via the
+  unchanged `requires_post: true` flag, so the probe can still issue the
+  captured POST it needs to reproduce the 5xx — only the auto-run
+  selector changes.
+
+  Net effect on the motivating assessment (test 41, 52 findings): the
+  29 wapiti `anomaly: Internal Server Error` rows are now auto-marked
+  `false_positive` during ingestion instead of after a manual Challenge
+  click, and the resulting 1 validated medium + 2 validated lows are
+  graded A instead of D.
+
+- **2026-05-04** — **PDF report wrap fix.** Long URLs in finding
+  evidence and long tokens in the scope/document-control tables
+  were running past the cell boundary and clipping at the right
+  margin in WeasyPrint output. Added `overflow-wrap: anywhere` and
+  `word-break: break-word` to `code, pre` and to `th, td` in
+  `app/templates/report.html` so unbreakable runs (URLs, FQDNs,
+  long query strings on the "Affected" line of a finding card)
+  break inside their container instead of forcing the table column
+  wider than the page. Template-only change — no schema or runtime
+  impact, image rebuild required for the new CSS to ship.
+
 - **2026-05-03** — **Role-aware Enhanced-AI-Testing**. New opt-in
   on the assess form (and `POST /api/v1/scans` body) gated to the
   premium + advanced corner: when `profile=premium` AND
