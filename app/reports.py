@@ -210,8 +210,13 @@ def _exploitability_grade_cap(findings: list) -> Optional[dict]:
         TLS catastrophe — multiple independent failings, F.
       * Two or more T2b (validated highs from non-enhanced tools) is
         also catastrophic — the scanner verified multiple serious flaws.
-      * A single T2 / T2b / T3 keeps the grade at D — real but isolated
-        exposure, not full compromise.
+      * A single T2 / T2b keeps the grade at D — real but isolated
+        critical/high exposure, not full compromise.
+      * Three or more T3 (validated mediums) clusters into a D — a
+        pattern of medium-severity issues argues for systemic risk.
+        Below that, the demerit math + per-category cap + validation
+        floor decide the letter on their own; an isolated validated
+        medium should not drag an otherwise clean engagement to D.
       * A volume of unconfirmed criticals (>=5 T4 critical) is itself
         a posture signal even when nothing was validated, and earns D.
     """
@@ -238,10 +243,10 @@ def _exploitability_grade_cap(findings: list) -> Optional[dict]:
     if counts["T2"] >= 1 or counts["T2b"] >= 1:
         return {"grade": "D",
                 "reason": "one validated critical/high finding"}
-    if counts["T3"] >= 1:
+    if counts["T3"] >= 3:
         return {"grade": "D",
                 "reason": (f"{counts['T3']} validated medium-severity "
-                           "finding(s)")}
+                           "findings — pattern of mid-severity exposure")}
     if counts["T4_critical"] >= 5:
         return {"grade": "D",
                 "reason": (f"{counts['T4_critical']} unconfirmed critical "
