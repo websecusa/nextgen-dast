@@ -102,7 +102,13 @@
   {% endif %}
   {% include '_finding_reproduce.html' %}
 </section>
+{% endif %}
 
+{# What was detected: rendered for every source_tool that wrote a
+   description column (LLM rows, enhanced_testing toolkit probes,
+   third-party importers). Previously this card was nested inside the
+   enhanced_ai_testing gate, which meant non-LLM rows showed only the
+   bare URL and an analyst could not see what the probe actually flagged. #}
 {% if f.description %}
 <section class="card">
   <h2>What was detected</h2>
@@ -110,43 +116,163 @@
 </section>
 {% endif %}
 
-{# Output-schema v2: reproduction (test plan) lives in
-   raw_data.llm_reproduction; remediation column carries the fix guide.
-   Old rows have only the remediation column populated with what was
-   historically the test plan — those render under "To Reproduce" and
-   the Remediation card is hidden. New rows render both cards. #}
-{% set repro = (f.raw and f.raw.llm_reproduction) %}
-{% if repro %}
+{# Proof: per-probe-family rendering of validation.evidence so the
+   analyst can see concrete artifacts (which JS bundle, which path,
+   which header) without expanding the raw-JSON details block lower
+   on the page. The dispatch key is f.validation_probe; each branch
+   reads only the fields that probe family is documented to write. #}
+{% if validation and validation.evidence %}
+{% set ev = validation.evidence %}
+{% set vp = f.validation_probe or '' %}
 <section class="card">
-  <h2>To Reproduce</h2>
+  <h2>Proof</h2>
   <p class="muted small" style="margin-top:0">
-    Test plan emitted by the LLM. All commands are designed to be
-    non-destructive — review before running. Click
-    <strong>Challenge with LLM</strong> above to have the model
-    re-grade this finding using the captured scan telemetry.
+    Concrete artifacts captured by <code>{{ vp or 'the validation probe' }}</code>
+    {% if f.validation_run_at %}at {{ f.validation_run_at }}{% endif %}.
+    These are the exact URLs / responses that fed this finding's verdict.
   </p>
-  <div class="markdown-body">{{ repro | md }}</div>
+
+  {# ---- DOM-XSS sinks: list each bundle and the sink hits inside it ---- #}
+  {% if vp == 'clientjs_dom_xss_sinks' and ev.attempts %}
+    {% for a in ev.attempts %}
+      <div style="margin:.6em 0; padding:.5em .7em; border-left:3px solid var(--accent); background:rgba(255,255,255,.02)">
+        <p style="margin:0">
+          <strong>Bundle:</strong>
+          <a href="{{ a.bundle }}" target="_blank" rel="noopener"><code>{{ a.bundle }}</code></a>
+          <span class="muted small">(HTTP {{ a.status }}{% if a.size %}, {{ a.size }} bytes{% endif %})</span>
+        </p>
+        {% if a.sinks %}
+          <ul style="margin:.4em 0 0">
+          {% for s in a.sinks %}
+            <li style="margin-bottom:.3em">
+              <code>{{ s.sink }}</code>
+              {% if s.excerpt %}
+                <pre style="white-space:pre-wrap; background:#0f1419; padding:.5em; border-radius:4px; margin:.25em 0; font-size:.85em; overflow:auto">{{ s.excerpt }}</pre>
+              {% endif %}
+            </li>
+          {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted small" style="margin:.3em 0 0">No sinks observed in this bundle.</p>
+        {% endif %}
+      </div>
+    {% endfor %}
+
+  {# ---- Admin login at common paths: list every confirmed path ---- #}
+  {% elif vp == 'info_admin_login_at_common_paths' and ev.confirmed %}
+    <ul>
+    {% for c in ev.confirmed %}
+      <li>
+        <code>GET {{ ev.origin }}{{ c.path }}</code>
+        → HTTP {{ c.status }}
+        {% if c.final_url and c.final_url != (ev.origin ~ c.path) %}
+          (redirected to <code>{{ c.final_url }}</code>)
+        {% endif %}
+        {% if c.login_form_present %}
+          <span class="badge" title="Page contains a form with username + password inputs">login form present</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+
+  {# ---- Powered-by banner: show each leaking header verbatim ---- #}
+  {% elif vp == 'info_powered_by_banner' %}
+    {% if ev.banners_seen %}
+      <p style="margin:.2em 0"><strong>Banner headers observed on
+        <code>{{ ev.origin }}</code>:</strong></p>
+      <ul>
+      {% for h, v in ev.banners_seen.items() %}
+        <li><code>{{ h }}: {{ v }}</code>
+          {% set is_versioned = false %}
+          {% for vh, vv in (ev.version_bearing or []) %}
+            {% if vh == h %}{% set is_versioned = true %}{% endif %}
+          {% endfor %}
+          {% if is_versioned %}
+            <span class="badge warn" title="Header value matches a product/version regex">version-bearing</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    {% endif %}
+    {% if ev.attempts %}
+      <details style="margin-top:.4em">
+        <summary class="muted small" style="cursor:pointer">Per-path responses ({{ ev.attempts|length }})</summary>
+        <ul style="margin-top:.4em">
+        {% for a in ev.attempts %}
+          <li><code>GET {{ ev.origin }}{{ a.path }}</code> → HTTP {{ a.status }}{% if a.size %}, {{ a.size }} bytes{% endif %}</li>
+        {% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+
+  {# ---- Generic fallback for probes without a dedicated renderer ---- #}
+  {% else %}
+    {% if ev.origin %}
+      <p style="margin:.2em 0"><strong>Origin:</strong>
+        <a href="{{ ev.origin }}" target="_blank" rel="noopener"><code>{{ ev.origin }}</code></a></p>
+    {% endif %}
+    {% if ev.confirmed %}
+      <p style="margin:.4em 0 .2em"><strong>Confirmed observations:</strong></p>
+      <pre style="white-space:pre-wrap; background:#0f1419; padding:.6em; border-radius:4px; max-height:280px; overflow:auto; font-size:.85em">{{ ev.confirmed | tojson(indent=2) }}</pre>
+    {% endif %}
+    {% if ev.attempts %}
+      <details style="margin-top:.4em">
+        <summary class="muted small" style="cursor:pointer">All probe attempts ({{ ev.attempts|length }})</summary>
+        <pre style="white-space:pre-wrap; background:#0f1419; padding:.6em; border-radius:4px; max-height:320px; overflow:auto; font-size:.85em">{{ ev.attempts | tojson(indent=2) }}</pre>
+      </details>
+    {% endif %}
+  {% endif %}
 </section>
-{% if f.remediation %}
+{% endif %}
+
+{# Reproduction + Remediation. The LLM (enhanced_ai_testing) emits a
+   structured test plan in raw_data.llm_reproduction and a separate
+   remediation column; legacy LLM rows have only the remediation
+   column populated with what was historically the test plan. Toolkit
+   probes (enhanced_testing) and other importers carry their fix
+   guidance directly in the remediation column, with no separate test
+   plan, so they take the simpler render path below. #}
+{% if f.source_tool == 'enhanced_ai_testing' %}
+  {% set repro = (f.raw and f.raw.llm_reproduction) %}
+  {% if repro %}
+  <section class="card">
+    <h2>To Reproduce</h2>
+    <p class="muted small" style="margin-top:0">
+      Test plan emitted by the LLM. All commands are designed to be
+      non-destructive — review before running. Click
+      <strong>Challenge with LLM</strong> above to have the model
+      re-grade this finding using the captured scan telemetry.
+    </p>
+    <div class="markdown-body">{{ repro | md }}</div>
+  </section>
+  {% if f.remediation %}
+  <section class="card">
+    <h2>Remediation</h2>
+    <p class="muted small" style="margin-top:0">
+      Engineering fix guidance — the smallest set of changes that close
+      this finding without breaking working functionality.
+    </p>
+    <div class="markdown-body">{{ f.remediation | md }}</div>
+  </section>
+  {% endif %}
+  {% elif f.remediation %}
+  <section class="card">
+    <h2>To Reproduce</h2>
+    <p class="muted small" style="margin-top:0">
+      Test plan emitted by the LLM (legacy schema). All commands are
+      designed to be non-destructive — review before running.
+    </p>
+    <div class="markdown-body">{{ f.remediation | md }}</div>
+  </section>
+  {% endif %}
+{% elif f.remediation %}
 <section class="card">
   <h2>Remediation</h2>
   <p class="muted small" style="margin-top:0">
-    Engineering fix guidance — the smallest set of changes that close
-    this finding without breaking working functionality.
+    Engineering fix guidance from the probe that emitted this finding.
   </p>
   <div class="markdown-body">{{ f.remediation | md }}</div>
 </section>
-{% endif %}
-{% elif f.remediation %}
-<section class="card">
-  <h2>To Reproduce</h2>
-  <p class="muted small" style="margin-top:0">
-    Test plan emitted by the LLM (legacy schema). All commands are
-    designed to be non-destructive — review before running.
-  </p>
-  <div class="markdown-body">{{ f.remediation | md }}</div>
-</section>
-{% endif %}
 {% endif %}
 
 {# ----------------------------------------------------------------------

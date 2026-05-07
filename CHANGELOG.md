@@ -248,6 +248,61 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-07** — **Finding detail page: render proof + remediation
+  for non-LLM probes; admin-login probe drops to info severity.** Two
+  fixes that move closely together because they were filed together
+  by an analyst working assessment 45.
+
+  (1) `app/templates/finding_detail.html` previously wrapped the
+  *What was detected*, *To Reproduce*, and *Remediation* cards inside
+  a `{% if f.source_tool == 'enhanced_ai_testing' %}` block, which
+  meant rows from the toolkit's own probes (`enhanced_testing`)
+  showed only the bare URL and a collapsed-JSON dump of
+  `validation_evidence`. The description and remediation columns
+  were populated in the database but never reached the page. Pulled
+  the description and remediation cards out of the gate so any
+  source_tool with a description renders one, and added a per-probe
+  **Proof** card that pretty-prints `validation.evidence` for the
+  three families an analyst hits most often: `clientjs_dom_xss_sinks`
+  lists each JavaScript bundle URL with the matching sink labels and
+  short code excerpts; `info_admin_login_at_common_paths` lists every
+  confirmed admin path with its HTTP status, final URL after
+  redirects, and a *login form present* badge;
+  `info_powered_by_banner` lists the leaking response headers
+  verbatim with a *version-bearing* tag on any header that matched
+  the strict product/version regex. A generic fallback covers all
+  other probes by rendering `evidence.confirmed` and
+  `evidence.attempts` as collapsible JSON. The full raw
+  `validation_evidence` is still available below in the existing
+  Validation card's `<details>` for audit, but the analyst no longer
+  has to expand it to know which JS bundle leaked or which header
+  was set. Files: `app/templates/finding_detail.html`,
+  `src/app/templates/finding_detail.html`. Smoke-tested by rendering
+  the new template with the live evidence from findings 2456 / 2457
+  / 2458 (assessment 45).
+
+  (2) `enhanced_testing/probes/info_admin_login_at_common_paths.py`
+  emitted `severity_uplift="medium"` whenever an admin-style URL
+  returned a login form on the public origin. The probe is
+  surface-inventory only — the actual defects (default credentials,
+  missing lockout, weak session flags, MFA gaps) are scored
+  independently by the paired `auth_default_admin_credentials`,
+  `auth_no_brute_force_lockout`, and `auth_username_enum_timing`
+  probes, so flagging the login page itself as medium double-counted
+  exposure that the rest of the auth probe family already prices in.
+  Dropped `severity_uplift` to `"info"` so the row reads as
+  inventory by default; analysts who want to elevate it for a
+  specific engagement can still mark it via the existing
+  enrichment-edit flow. Existing rows in the `findings` table on the
+  current host were backfilled in the same change
+  (`UPDATE findings SET severity='info' WHERE
+  source_tool='enhanced_testing' AND
+  title='info_admin_login_at_common_paths' AND severity='medium'`)
+  so historical assessments 41, 42, 45 reflect the new classification
+  immediately. Files:
+  `enhanced_testing/probes/info_admin_login_at_common_paths.py:112`,
+  `src/enhanced_testing/probes/info_admin_login_at_common_paths.py:112`.
+
 - **2026-05-05** — **sca_runtime_check probe runtime fix.** The
   premium-tier SCA gap-fill probe was crashing on every assessment with
   `AttributeError: 'Response' object has no attribute 'status_code'`,
