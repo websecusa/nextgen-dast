@@ -109,7 +109,12 @@ class InfoAdminLoginAtCommonPathsProbe(Probe):
                     "implements (creds strength, lockout, MFA, "
                     "session flags)."),
                 evidence={**evidence, "confirmed": confirmed},
-                severity_uplift="medium",
+                # Surface-inventory only: the probe confirms an admin
+                # login form is reachable on the public origin, which
+                # is informational. The actual defects (default creds,
+                # missing lockout, weak session flags, MFA gaps) are
+                # scored independently by the paired auth_* probes.
+                severity_uplift="info",
                 remediation=(
                     "Move admin / management UIs off the public "
                     "internet -- VPN-only ingress, SSO with hardware "
