@@ -976,6 +976,20 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **PDF download URL — cache-busting query string.** The
+  per-assessment "Download PDF" link on the assessment detail page now
+  appends `?v=<mtime>` to the report URL. The on-disk filename is
+  deterministic (`<fqdn>_<finished_date>_report.pdf`), so when an
+  operator re-uploaded a PDF logo or changed the PDF theme and then
+  hit "Regenerate PDF", the browser would serve the previously-cached
+  copy and the operator would think the new theme had not been
+  applied. The new query string is the file mtime (already exposed by
+  `reports.list_reports()` as `created_at`), so each regeneration
+  produces a unique URL and the browser revalidates. Same pattern as
+  the `/branding/logo/<kind>?v=<mtime>` URLs we already use in
+  `base.html` and the branding admin pages. Template-only change in
+  `app/templates/assessment_detail.html`; no Python or schema impact.
+
 - **Branding — "Show company name" toggles per surface.** The web
   app branding page and the PDF branding page each grew a Show /
   Don't show radio control for the company name. When OFF on the
