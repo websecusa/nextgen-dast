@@ -537,6 +537,21 @@ button, .button {
   border-radius: var(--radius-input);
   transition: background-color .12s, opacity .12s;
 }
+
+/* Forms are flex columns (see `form` rule above), and the default
+   align-items: stretch makes direct-child buttons span the full
+   form width — visually heavy on Save / Start / Capture / etc.
+   Pin those to their content width so they read as buttons, not
+   banners. Only direct children are targeted; buttons nested inside
+   wrapper <div>/<p> rows (e.g. the bulk-delete bar on /scan) keep
+   their own layout. Add class="fullwidth" to opt back into the
+   stretched layout (used by the centered login forms, where a wide
+   Sign-in button is the conventional pattern). */
+form > button:not(.fullwidth),
+form > .button:not(.fullwidth),
+form > input[type="submit"]:not(.fullwidth) {
+  align-self: flex-start;
+}
 button:hover, .button:hover { background: var(--accent-2); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button.warn { background: var(--red); color: #fff; }
