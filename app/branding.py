@@ -90,6 +90,24 @@ def get() -> dict:
     return row or {}
 
 
+def _show_company_name(b: dict, key: str) -> bool:
+    """Resolve a per-surface "show the company name?" toggle into a bool.
+
+    Stored as TINYINT(1) on the branding row, defaults to 1 (show) so the
+    behavior matches every release prior to the toggle being introduced.
+    Templates branch on this value to suppress the company name in titles,
+    headings, the sidebar brand text, and the PDF cover / running header /
+    Prepared-by cell. NULL or a missing key resolves to True so a freshly
+    upgraded DB without the column populated yet keeps showing the name."""
+    v = b.get(key)
+    if v is None:
+        return True
+    try:
+        return int(v) != 0
+    except (TypeError, ValueError):
+        return True
+
+
 def get_web() -> dict:
     """Resolved web brand: when web_mode == 'dark', dark defaults win
     regardless of any custom colors set; otherwise the user values are
@@ -102,6 +120,7 @@ def get_web() -> dict:
     # (see resolve_web_header_logo_kind).
     light_logo = b.get("web_header_logo_filename")
     dark_logo  = b.get("web_header_logo_dark_filename")
+    show_company = _show_company_name(b, "web_show_company_name")
     if mode == "dark":
         d = DARK_DEFAULTS
         return {
@@ -116,6 +135,7 @@ def get_web() -> dict:
             "sev_info":     d["sev_info"],
             "header_logo_filename": light_logo,
             "header_logo_dark_filename": dark_logo,
+            "show_company_name": show_company,
         }
     d = DARK_DEFAULTS
     return {
@@ -130,6 +150,7 @@ def get_web() -> dict:
         "sev_info":     b.get("web_sev_info")     or d["sev_info"],
         "header_logo_filename": light_logo,
         "header_logo_dark_filename": dark_logo,
+        "show_company_name": show_company,
     }
 
 
@@ -237,6 +258,12 @@ def get_pdf() -> dict:
         # PDF logos: the legacy *_logo_filename columns are PDF-side
         "header_logo_filename": b.get("header_logo_filename"),
         "footer_logo_filename": b.get("footer_logo_filename"),
+        # When False, report.html omits the company name from the cover
+        # page H1, the running header, the document title, and the
+        # Prepared-by table cell. The contact email (if set) is still
+        # rendered on its own where it would otherwise sit alongside
+        # the company name.
+        "show_company_name": _show_company_name(b, "pdf_show_company_name"),
     }
 
 
@@ -257,9 +284,21 @@ def update(fields: dict) -> None:
         "web_sev_critical", "web_sev_high", "web_sev_medium",
         "web_sev_low", "web_sev_info",
     }
+    # Boolean (TINYINT) toggles. Handled separately because the generic
+    # branch below treats an empty string as NULL — that's the right
+    # behavior for nullable text/color columns, but these flags are
+    # NOT NULL with a 1 default and would 500 on UPDATE if NULLed.
+    bool_cols = {"web_show_company_name", "pdf_show_company_name"}
     sets = []
     params = []
     for k, v in fields.items():
+        if k in bool_cols:
+            # Accept "1"/"0", "true"/"false", "on"/"off", or raw ints.
+            s = str(v if v is not None else "").strip().lower()
+            truthy = s in ("1", "true", "yes", "on")
+            sets.append(f"{k} = %s")
+            params.append(1 if truthy else 0)
+            continue
         if k not in allowed:
             continue
         if k.endswith("_color"):

@@ -6809,6 +6809,7 @@ def admin_branding_save_web(
     web_sev_medium: str = Form(""),
     web_sev_low: str = Form(""),
     web_sev_info: str = Form(""),
+    web_show_company_name: str = Form("1"),
     default_theme: str = Form("dark"),
 ):
     if web_mode not in ("dark", "custom"):
@@ -6823,6 +6824,7 @@ def admin_branding_save_web(
         "web_sev_medium": web_sev_medium,
         "web_sev_low": web_sev_low,
         "web_sev_info": web_sev_info,
+        "web_show_company_name": web_show_company_name,
     })
     # Persist the operator-chosen default theme alongside the rest of the
     # web branding form. branding_mod.set_default_theme() handles
@@ -6847,6 +6849,7 @@ def admin_branding_save_pdf(
     pdf_sev_medium: str = Form(""),
     pdf_sev_low: str = Form(""),
     pdf_sev_info: str = Form(""),
+    pdf_show_company_name: str = Form("1"),
 ):
     branding_mod.update({
         "primary_color": primary_color,
@@ -6862,6 +6865,7 @@ def admin_branding_save_pdf(
         "pdf_sev_medium": pdf_sev_medium,
         "pdf_sev_low": pdf_sev_low,
         "pdf_sev_info": pdf_sev_info,
+        "pdf_show_company_name": pdf_show_company_name,
     })
     return redirect("/admin/branding/pdf?msg=pdf+branding+saved")
 

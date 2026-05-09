@@ -44,6 +44,8 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
         "pdf_sev_medium", "pdf_sev_low", "pdf_sev_info",
         "pdf_cover_text_color", "pdf_header_color", "pdf_body_color",
         "pdf_link_color",
+        # Per-surface "show the company name?" toggles. See db/schema.sql.
+        "web_show_company_name", "pdf_show_company_name",
         "updated_at",
     },
     "users": {

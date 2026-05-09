@@ -13,7 +13,10 @@
   <p class="muted small">Approximation — the actual PDF uses paged-media CSS that browsers can't render perfectly. Generate a PDF after saving to see the final output.</p>
   <div style="border:1px solid var(--border); border-radius:6px; padding:1em; margin-top:.5em; background:#fff; color:#1f2630">
     <h3 style="font-family: {{ pdf.font }}; color: {{ pdf.primary }}; margin:0 0 .3em; font-size:1.4em">
-      {{ brand.company_name or "nextgen-dast" }} — Penetration Test Report
+      {# Live preview reflects the "Show company name" toggle. When it's off
+         the report drops the leading "<Company> — " segment and the heading
+         reads simply "Penetration Test Report". #}
+      {% if pdf.show_company_name %}{{ brand.company_name or "nextgen-dast" }} — {% endif %}Penetration Test Report
     </h3>
     <p style="font-family: {{ pdf.font }}; margin:0 0 1em; color:#555; font-size:.9em">
       Sample heading on white paper, primary color.
@@ -61,6 +64,32 @@
 <section class="card">
   <h2>Theme</h2>
   <form method="post" action="{{ base }}/admin/branding/pdf">
+    {# Show / Don't show the company name in the PDF. When OFF, the cover
+       page H1, the running header at the top of every page, the document
+       <title>, and the "Prepared by" cell drop the company name. The
+       contact email (if set) still appears on its own. Independent from
+       the web-app toggle so an operator can keep the dashboard branded
+       while shipping a brand-neutral PDF. #}
+    <fieldset style="margin-top:.2em; padding:.6em .8em; border:1px solid #dde2eb; border-radius:6px">
+      <legend style="padding:0 .4em">Company name in PDF report</legend>
+      <p class="muted small" style="margin:.2em 0 .6em">
+        Controls the cover page heading, every page's running header, the
+        document title, and the Prepared-by row. Example: with this off,
+        the cover reads <em>Penetration Test Report</em> instead of
+        <em>HackRange — Penetration Test Report</em>.
+      </p>
+      <label style="display:inline-block; margin-right:1.2em">
+        <input type="radio" name="pdf_show_company_name" value="1"
+               {% if pdf.show_company_name %}checked{% endif %}>
+        Show company name
+      </label>
+      <label style="display:inline-block">
+        <input type="radio" name="pdf_show_company_name" value="0"
+               {% if not pdf.show_company_name %}checked{% endif %}>
+        Do not show company name
+      </label>
+    </fieldset>
+
     <label>Font family (paper-friendly stack — Liberation Sans / DejaVu / generic)
       <input name="pdf_font_family" value="{{ brand.pdf_font_family or '' }}"
              placeholder="'Liberation Sans', 'DejaVu Sans', sans-serif">

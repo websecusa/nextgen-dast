@@ -18,7 +18,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Sign in — {{ (brand.company_name if brand else None) or "nextgen-dast" }}</title>
+  {# The "Show company name" toggle on the web branding page hides the
+     name from the login page too — the page title falls back to the
+     product name so the browser tab still reads as something coherent. #}
+  <title>Sign in — {% if web.show_company_name %}{{ (brand.company_name if brand else None) or "nextgen-dast" }}{% else %}nextgen-dast{% endif %}</title>
   {# Same cache-bust value as base.html so a CSS-only redeploy invalidates
      the login page at the same time. #}
   <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260504a">
@@ -64,7 +67,12 @@
          onerror="this.style.display='none'">
   </p>
   {% endif %}
+  {# Splash heading mirrors the sidebar brand: hidden when the operator
+     turns off "Show company name" so the only identifier on the login
+     page is whichever logo (if any) was uploaded above. #}
+  {% if web.show_company_name %}
   <h1 style="text-align:center; color: var(--accent); font-weight:700">{{ (brand.company_name if brand else None) or "nextgen-dast" }}</h1>
+  {% endif %}
   <section class="card">
     <h2>Sign in</h2>
     {% if error %}<p class="err">{{ error }}</p>{% endif %}
