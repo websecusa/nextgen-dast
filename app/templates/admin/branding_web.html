@@ -51,14 +51,14 @@
         <form method="post" action="{{ base }}/admin/branding/logo/web_header/delete"
               onsubmit="return confirm('Remove light-theme web logo?')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="warn">Remove</button>
+          <button type="submit" class="warn" style="align-self:flex-start">Remove</button>
         </form>
       {% else %}<p class="muted">— no light-theme logo set —</p>{% endif %}
       <form method="post" action="{{ base }}/admin/branding/logo/web_header"
             enctype="multipart/form-data" style="margin-top:.6em">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Upload (PNG/JPEG, ≤ 2 MB) <input type="file" name="file" accept="image/png,image/jpeg" required></label>
-        <button type="submit">Upload</button>
+        <button type="submit" style="align-self:flex-start">Upload</button>
       </form>
     </div>
 
@@ -73,14 +73,14 @@
         <form method="post" action="{{ base }}/admin/branding/logo/web_header_dark/delete"
               onsubmit="return confirm('Remove dark-theme web logo?')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="warn">Remove</button>
+          <button type="submit" class="warn" style="align-self:flex-start">Remove</button>
         </form>
       {% else %}<p class="muted">— no dark-theme logo set —</p>{% endif %}
       <form method="post" action="{{ base }}/admin/branding/logo/web_header_dark"
             enctype="multipart/form-data" style="margin-top:.6em">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>Upload (PNG/JPEG, ≤ 2 MB) <input type="file" name="file" accept="image/png,image/jpeg" required></label>
-        <button type="submit">Upload</button>
+        <button type="submit" style="align-self:flex-start">Upload</button>
       </form>
     </div>
 
@@ -164,7 +164,7 @@
       <label>Accent color <input type="color" name="web_accent_color" value="{{ brand.web_accent_color or web.accent }}" style="height:2.4em;padding:0"></label>
     </div>
 
-    <button type="submit" style="margin-top:1em">Save web theme</button>
+    <button type="submit" style="margin-top:1em; align-self:flex-start">Save web theme</button>
   </form>
 </section>
 {% endblock %}

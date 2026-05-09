@@ -71,7 +71,9 @@ own colors, fonts, severity palette, and logo.</p>
     <label>Disclaimer <span class="muted small">(optional &mdash; printed in PDF + app footer)</span>
       <textarea name="disclaimer" rows="3">{{ brand.disclaimer or '' }}</textarea>
     </label>
-    <button type="submit">Save shared</button>
+    {# style.css:505 makes form a column-flex; pin the button to
+       flex-start so it sizes to its label, not to the card width. #}
+    <button type="submit" style="align-self:flex-start">Save shared</button>
   </form>
 </section>
 {% endblock %}

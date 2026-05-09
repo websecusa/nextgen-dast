@@ -48,7 +48,7 @@
       <textarea name="notes" rows="2" maxlength="2000"
                 placeholder="Who to contact, what this token is used for."></textarea>
     </label>
-    <button type="submit">Issue token</button>
+    <button type="submit" style="align-self:flex-start">Issue token</button>
   </form>
   <p class="muted small">
     A token without an IP whitelist is unusable by design; the form will
@@ -106,7 +106,7 @@
               <label>Notes
                 <textarea name="notes" rows="2" maxlength="2000">{{ t.notes or '' }}</textarea>
               </label>
-              <button type="submit">Save</button>
+              <button type="submit" style="align-self:flex-start">Save</button>
             </form>
           </details>
           <form method="post" style="display:inline; margin-top:.4em"

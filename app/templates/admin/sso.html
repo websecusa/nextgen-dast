@@ -184,7 +184,10 @@ SP Metadata URL (optional):     {{ derived_sp.metadata_url }}</textarea>
     </label>
 
     <p style="margin-top:1.4em">
-      <button type="submit">Save SSO configuration</button>
+      {# style.css:505 puts forms in a flex column which would otherwise
+         stretch the button across the whole card. Wrap in a <p> and
+         pin to flex-start to keep the button compact. #}
+      <button type="submit" style="align-self:flex-start">Save SSO configuration</button>
     </p>
   </form>
 </section>
