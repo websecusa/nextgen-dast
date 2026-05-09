@@ -57,9 +57,12 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
+import auth_recapture
 import db
+import flow_index
 import llm as llm_mod
 import spa_fallback
 
@@ -105,7 +108,7 @@ def build_telemetry(aid: int) -> dict:
     """
     a = db.query_one(
         "SELECT id, fqdn, profile, scan_http, scan_https, "
-        "creds_username, login_url, "
+        "creds_username, creds_password, login_url, "
         # Role-aware Enhanced-AI-Testing inputs. Both NULL on assessments
         # that didn't opt into the role-aware pass; render_role_context()
         # below collapses to an empty placeholder block in that case so
@@ -118,8 +121,8 @@ def build_telemetry(aid: int) -> dict:
         return {}
 
     findings = db.query_all(
-        "SELECT id, source_tool, severity, owasp_category, cwe, "
-        "title, description, evidence_url, evidence_method, raw_data, "
+        "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
+        "cwe, title, description, evidence_url, evidence_method, raw_data, "
         "validation_status "
         "FROM findings WHERE assessment_id=%s "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
@@ -147,6 +150,75 @@ def build_telemetry(aid: int) -> dict:
             except Exception:
                 rd_str = str(rd_raw)
         parsed.append({**f, "_raw": rd, "_raw_str": rd_str})
+
+    # ---- Attach response evidence from the proxy capture ------------------
+    #
+    # Every scanner that runs through the orchestrator is wrapped with our
+    # mitmproxy addon (proxy_addon.PentestAddon), which writes flows.jsonl
+    # plus per-flow request/response files into /data/scans/<scan_id>/.
+    # That capture has been on disk all along — but the per-tool parsers
+    # in app/findings.py never plumbed it back into raw_data, so the
+    # Enhanced-AI weakness pass saw "(no response bodies captured by
+    # scanners)" and, per its verbatim-quote rule, omitted every finding.
+    #
+    # FlowIndex reads each scan's flows.jsonl, matches by URL+method, and
+    # attaches a sanitized response_body_excerpt + status + content-type +
+    # interesting-headers slice into each finding's _raw dict. Existing
+    # _render_response_samples / _format_one_finding helpers already read
+    # those keys, so the LLM prompt populates automatically.
+    #
+    # Token-economy: the body excerpt is capped at PER_FINDING_QUOTE_MAX
+    # bytes per finding, and the prompt's MAX_RESPONSE_SAMPLES already
+    # bounds how many of these the LLM ever sees.
+    scan_ids = sorted({(f.get("source_scan_id") or "").strip()
+                        for f in findings if f.get("source_scan_id")})
+    scan_dirs = [Path("/data/scans") / sid for sid in scan_ids if sid]
+    flow_idx = flow_index.FlowIndex(scan_dirs)
+    attached = flow_index.attach_response_evidence(
+        parsed, flow_idx, max_body_bytes=PER_FINDING_QUOTE_MAX)
+    if attached:
+        logger.info(
+            "enhanced_ai: attached response evidence to %d/%d findings "
+            "across %d scan(s) (%d flows indexed)",
+            attached, len(parsed), flow_idx.scans_loaded,
+            flow_idx.flows_loaded)
+
+    # ---- Authenticated re-walk for high-value cluster URLs ----------------
+    #
+    # Even with credentials configured, scanners do not always probe every
+    # adjacent admin / api / settings path. auth_recapture takes the
+    # cluster URLs the FlowIndex did NOT cover, scores them by path
+    # token (admin > api > users > ... ), and GETs the top
+    # MAX_RECAPTURE with the same session cookie the challenge_runner
+    # uses, capturing status + headers + body excerpt. Bounded by URL
+    # cap and per-body byte cap, so worst-case prompt growth is small.
+    #
+    # The pass is a no-op when:
+    #   - the assessment has no creds, OR
+    #   - every high-value cluster URL is already in FlowIndex.
+    # Login failure is logged at DEBUG and treated as no-op (recapture is
+    # best-effort and must not break telemetry construction).
+    cookie_header = auth_recapture.resolve_session_cookie(
+        a.get("login_url"), a.get("creds_username"),
+        a.get("creds_password"))
+    if cookie_header:
+        recap_attached = auth_recapture.attach_recaptured_evidence(
+            parsed, flow_idx, cookie_header,
+            max_body_bytes=PER_FINDING_QUOTE_MAX)
+        if recap_attached:
+            logger.info(
+                "enhanced_ai: auth re-walk attached recaptured evidence "
+                "to %d additional finding(s)", recap_attached)
+
+    # Re-materialize _raw_str for any finding whose _raw dict picked up
+    # new keys, so the substring-search heuristics downstream see the
+    # injected response body too.
+    for f in parsed:
+        if f["_raw"]:
+            try:
+                f["_raw_str"] = json.dumps(f["_raw"], default=str)
+            except Exception:
+                pass
 
     # ---- SPA-fallback fingerprinting --------------------------------------
     #
@@ -237,8 +309,17 @@ def build_telemetry(aid: int) -> dict:
     # orchestrator's gate (premium + advanced + checkbox) reached this
     # module. Strings are stripped + length-capped at submit time
     # (server.py / api.py), so we trust them here without re-validating.
-    role_scope_text = (a.get("role_scope_description") or "").strip()
-    role_restrict_text = (a.get("role_restrictions") or "").strip()
+    #
+    # Then run _sanitize_role_text to strip any output-gating directives
+    # the operator may have wedged in ("ONLY SHOW FINDINGS WITH A
+    # CONFIDENCE SCORE OF 0.75…"). Those directives belong in the code-
+    # owned RUNTIME_SAFETY_PREAMBLE, not in role text — when they live in
+    # both places the weakness pass collapses to [] because the role
+    # directive contradicts the candidate-vs-verdict contract.
+    role_scope_text = _sanitize_role_text(
+        (a.get("role_scope_description") or "").strip())
+    role_restrict_text = _sanitize_role_text(
+        (a.get("role_restrictions") or "").strip())
     has_role_context = bool(role_scope_text and role_restrict_text)
 
     summary = {
@@ -479,10 +560,19 @@ def _render_object_ids(parsed: list[dict]) -> str:
 
 def _render_response_samples(parsed: list[dict],
                               only_authenticated: bool = False) -> str:
+    """Render up to MAX_RESPONSE_SAMPLES (status, content-type, headers,
+    body excerpt) blocks for findings whose proxy capture surfaced a
+    body. The status / content-type / interesting-headers context is
+    cheap (a few hundred bytes total) and gives the LLM enough
+    fingerprinting signal to disambiguate a real handler from an SPA
+    fallback echo without needing to quote the body for tech inference.
+    The body itself is what satisfies the verbatim-quote rule for
+    vulnerability evidence."""
     out: list[str] = []
     for f in parsed:
         rd = f.get("_raw") or {}
-        # Look for response-shaped keys in raw_data
+        # Look for response-shaped keys in raw_data — both the canonical
+        # key flow_index now writes and the legacy keys some scanners use.
         body = (rd.get("response_body_excerpt")
                 or (rd.get("evidence") or {}).get("response_body_excerpt")
                 or rd.get("body") or "")
@@ -490,7 +580,24 @@ def _render_response_samples(parsed: list[dict],
             continue
         body = body if len(body) <= PER_FINDING_QUOTE_MAX else \
                 body[:PER_FINDING_QUOTE_MAX] + "..."
-        out.append(f"#{f['id']} {f.get('evidence_url')}\n  {body}")
+        # Header / status preamble — short (~200 bytes typical) but high
+        # signal. Status alone tells the LLM whether the URL was
+        # accessible, redirected, denied, or errored.
+        meta_lines: list[str] = []
+        status = rd.get("response_status")
+        if status is not None:
+            meta_lines.append(f"  status: {status}")
+        ctype = rd.get("response_content_type")
+        if ctype:
+            meta_lines.append(f"  content-type: {ctype}")
+        hdrs = rd.get("response_headers_excerpt")
+        if hdrs:
+            indented = "\n".join(f"    {h}" for h in hdrs.splitlines() if h)
+            meta_lines.append(f"  headers:\n{indented}")
+        meta = ("\n".join(meta_lines) + "\n") if meta_lines else ""
+        out.append(f"#{f['id']} {f.get('evidence_url')}\n"
+                   f"{meta}"
+                   f"  body: {body}")
         if len(out) >= MAX_RESPONSE_SAMPLES:
             break
     return "\n\n".join(out) or "(no response bodies captured by scanners)"
@@ -888,21 +995,35 @@ def render_user_prompt(template: str, summary: dict) -> str:
 
 
 # Runtime safety preamble prepended to every weakness-discovery user
-# prompt at call time. It re-asserts two anti-hallucination rules
+# prompt at call time. It re-asserts the anti-hallucination rules
 # already present in HEADER, and injects the per-host SPA-fallback
 # warning so the LLM sees the warning even when the operator has
 # customized the user template to drop the {spa_fallback_warning}
 # placeholder. Keeping this in code (not in the seeded HEADER) means
 # operators can edit either prompt freely without removing the safety
 # floor.
+#
+# The preamble is also where the candidate-vs-verdict contract lives:
+# weakness-pass output is a CANDIDATE list (the fidelity stage validates),
+# so the floor is 0.5 with telemetry-only inferences capped at 0.6.
+# Putting these rules here (rather than in the operator-editable user
+# template or the per-assessment role context) keeps every scan running
+# under one consistent contract regardless of what an operator typed
+# into the role fields.
 _RUNTIME_SAFETY_PREAMBLE = """\
 === RUNTIME SAFETY CONTEXT (do NOT ignore) ===
 
-1. EVIDENCE MUST BE A VERBATIM QUOTE. Every value you put in the
-   `evidence` field must be an exact substring of the INPUT block
-   above. Do not paraphrase, summarize, or extrapolate. If you cannot
-   point to a verbatim quote that supports the finding, omit the
-   finding.
+1. EVIDENCE RULE.
+   - Preferred: every value in the `evidence` field is an exact
+     substring of the INPUT block above (status / headers / body
+     excerpts shown under RESPONSE SAMPLES, or raw_data quoted under
+     a finding row).
+   - Fallback (when no body excerpt was captured for the URL you are
+     reasoning about): cite the finding ID(s) and the request line the
+     inference rests on, set the candidate's verdict reasoning to begin
+     with the literal phrase "inferred-from-telemetry:", and CAP its
+     confidence at 0.6. Never fabricate a body quote that is not in
+     the INPUT.
 
 2. PATH EXISTENCE IS NOT EVIDENCE. An HTTP 200 response on a path is
    NOT proof that a particular technology, framework, or admin
@@ -916,9 +1037,68 @@ _RUNTIME_SAFETY_PREAMBLE = """\
 3. SPA-FALLBACK HOSTS DETECTED THIS RUN
 {spa_fallback_warning}
 
+4. CANDIDATE OUTPUT, NOT VERDICTS. Your role here is candidate
+   discovery — a downstream fidelity pass will re-evaluate each item
+   with stricter rules and assign the final verdict. Emit candidates
+   with confidence >= 0.5; do NOT silently drop a candidate just
+   because you are unsure. Prefer fewer high-value candidates
+   (cross-tenant access, privilege escalation, auth bypass,
+   business-logic abuse, unauthenticated mutation, exposure of
+   secrets/PII) over many low-value ones.
+
 === END RUNTIME SAFETY CONTEXT ===
 
 """
+
+
+# Operator-supplied role text frequently has output-gating directives
+# wedged into it ("ONLY SHOW FINDINGS WITH A CONFIDENCE SCORE OF 0.75
+# OR HIGHER", "DON'T REPORT IT", etc.). Those directives belong in the
+# code-owned RUNTIME_SAFETY_PREAMBLE — when they live in the role text
+# they (a) collide with the candidate-vs-verdict contract above, (b)
+# get duplicated across both role_scope and role_restrictions because
+# the operator pasted them into both fields, and (c) silently invert
+# the weakness pass into a one-shot validator that returns [] when
+# evidence is incomplete.
+#
+# This sanitizer strips the known forms at prompt-render time so that
+# already-saved assessments self-heal without requiring a DB migration
+# or operator edit. Conservative — only matches the literal output-
+# gating phrases, never touches descriptive scope text.
+_ROLE_GATING_PHRASES = (
+    re.compile(
+        r"^\s*ONLY\s+SHOW\s+FINDINGS\s+WITH\s+A\s+CONFIDENCE\s+SCORE\s+"
+        r"OF\s+0?\.?\d+\s+OR\s+HIGHER[^\n]*\n?",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*IF\s+CONFIDENCE\s+SCORE\s+IS\s+LESS\s+THAN\s+0?\.?\d+[^\n]*\n?",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*DON.?T\s+REPORT\s+IT[^\n]*\n?",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+)
+
+
+def _sanitize_role_text(text: str) -> str:
+    """Strip output-gating directives from operator-supplied role text.
+
+    These directives live in the prompt preamble (one source of truth);
+    when they are also in the role text they fight the preamble's
+    candidate-vs-verdict contract and the weakness pass returns []. This
+    keeps existing assessments working without forcing the operator to
+    re-edit them."""
+    if not text:
+        return text
+    out = text
+    for pat in _ROLE_GATING_PHRASES:
+        out = pat.sub("", out)
+    # Collapse runs of blank lines left behind by the deletions so the
+    # role block does not render with awkward gaps.
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
 
 
 def _build_runtime_user_prompt(template: str, summary: dict) -> str:
@@ -1367,6 +1547,36 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
 
     if budget.tripped:
         summary["budget_tripped"] = True
+
+    # ---- candidate-validation pass ----------------------------------------
+    #
+    # Weakness-pass findings land with validation_status='unvalidated'.
+    # Before the LLM fidelity pass runs (and pays for input tokens to
+    # judge each one), give them through the safe-only probe runner --
+    # for any candidate whose CWE / title matches a toolkit probe, the
+    # probe will execute against the live target and write a verdict
+    # into validation_status + validation_evidence. The fidelity prompt
+    # already surfaces those fields per-finding, so the LLM grades
+    # candidates that have probe evidence with much tighter precision
+    # than candidates it must judge from telemetry alone.
+    #
+    # safe_only=True restricts to read-only probes (manifest declares
+    # safety_class='read-only'), so this never mutates target state.
+    # The orchestrator already runs the same pass once after scanners
+    # finish; re-running here only touches the NEW unvalidated rows
+    # produced by the weakness loop because challenge_runner skips any
+    # finding whose validation_status is already non-default.
+    if summary["weakness_findings_inserted"] > 0:
+        try:
+            from scripts import challenge_runner as _cr
+            _cr.run(aid, safe_only=True)
+            summary["candidate_validation_run"] = True
+        except Exception as e:
+            # Probe failures must not stop the fidelity pass. Surface
+            # the error onto the assessment but keep going so the LLM
+            # still gets to grade what it produced.
+            summary["errors"].append(f"candidate validation failed: {e!r}")
+            summary["candidate_validation_run"] = False
 
     # ---- fidelity loop ----------------------------------------------------
     fidelity_rows = db.query_all(
