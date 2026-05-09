@@ -76,6 +76,35 @@
   <section class="card">
     <h2>Sign in</h2>
     {% if error %}<p class="err">{{ error }}</p>{% endif %}
+
+    {# Force-SAML bypass banner. Rendered only when the bypass file
+       (/data/.saml_bypass) is present AND the operator has force_saml
+       turned on — i.e. the install is in "broken-glass" mode. The
+       banner exists so anyone who reaches /login knows they are on the
+       fallback path and that it needs to be reverted once SSO is fixed
+       (delete /data/.saml_bypass). #}
+    {% if saml_bypass_active %}
+    <p class="err" style="background:#3b3000; color:#ffd266; border-left:4px solid #ffb300; padding:.6em .8em; margin:.6em 0 1em">
+      <strong>SSO bypass is active.</strong>
+      Local password login is enabled because <code>/data/.saml_bypass</code>
+      exists on this host. Remove that file once SSO is healthy again.
+    </p>
+    {% endif %}
+
+    {# When SSO is enabled we surface the SP-initiated redirect first.
+       The local form below it is hidden when force_saml is on AND the
+       bypass file is absent — see saml_local_login_visible from ctx. #}
+    {% if saml_enabled %}
+    <p style="margin:.4em 0 1em">
+      <a href="{{ base }}/saml/login{% if next %}?next={{ next | urlencode }}{% endif %}"
+         class="cta" style="display:block; text-align:center; padding:.7em 1em; background:var(--accent); color:#fff; border-radius:6px; text-decoration:none; font-weight:600">
+        Sign in with SSO
+      </a>
+    </p>
+    {% endif %}
+
+    {% if saml_local_login_visible %}
+    {% if saml_enabled %}<p class="muted small" style="text-align:center; margin:.4em 0">— or sign in with a local account —</p>{% endif %}
     <form method="post" action="{{ base }}/login">
       <input type="hidden" name="next" value="{{ next }}">
       <label>Username
@@ -86,6 +115,19 @@
       </label>
       <button type="submit">Sign in</button>
     </form>
+    {% else %}
+    {# Force-SAML on, no bypass. The local form is suppressed; only the
+       SSO button above is reachable. The hint below is the only place
+       the bypass-file mechanism is documented in the UI, so an operator
+       who hits a broken IdP and digs through the login HTML can find
+       the recovery path. #}
+    <p class="muted small" style="margin-top:1em">
+      Single sign-on is required for this install. To re-enable local
+      login during an SSO outage, create the file
+      <code>/data/.saml_bypass</code> on the host running the
+      container.
+    </p>
+    {% endif %}
   </section>
 </main>
 </body>

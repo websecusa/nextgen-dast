@@ -1,0 +1,67 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  Login second step. Rendered after a successful password check when the
+  user has TOTP enrolled. The hidden `step_token` carries the user id +
+  CSRF nonce + an expiry signed with APP_SECRET so the user identity
+  cannot be forged between steps. Fails closed: a stale or tampered
+  token rejects the submission and the user has to start over from
+  /login.
+
+  Theme handling matches login.html exactly (same CSS variable rebind +
+  body class) so the second step inherits the same theme/logo/branding
+  as the first.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Two-factor verification — {% if web.show_company_name %}{{ (brand.company_name if brand else None) or "nextgen-dast" }}{% else %}nextgen-dast{% endif %}</title>
+  <link rel="stylesheet" href="{{ base }}/static/style.css?b=20260504a">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --accent:   {{ web.primary }};
+      --accent-2: {{ web.accent }};
+      --green:    {{ web.accent }};
+    }
+    body { font-family: {{ web.font|safe }}; }
+    html { background: transparent; }
+    body { background: var(--bg); color: var(--text); margin: 0;
+           min-height: 100vh; }
+  </style>
+</head>
+<body class="theme-{{ user_theme | default('dark') }}">
+<main style="max-width:420px; margin:6em auto; padding:0 1.2em">
+  {% set logo_kind = web_logo_kind
+                     or ('header' if (brand and brand.header_logo_filename) else '') %}
+  {% if logo_kind %}
+  <p style="text-align:center; margin-bottom:1em">
+    <img src="{{ base }}/branding/logo/{{ logo_kind }}?v={{ logo_v(logo_kind) }}" alt=""
+         style="max-height:64px; max-width:100%; width:auto; height:auto;
+                object-fit:contain"
+         onerror="this.style.display='none'">
+  </p>
+  {% endif %}
+  <section class="card">
+    <h2>Two-factor verification</h2>
+    <p class="muted small">Enter the 6-digit code from your authenticator app to finish signing in.</p>
+    {% if error %}<p class="err">{{ error }}</p>{% endif %}
+    <form method="post" action="{{ base }}/login/totp">
+      <input type="hidden" name="step_token" value="{{ step_token }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label>6-digit code
+        <input name="code" pattern="[0-9 ]{6,8}" required autofocus
+               inputmode="numeric" autocomplete="one-time-code"
+               placeholder="123 456" style="font-family:monospace; letter-spacing:.1em">
+      </label>
+      <button type="submit">Verify and sign in</button>
+    </form>
+    <p class="muted small" style="margin-top:1em">
+      <a href="{{ base }}/login">← back to sign-in</a>
+    </p>
+  </section>
+</main>
+</body>
+</html>

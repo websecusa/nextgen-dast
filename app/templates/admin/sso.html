@@ -1,0 +1,265 @@
+{#
+  Author: Tim Rice <tim.j.rice@hackrange.com>
+  Part of nextgen-dast. See README.md for license and overall architecture.
+
+  SAML 2.0 SP configuration. The form is split into three groups:
+
+    1. Master switches  — enabled, force-SAML, IdP label
+    2. IdP details      — entity ID, SSO URL, SLO URL, X.509 cert
+    3. SP details       — entity ID, ACS URL, SLO URL (auto-derived
+                          from the install host name; operator can
+                          override but rarely needs to)
+
+  When the operator picks "Use Okta", JavaScript swaps every IdP-field
+  label into Okta's nomenclature and substitutes Okta-shaped
+  placeholders. Both labels and protocol stay the same — Okta just
+  uses "IdP Entity ID" / "IdP Single Sign-On URL" / etc., which is what
+  every Okta operator copies and pastes from the "View SAML setup
+  instructions" panel.
+
+  Inline help text on each field describes exactly which Okta panel it
+  maps to so the operator does not need to read Okta docs to wire this
+  up.
+#}
+{% extends "base.html" %}
+{% block content %}
+<h1>Single sign-on (SAML 2.0)</h1>
+{% if msg %}<p class="muted"><code>{{ msg }}</code></p>{% endif %}
+
+{% if cfg.enabled and cfg.force_saml and saml_bypass_active %}
+<p class="err" style="background:#3b3000; color:#ffd266; border-left:4px solid #ffb300; padding:.6em .8em">
+  <strong>SSO bypass is active.</strong> The bypass file
+  <code>/data/.saml_bypass</code> is present, so the local
+  <code>/login</code> form remains usable even with force-SAML on.
+  Remove the file once SSO is healthy.
+</p>
+{% endif %}
+
+<section class="card">
+  <h2>Master switches</h2>
+  <form method="post" action="{{ base }}/admin/sso">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <fieldset style="padding:.6em .8em; border:1px solid #dde2eb; border-radius:6px">
+      <legend style="padding:0 .4em">SSO mode</legend>
+      <p class="muted small" style="margin:.2em 0 .8em">
+        <strong>Enable SAML 2.0</strong> turns on the
+        <code>/saml/*</code> endpoints and adds a "Sign in with SSO"
+        button to the login page. <strong>Force SAML only</strong>
+        also disables local password login — except when the bypass
+        file <code>/data/.saml_bypass</code> exists on the host, which
+        re-enables <code>/login</code> until you remove the file.
+        Always test SSO with a local backup admin signed in elsewhere
+        before flipping force on.
+      </p>
+      <label style="display:block; margin:.4em 0">
+        <input type="checkbox" name="enabled" value="1"
+               {% if cfg.enabled %}checked{% endif %}>
+        Enable SAML 2.0
+      </label>
+      <label style="display:block; margin:.4em 0">
+        <input type="checkbox" name="force_saml" value="1"
+               {% if cfg.force_saml %}checked{% endif %}>
+        Force SAML only (disable local password login)
+      </label>
+    </fieldset>
+
+    <fieldset style="margin-top:1em; padding:.6em .8em; border:1px solid #dde2eb; border-radius:6px">
+      <legend style="padding:0 .4em">IdP vendor</legend>
+      <p class="muted small" style="margin:.2em 0 .8em">
+        Picking <strong>Use Okta</strong> changes the field labels and
+        placeholders below to match the names Okta uses in its "View
+        SAML setup instructions" panel. The wire protocol is standard
+        SAML 2.0 either way — this only affects what the form looks
+        like.
+      </p>
+      <label style="display:inline-block; margin-right:1.2em">
+        <input type="radio" name="idp_label" value="generic"
+               {% if cfg.idp_label != 'okta' %}checked{% endif %}>
+        Generic SAML 2.0
+      </label>
+      <label style="display:inline-block">
+        <input type="radio" name="idp_label" value="okta"
+               {% if cfg.idp_label == 'okta' %}checked{% endif %}>
+        Use Okta
+      </label>
+    </fieldset>
+
+    <h3 style="margin-top:1.4em">IdP details</h3>
+    <p class="muted small">
+      Paste these from your Okta application's
+      <em>Sign On → SAML Signing Certificates → View SAML setup
+      instructions</em> panel (or your IdP's equivalent). All four
+      fields are required.
+    </p>
+
+    <label>
+      <span class="lbl-idp-entity">IdP Entity ID</span>
+      <input name="idp_entity_id" required value="{{ cfg.idp_entity_id or '' }}"
+             class="ph-idp-entity"
+             placeholder="https://idp.example.com/entity">
+      <small class="muted">
+        From Okta:
+        <em>Identity Provider Issuer</em>. Looks like
+        <code>http://www.okta.com/exk1abcd1234EFGH5678</code>.
+      </small>
+    </label>
+
+    <label>
+      <span class="lbl-idp-sso">IdP SSO URL</span>
+      <input name="idp_sso_url" required value="{{ cfg.idp_sso_url or '' }}"
+             class="ph-idp-sso"
+             placeholder="https://idp.example.com/sso/saml">
+      <small class="muted">
+        From Okta:
+        <em>Identity Provider Single Sign-On URL</em>. Looks like
+        <code>https://example.okta.com/app/example_app/exk1abcd1234EFGH5678/sso/saml</code>.
+      </small>
+    </label>
+
+    <label>
+      <span class="lbl-idp-slo">IdP SLO URL <span class="muted">(optional)</span></span>
+      <input name="idp_slo_url" value="{{ cfg.idp_slo_url or '' }}"
+             class="ph-idp-slo"
+             placeholder="https://idp.example.com/slo/saml">
+      <small class="muted">
+        Leave blank to skip Single Logout. With this set, signing out
+        of nextgen-dast also signs the user out of Okta. From Okta:
+        <em>Identity Provider Single Logout URL</em>.
+      </small>
+    </label>
+
+    <label>
+      <span class="lbl-idp-cert">IdP X.509 Certificate</span>
+      <textarea name="idp_x509_cert" required rows="6"
+                class="ph-idp-cert"
+                placeholder="-----BEGIN CERTIFICATE-----&#10;MIIDpDCCAoygAwIBAgIGAYbn7T...&#10;-----END CERTIFICATE-----">{{ cfg.idp_x509_cert or '' }}</textarea>
+      <small class="muted">
+        Paste the entire PEM block including the
+        <code>-----BEGIN CERTIFICATE-----</code> /
+        <code>-----END CERTIFICATE-----</code> lines. From Okta:
+        <em>X.509 Certificate</em> on the SAML setup instructions
+        page.
+      </small>
+    </label>
+
+    <h3 style="margin-top:1.4em">SP details (configure in Okta)</h3>
+    <p class="muted small">
+      These three values describe nextgen-dast to your IdP. The
+      defaults below are auto-filled from this install's hostname so
+      you can copy them straight into Okta's app wizard. Leave the
+      inputs blank to use the auto-derived values; override only when
+      a non-standard proxy mangles the request host.
+    </p>
+
+    <label>
+      Auto-derived defaults (copy into Okta)
+      <textarea readonly rows="4" style="font-family:monospace; font-size:.92em">SP Entity ID:                   {{ derived_sp.entity_id }}
+SP Assertion Consumer Service:  {{ derived_sp.acs_url }}
+SP Single Logout URL:           {{ derived_sp.slo_url }}
+SP Metadata URL (optional):     {{ derived_sp.metadata_url }}</textarea>
+      <small class="muted">
+        Okta's app wizard accepts the SP Metadata URL above as a
+        one-shot import; it will pre-fill the other three SP fields
+        from the XML document.
+      </small>
+    </label>
+
+    <label>
+      SP Entity ID <span class="muted">(override; blank uses default above)</span>
+      <input name="sp_entity_id" value="{{ cfg.sp_entity_id or '' }}"
+             placeholder="{{ derived_sp.entity_id }}">
+    </label>
+
+    <label>
+      SP Assertion Consumer Service URL <span class="muted">(override)</span>
+      <input name="sp_acs_url" value="{{ cfg.sp_acs_url or '' }}"
+             placeholder="{{ derived_sp.acs_url }}">
+    </label>
+
+    <label>
+      SP Single Logout URL <span class="muted">(override)</span>
+      <input name="sp_slo_url" value="{{ cfg.sp_slo_url or '' }}"
+             placeholder="{{ derived_sp.slo_url }}">
+    </label>
+
+    <p style="margin-top:1.4em">
+      <button type="submit">Save SSO configuration</button>
+    </p>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Test the IdP round-trip</h2>
+  <p class="muted small">
+    Once saved, click below to start a test SP-initiated login. You
+    will be sent to the IdP, prompted to sign in there if you are not
+    already, and bounced back to nextgen-dast. The first successful
+    login auto-creates a local user with role <code>readonly</code>
+    matching your Okta NameID; promote it from
+    <a href="{{ base }}/admin/users">Manage users</a> afterwards.
+  </p>
+  <p>
+    <a href="{{ base }}/saml/login" class="cta"
+       style="display:inline-block; padding:.5em 1em; background:var(--accent); color:#fff; border-radius:6px; text-decoration:none">
+      Try SP-initiated SSO →
+    </a>
+  </p>
+</section>
+
+{# --- Okta vs Generic relabel logic ------------------------------------ #}
+{# Pure DOM manipulation, no external JS deps. Driven by the radio
+   group above so flipping the toggle relabels the form in real time
+   without a page reload. Same labels render server-side too if the
+   page is opened with idp_label='okta' already saved. #}
+<script>
+(function() {
+  const labels = {
+    okta: {
+      'lbl-idp-entity':  'IdP Entity ID (Okta: Identity Provider Issuer)',
+      'lbl-idp-sso':     'IdP Single Sign-On URL (Okta: SSO URL)',
+      'lbl-idp-slo':     'IdP Single Logout URL (optional, Okta: SLO URL)',
+      'lbl-idp-cert':    'IdP X.509 Certificate (Okta: SAML Signing Certificate)',
+    },
+    generic: {
+      'lbl-idp-entity':  'IdP Entity ID',
+      'lbl-idp-sso':     'IdP SSO URL',
+      'lbl-idp-slo':     'IdP SLO URL (optional)',
+      'lbl-idp-cert':    'IdP X.509 Certificate',
+    }
+  };
+  const placeholders = {
+    okta: {
+      'ph-idp-entity':  'http://www.okta.com/exk1abcd1234EFGH5678',
+      'ph-idp-sso':     'https://example.okta.com/app/example_app/exk1abcd1234EFGH5678/sso/saml',
+      'ph-idp-slo':     'https://example.okta.com/app/example_app/exk1abcd1234EFGH5678/slo/saml',
+      'ph-idp-cert':    '-----BEGIN CERTIFICATE-----\nMIIDpDCCAoygAwIBAgIGAYbn7T...\n-----END CERTIFICATE-----',
+    },
+    generic: {
+      'ph-idp-entity':  'https://idp.example.com/entity',
+      'ph-idp-sso':     'https://idp.example.com/sso/saml',
+      'ph-idp-slo':     'https://idp.example.com/slo/saml',
+      'ph-idp-cert':    '-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----',
+    }
+  };
+  function apply(mode) {
+    const L = labels[mode] || labels.generic;
+    for (const cls in L) {
+      document.querySelectorAll('.' + cls).forEach(el => { el.textContent = L[cls]; });
+    }
+    const P = placeholders[mode] || placeholders.generic;
+    for (const cls in P) {
+      document.querySelectorAll('.' + cls).forEach(el => {
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') el.placeholder = P[cls];
+      });
+    }
+  }
+  document.querySelectorAll('input[name="idp_label"]').forEach(r => {
+    r.addEventListener('change', () => apply(r.value));
+  });
+  // Initial paint matches the server-rendered selection.
+  const checked = document.querySelector('input[name="idp_label"]:checked');
+  if (checked) apply(checked.value);
+})();
+</script>
+{% endblock %}

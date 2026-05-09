@@ -40,9 +40,11 @@ import dbops as dbops_mod
 import enrichment as enrichment_mod
 import llm as llm_mod
 import reports as reports_mod
+import saml as saml_mod
 import schedules as schedules_mod
 import sessions
 import toolkit as toolkit_mod
+import totp as totp_mod
 import useragent as ua_mod
 import users as users_mod
 
@@ -757,7 +759,13 @@ app.include_router(api_mod.router)
 # Public paths (no login required). Everything else requires a valid session.
 # /api/v1 is also listed here because the API surface enforces its OWN token-
 # based authentication (see app/api.py); the session cookie does not apply.
-PUBLIC_PATHS = ("/login", "/health", "/static", "/branding/logo", "/api")
+PUBLIC_PATHS = ("/login", "/health", "/static", "/branding/logo", "/api",
+                # SAML ACS / SLS / metadata are reached without an
+                # active session: ACS is the IdP redirecting an
+                # unauthenticated user back with a SAMLResponse, SLS
+                # may be hit by an IdP-initiated logout, metadata is
+                # an XML document the IdP fetches during config.
+                "/saml")
 ADMIN_PATHS = ("/admin",)
 # Routes a readonly user is allowed to POST to (otherwise POST/DELETE/PUT
 # require admin role).
@@ -821,7 +829,15 @@ def current_user(request: Request) -> Optional[dict]:
 CSRF_PROTECTED_PATHS = (
     "/me/password",
     "/admin/users",   # covers /admin/users, /admin/users/{uid}/...
+    "/admin/sso",     # SAML 2.0 config save
     "/logout",
+    # Per-user TOTP enrolment / disable / verify. The /security/verify
+    # POST itself also carries the signed enroll_token, but the CSRF
+    # gate is the right surface for "this is the same logged-in user
+    # who started the enrolment" check.
+    "/security/enroll",
+    "/security/verify",
+    "/security/disable",
 )
 
 
@@ -970,7 +986,40 @@ def ctx(request: Request, **extra) -> dict:
         # for unauthenticated visitors and any DB read error so the
         # login page never flashes a theme variant.
         "user_theme": user_theme,
+        # SSO context — surfaced on every render so the login page and
+        # any future SSO-aware widget can render the right state without
+        # a second DB round-trip. Failures degrade to "no SSO" rather
+        # than 500'ing the page. saml_local_login_visible follows the
+        # rule documented on app/saml.py:is_force_active.
+        **_saml_ctx(),
         **extra,
+    }
+
+
+def _saml_ctx() -> dict:
+    """Extract SAML state for ctx(). Defensive: any DB / config error
+    falls back to "SSO disabled, local login visible" so a partly-
+    healed install never strands the operator on a useless login
+    page."""
+    try:
+        enabled = saml_mod.is_enabled()
+        force_active = saml_mod.is_force_active()
+        bypass_active = saml_mod.bypass_active()
+    except Exception:
+        return {
+            "saml_enabled": False,
+            "saml_force_active": False,
+            "saml_bypass_active": False,
+            "saml_local_login_visible": True,
+        }
+    return {
+        "saml_enabled": enabled,
+        "saml_force_active": force_active,
+        "saml_bypass_active": bypass_active,
+        # Local /login form is shown unless force_saml is on AND the
+        # bypass file is absent. is_force_active already encodes that
+        # combination, so we just invert it here.
+        "saml_local_login_visible": not force_active,
     }
 
 
@@ -6471,6 +6520,22 @@ def login_submit(request: Request,
             ip=client_ip(request),
         )
         raise HTTPException(status_code=403, detail="cross-origin login rejected")
+
+    # Force-SAML gate. When the operator has flipped the toggle on AND
+    # the bypass file is absent, local /login POSTs are refused even on
+    # a valid password. The bypass file (/data/.saml_bypass) is the
+    # operator's escape hatch — see app/saml.py for the rationale.
+    if saml_mod.is_force_active():
+        audit_mod.log_event(
+            "login_blocked_force_saml", ok=False,
+            target={"id": None, "username": username},
+            ip=client_ip(request),
+        )
+        return RedirectResponse(
+            f"{ROOT_PATH}/login?error=Single+sign-on+is+required",
+            status_code=303,
+        )
+
     u = users_mod.authenticate(username, password)
     ip = client_ip(request)
     if not u:
@@ -6486,11 +6551,77 @@ def login_submit(request: Request,
             + (f"&next={next}" if next else ""),
             status_code=303,
         )
+
+    # If the user has TOTP enrolled, route them to the second-step page
+    # WITHOUT issuing a session cookie yet. The continuation token
+    # carries the user id + a fresh nonce signed with APP_SECRET so the
+    # verify route can trust the identity without a server-side cache.
+    if u.get("totp_secret"):
+        step_token = sessions.sign(
+            {"uid": int(u["id"]),
+             "nonce": sessions.new_csrf_token(),
+             "step": "totp"},
+            ttl=300,  # 5 min: long enough to fish out the phone, not enough to leave the laptop unattended
+        )
+        context = ctx(request, step_token=step_token, next=next, error="")
+        return templates.TemplateResponse("login_totp.html", context)
+
     audit_mod.log_event(
         "login_success",
         actor=audit_mod.actor_from_user(u),
         target=audit_mod.actor_from_user(u),
         ip=ip,
+    )
+    target = next if next.startswith(ROOT_PATH or "/") else f"{ROOT_PATH}/"
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, u)
+    return response
+
+
+@app.post("/login/totp")
+def login_totp_submit(request: Request,
+                      step_token: str = Form(...),
+                      code: str = Form(...),
+                      next: str = Form("")):
+    """Second step of password login when the user has TOTP enrolled.
+
+    Validates the signed continuation token, looks up the user, then
+    verifies the 6-digit code against the stored secret. Issues the
+    real session cookie only on success. The user does not yet have a
+    session, so we cannot use the standard CSRF check; the step token
+    plays the same role (HMAC-signed, expiring) and origin is double-
+    checked the same way as /login above."""
+    if not _same_origin(request):
+        raise HTTPException(status_code=403, detail="cross-origin login rejected")
+    payload = sessions.verify(step_token)
+    if not payload or payload.get("step") != "totp":
+        return RedirectResponse(
+            f"{ROOT_PATH}/login?error=Session+expired,+sign+in+again",
+            status_code=303,
+        )
+    u = users_mod.get_by_id(int(payload.get("uid") or 0))
+    if not u or u.get("disabled") or not u.get("totp_secret"):
+        return RedirectResponse(
+            f"{ROOT_PATH}/login?error=Invalid+credentials", status_code=303,
+        )
+    if not totp_mod.verify_code(u["totp_secret"], code):
+        audit_mod.log_event(
+            "login_totp_failure", ok=False,
+            target=audit_mod.actor_from_user(u),
+            ip=client_ip(request),
+        )
+        # Re-render the second step. Reuse the existing token so the
+        # user gets a few attempts within the 5-minute window without
+        # restarting from /login.
+        context = ctx(request, step_token=step_token, next=next,
+                      error="Invalid 6-digit code")
+        return templates.TemplateResponse("login_totp.html", context)
+
+    audit_mod.log_event(
+        "login_success",
+        actor=audit_mod.actor_from_user(u),
+        target=audit_mod.actor_from_user(u),
+        ip=client_ip(request),
     )
     target = next if next.startswith(ROOT_PATH or "/") else f"{ROOT_PATH}/"
     response = RedirectResponse(target, status_code=303)
@@ -6508,9 +6639,220 @@ def logout(request: Request, csrf_token: str = Form("")):
         target=audit_mod.actor_from_user(me),
         ip=client_ip(request),
     )
+    # SAML-issued sessions get an SLO redirect to the IdP when the
+    # operator configured one. Local sessions and SAML installs without
+    # an IdP SLO URL fall through to the standard cookie-clear redirect.
+    slo_url = None
+    if me and me.get("auth_source") == "saml":
+        try:
+            slo_url = saml_mod.slo_redirect_url(request,
+                                                name_id=me.get("username"))
+        except Exception as e:
+            print(f"[saml] SLO redirect build failed: {e!r}", flush=True)
+    response = RedirectResponse(slo_url or f"{ROOT_PATH}/login",
+                                status_code=303)
+    response.delete_cookie(sessions.COOKIE_NAME, path=ROOT_PATH or "/")
+    return response
+
+
+# Account security (per-user TOTP enrolment) ---------------------------------
+
+@app.get("/security", response_class=HTMLResponse)
+def security_page(request: Request, msg: str = ""):
+    """Per-user MFA management. Visible to every signed-in user
+    (opt-in TOTP is account-scoped, not privileged). The page is the
+    only entry point for the enrolment flow; the actual secret
+    generation happens on the POST handler below."""
+    me = current_user(request) or {}
+    user_row = users_mod.get_by_id(int(me.get("id") or 0)) or {}
+    return templates.TemplateResponse(
+        "security.html",
+        ctx(request, me=user_row, msg=msg,
+            pending_secret=None, pending_qr_svg="", pending_token="",
+            verify_error=""),
+    )
+
+
+@app.post("/security/enroll")
+def security_enroll(request: Request, csrf_token: str = Form("")):
+    """Begin TOTP enrolment. Generates a fresh secret, hands it back to
+    the page wrapped in a signed continuation token, and renders the
+    QR. The DB is not touched until /security/verify succeeds."""
+    check_csrf(request, csrf_token)
+    me = current_user(request) or {}
+    user_row = users_mod.get_by_id(int(me.get("id") or 0)) or {}
+    if user_row.get("totp_secret"):
+        return redirect("/security?msg=Already+enrolled")
+    secret = totp_mod.generate_secret()
+    issuer = "nextgen-dast"
+    uri = totp_mod.otpauth_uri(secret, user_row.get("username") or "user",
+                               issuer=issuer)
+    qr_svg = _qr_svg(uri)
+    enroll_token = sessions.sign(
+        {"uid": int(user_row["id"]), "secret": secret, "step": "enroll"},
+        ttl=600,  # 10 minutes for the user to scan + type a code
+    )
+    return templates.TemplateResponse(
+        "security.html",
+        ctx(request, me=user_row, msg="",
+            pending_secret=secret, pending_qr_svg=qr_svg,
+            pending_token=enroll_token, verify_error=""),
+    )
+
+
+@app.post("/security/verify")
+def security_verify(request: Request, csrf_token: str = Form(""),
+                    enroll_token: str = Form(...),
+                    code: str = Form(...)):
+    """Finish TOTP enrolment: verify the code against the in-flight
+    secret, then persist it onto the users row."""
+    check_csrf(request, csrf_token)
+    me = current_user(request) or {}
+    user_row = users_mod.get_by_id(int(me.get("id") or 0)) or {}
+    payload = sessions.verify(enroll_token)
+    if (not payload or payload.get("step") != "enroll"
+            or int(payload.get("uid") or 0) != int(user_row.get("id") or -1)):
+        return redirect("/security?msg=Enrolment+expired,+start+again")
+    secret = payload.get("secret") or ""
+    if not totp_mod.verify_code(secret, code):
+        # Re-render the enrolment page with the same token so the user
+        # gets another try without losing the QR.
+        return templates.TemplateResponse(
+            "security.html",
+            ctx(request, me=user_row, msg="",
+                pending_secret=secret,
+                pending_qr_svg=_qr_svg(totp_mod.otpauth_uri(
+                    secret, user_row.get("username") or "user")),
+                pending_token=enroll_token,
+                verify_error="Code did not match — try the next one your app shows."),
+        )
+    users_mod.set_totp_secret(int(user_row["id"]), secret)
+    audit_mod.log_event(
+        "totp_enrolled",
+        actor=audit_mod.actor_from_user(user_row),
+        target=audit_mod.actor_from_user(user_row),
+        ip=client_ip(request),
+    )
+    return redirect("/security?msg=TOTP+enabled")
+
+
+@app.post("/security/disable")
+def security_disable(request: Request, csrf_token: str = Form("")):
+    check_csrf(request, csrf_token)
+    me = current_user(request) or {}
+    users_mod.set_totp_secret(int(me.get("id") or 0), None)
+    audit_mod.log_event(
+        "totp_disabled",
+        actor=audit_mod.actor_from_user(me),
+        target=audit_mod.actor_from_user(me),
+        ip=client_ip(request),
+    )
+    return redirect("/security?msg=TOTP+disabled")
+
+
+def _qr_svg(payload: str) -> str:
+    """Render `payload` as an inline SVG QR. We use segno because it's
+    pure-Python (no Pillow / no native deps) and emits a sized SVG
+    string we can drop straight into the template via |safe.
+
+    The lazy import keeps app boot from depending on segno when no one
+    is on the /security page. Returns an empty string on any failure
+    so the page degrades to "secret only, no QR" rather than 500-ing."""
+    try:
+        import segno
+    except ImportError:
+        return ""
+    try:
+        qr = segno.make(payload, error="M")
+        # scale=4 gives a comfortable phone-camera target without
+        # bloating the page; border=2 matches the QR spec's recommended
+        # quiet zone. svg_inline=True returns a string sans XML decl.
+        return qr.svg_inline(scale=4, border=2)
+    except Exception:
+        return ""
+
+
+# SAML 2.0 SSO endpoints -----------------------------------------------------
+#
+# Four routes form the SP surface:
+#
+#   GET  /saml/login    SP-initiated SSO. Redirects the browser to the
+#                       IdP with an AuthnRequest.
+#   POST /saml/acs      Assertion Consumer Service. The IdP redirects
+#                       the user back here with a SAMLResponse; we
+#                       validate it, look up / JIT-create the local
+#                       user row, and issue the standard session
+#                       cookie. Indistinguishable from a /login POST
+#                       once it succeeds.
+#   GET  /saml/sls      Single Logout Service. Handles the IdP-side
+#                       redirect that ends the SP session.
+#   GET  /saml/metadata SP metadata XML. Okta can ingest this URL to
+#                       populate the IdP-side app config in one step.
+
+@app.get("/saml/login")
+def saml_login(request: Request, next: str = "/"):
+    if not saml_mod.is_enabled():
+        return redirect("/login?error=SSO+is+not+configured")
+    try:
+        url = saml_mod.sso_redirect_url(request, return_to=next or "/")
+    except Exception as e:
+        print(f"[saml] login redirect build failed: {e!r}", flush=True)
+        return redirect("/login?error=SSO+misconfigured")
+    return RedirectResponse(url, status_code=303)
+
+
+@app.post("/saml/acs")
+async def saml_acs(request: Request):
+    if not saml_mod.is_enabled():
+        return redirect("/login?error=SSO+is+not+configured")
+    form = await request.form()
+    post = {k: form.get(k) for k in form.keys()}
+    name_id, relay, error = saml_mod.process_acs(request, post)
+    if error or not name_id:
+        audit_mod.log_event(
+            "saml_acs_rejected", ok=False,
+            target={"id": None, "username": name_id or ""},
+            ip=client_ip(request),
+            details={"error": error},
+        )
+        return redirect(f"/login?error={(error or 'SSO+failed').replace(' ', '+')}")
+    try:
+        u = users_mod.find_or_create_saml_user(name_id)
+    except Exception as e:
+        return redirect(f"/login?error=SSO+user+provisioning+failed:+{type(e).__name__}")
+    audit_mod.log_event(
+        "saml_login_success",
+        actor=audit_mod.actor_from_user(u),
+        target=audit_mod.actor_from_user(u),
+        ip=client_ip(request),
+    )
+    target = relay if (relay or "").startswith(ROOT_PATH or "/") else f"{ROOT_PATH}/"
+    response = RedirectResponse(target, status_code=303)
+    _set_session_cookie(response, u)
+    return response
+
+
+@app.get("/saml/sls")
+async def saml_sls(request: Request):
+    if not saml_mod.is_enabled():
+        return redirect("/login")
+    ok, error = saml_mod.process_sls(request)
+    if not ok:
+        print(f"[saml] SLS validation failed: {error}", flush=True)
     response = RedirectResponse(f"{ROOT_PATH}/login", status_code=303)
     response.delete_cookie(sessions.COOKIE_NAME, path=ROOT_PATH or "/")
     return response
+
+
+@app.get("/saml/metadata")
+def saml_metadata(request: Request):
+    if not saml_mod.is_enabled():
+        raise HTTPException(404, "SSO is not configured")
+    xml, error = saml_mod.build_metadata_xml(request)
+    if error:
+        raise HTTPException(500, f"SP metadata invalid: {error}")
+    from fastapi.responses import Response
+    return Response(content=xml, media_type="application/xml")
 
 
 # Admin -----------------------------------------------------------------------
@@ -6518,6 +6860,59 @@ def logout(request: Request, csrf_token: str = Form("")):
 @app.get("/admin", response_class=HTMLResponse)
 def admin_index(request: Request):
     return templates.TemplateResponse("admin/index.html", ctx(request))
+
+
+@app.get("/admin/sso", response_class=HTMLResponse)
+def admin_sso_page(request: Request, msg: str = ""):
+    """Render the SAML 2.0 SP configuration form. Admin-only via the
+    middleware ADMIN_PATHS gate. SP-side defaults are derived live from
+    the request host so an operator who just brought up the install on
+    a new domain sees the right URLs to paste into Okta."""
+    cfg = saml_mod.load_config()
+    base = saml_mod._host_url(request)
+    derived_sp = {
+        "entity_id":   f"{base}{saml_mod.PATH_METADATA}",
+        "acs_url":     f"{base}{saml_mod.PATH_ACS}",
+        "slo_url":     f"{base}{saml_mod.PATH_SLS}",
+        "metadata_url": f"{base}{saml_mod.PATH_METADATA}",
+    }
+    return templates.TemplateResponse(
+        "admin/sso.html",
+        ctx(request, cfg=cfg, derived_sp=derived_sp, msg=msg),
+    )
+
+
+@app.post("/admin/sso")
+async def admin_sso_save(request: Request):
+    """Persist the SAML config form. Field validation is intentionally
+    permissive — python3-saml will surface the structural errors the
+    next time someone clicks 'Sign in with SSO', and the operator can
+    fix them in place rather than fighting form validation."""
+    form = await request.form()
+    check_csrf(request, str(form.get("csrf_token") or ""))
+    fields = {
+        "enabled":         "1" if form.get("enabled") else "0",
+        "force_saml":      "1" if form.get("force_saml") else "0",
+        "idp_label":       form.get("idp_label") or "generic",
+        "idp_entity_id":   form.get("idp_entity_id") or "",
+        "idp_sso_url":     form.get("idp_sso_url") or "",
+        "idp_slo_url":     form.get("idp_slo_url") or "",
+        "idp_x509_cert":   form.get("idp_x509_cert") or "",
+        "sp_entity_id":    form.get("sp_entity_id") or "",
+        "sp_acs_url":      form.get("sp_acs_url") or "",
+        "sp_slo_url":      form.get("sp_slo_url") or "",
+    }
+    saml_mod.save_config(fields)
+    audit_mod.log_event(
+        "saml_config_updated",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        target={"id": 1, "username": "saml_config"},
+        ip=client_ip(request),
+        details={"enabled": fields["enabled"],
+                 "force_saml": fields["force_saml"],
+                 "idp_label": fields["idp_label"]},
+    )
+    return redirect("/admin/sso?msg=SSO+configuration+saved")
 
 
 @app.get("/admin/users", response_class=HTMLResponse)

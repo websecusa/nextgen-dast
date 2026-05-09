@@ -166,6 +166,70 @@ def set_disabled(user_id: int, disabled: bool) -> None:
                (1 if disabled else 0, int(user_id)))
 
 
+def set_totp_secret(user_id: int, secret: Optional[str]) -> None:
+    """Persist (or clear) a user's TOTP secret. Setting `secret` to a
+    non-empty string also stamps totp_enrolled_at; clearing the secret
+    (None or empty) clears the timestamp too. Caller is responsible for
+    having already verified a code against the secret — this function
+    does not validate the secret shape beyond non-empty."""
+    if secret:
+        db.execute(
+            "UPDATE users SET totp_secret = %s, totp_enrolled_at = %s "
+            "WHERE id = %s",
+            (secret, datetime.now(timezone.utc).replace(tzinfo=None),
+             int(user_id)),
+        )
+    else:
+        db.execute(
+            "UPDATE users SET totp_secret = NULL, totp_enrolled_at = NULL "
+            "WHERE id = %s", (int(user_id),))
+
+
+def find_or_create_saml_user(name_id: str) -> dict:
+    """Look up a local user row whose username matches the SAML NameID,
+    or JIT-provision one with role='readonly' and auth_source='saml'.
+
+    JIT-provisioned users carry no password_hash (NULL is rejected by
+    bcrypt.checkpw, so authenticate() refuses them automatically). An
+    existing admin can promote a SAML-only user from /admin/users like
+    any other account; the role floor is 'readonly' so an unexpected
+    Okta directory entry can't grant elevated access on first login.
+
+    A name_id collision with a pre-existing local username is treated as
+    "this is the same person" — we sign them in. That intentional
+    overlap lets an operator pre-create a username that matches the
+    Okta email and have SAML take over once the IdP config lands.
+    Returns the user dict the session cookie will be derived from."""
+    name_id = (name_id or "").strip()
+    if not name_id:
+        raise ValueError("SAML NameID was empty")
+    existing = get_by_username(name_id)
+    if existing:
+        if existing.get("disabled"):
+            raise ValueError("user is disabled")
+        db.execute(
+            "UPDATE users SET last_login = %s WHERE id = %s",
+            (datetime.now(timezone.utc).replace(tzinfo=None),
+             existing["id"]),
+        )
+        return existing
+    # Insert a SAML-only row. password_hash carries an explicit empty
+    # string (NOT NULL on the column) so the row schema stays valid; the
+    # bcrypt check inside authenticate() returns False on any non-hash
+    # value, so this account cannot use /login even if force_saml is
+    # later turned off.
+    db.execute(
+        "INSERT INTO users (username, password_hash, role, is_admin, "
+        "auth_source, last_login) VALUES (%s, %s, %s, %s, %s, %s)",
+        (name_id, "", "readonly", 0, "saml",
+         datetime.now(timezone.utc).replace(tzinfo=None)),
+    )
+    row = get_by_username(name_id)
+    if not row:
+        raise RuntimeError("SAML JIT provisioning failed: row not found")
+    return row
+
+
 def delete(user_id: int) -> None:
     """Delete a user. Same last-superadmin guard as set_role / set_disabled."""
     u = get_by_id(user_id)

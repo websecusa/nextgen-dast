@@ -51,7 +51,16 @@ EXPECTED_TABLES: Dict[str, Set[str]] = {
     "users": {
         "id", "username", "password_hash", "role", "is_admin",
         "max_spend_usd", "theme",
+        # TOTP enrolment + SAML JIT-provisioning marker. Added 2026-05-09
+        # alongside the SSO release.
+        "totp_secret", "totp_enrolled_at", "auth_source",
         "disabled", "last_login", "created_at", "updated_at",
+    },
+    "saml_config": {
+        "id", "enabled", "force_saml", "idp_label",
+        "idp_entity_id", "idp_sso_url", "idp_slo_url", "idp_x509_cert",
+        "sp_entity_id", "sp_acs_url", "sp_slo_url",
+        "updated_at",
     },
     "config": {"key", "value", "updated_at"},
     "llm_endpoints": {
