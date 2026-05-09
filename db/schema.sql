@@ -49,6 +49,15 @@ CREATE TABLE IF NOT EXISTS branding (
   contact_email VARCHAR(255),
   header_logo_filename VARCHAR(255),
   footer_logo_filename VARCHAR(255),
+  -- Per-surface "show the company name?" toggles. When 0 the company name
+  -- is suppressed everywhere on that surface (sidebar / login splash for the
+  -- web app; cover h1, running header, doc title, and Prepared-by cell for
+  -- the PDF). Stored per surface, not as a single shared flag, because some
+  -- operators want the company name on the live UI but a brand-neutral PDF
+  -- they can hand to a customer (or vice-versa). Defaults to 1 so existing
+  -- installs keep their current behavior on upgrade.
+  web_show_company_name TINYINT(1) NOT NULL DEFAULT 1,
+  pdf_show_company_name TINYINT(1) NOT NULL DEFAULT 1,
   -- Web (live UI) branding overrides. Independent of PDF so an admin can keep
   -- a dark dashboard while the report uses light corporate colors.
   web_mode ENUM('dark','custom') NOT NULL DEFAULT 'dark',
@@ -717,6 +726,12 @@ ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_cover_text_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_header_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_body_color VARCHAR(16);
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_link_color VARCHAR(16);
+
+-- "Show company name?" toggles (web app and PDF report, independent). Default
+-- 1 so existing installs continue rendering the company name as before; an
+-- admin can flip either off from /admin/branding/web or /admin/branding/pdf.
+ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_show_company_name TINYINT(1) NOT NULL DEFAULT 1;
+ALTER TABLE branding ADD COLUMN IF NOT EXISTS pdf_show_company_name TINYINT(1) NOT NULL DEFAULT 1;
 
 -- Make the classification banner optional on existing DBs. Earlier installs
 -- created these columns NOT NULL, which made it impossible to clear the

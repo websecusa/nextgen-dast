@@ -6,7 +6,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{{ brand.company_name or 'nextgen-dast' }} — Penetration Test Report — {{ a.fqdn }}</title>
+{# pdf.show_company_name (from branding.get_pdf) controls every spot the
+   PDF would otherwise lead with the company name — document title, the
+   running page header, the cover-page H1, and the Prepared-by row. #}
+<title>{% if pdf.show_company_name %}{{ brand.company_name or 'nextgen-dast' }} — {% endif %}Penetration Test Report — {{ a.fqdn }}</title>
 <style>
   /* ---- Page rules ----------------------------------------------------- */
   @page {
@@ -21,7 +24,10 @@
       font-weight: 700;
     }
     @top-right {
-      content: "{{ brand.company_name or 'nextgen-dast' }} — {{ a.fqdn }}";
+      {# When the company name is hidden the running header collapses to
+         just the target FQDN, so the page chrome still identifies the
+         scoped asset on every page without exposing the operator. #}
+      content: "{% if pdf.show_company_name %}{{ brand.company_name or 'nextgen-dast' }} — {% endif %}{{ a.fqdn }}";
       font-family: 'Liberation Sans', sans-serif;
       font-size: 8pt;
       color: #555;
@@ -253,7 +259,12 @@
       {% if brand.header_logo_filename %}
         <img class="logo" src="branding/{{ brand.header_logo_filename }}" alt="">
       {% endif %}
+      {# Cover-page company H1 — hidden when "Show company name" is off,
+         which lets the cover lead directly with the report-title block
+         below ("Penetration Test Report" + target FQDN). #}
+      {% if pdf.show_company_name %}
       <h1>{{ brand.company_name or 'nextgen-dast' }}</h1>
+      {% endif %}
       {% if brand.tagline %}
         <p class="tagline">{{ brand.tagline }}</p>
       {% endif %}
@@ -289,7 +300,10 @@
   <tr><th>Classification</th><td>{{ brand.classification or "CONFIDENTIAL" }}</td></tr>
   <tr><th>Report ID</th><td>{{ report_id }}</td></tr>
   <tr><th>Generated</th><td>{{ now.strftime("%Y-%m-%d %H:%M UTC") }}</td></tr>
-  <tr><th>Prepared by</th><td>{{ brand.company_name or "nextgen-dast" }}{% if brand.contact_email %} &lt;{{ brand.contact_email }}&gt;{% endif %}</td></tr>
+  {# When the company name is hidden, the Prepared-by cell shows the
+     contact email on its own (if set) so the row still identifies a
+     point of contact, or an em-dash if neither is configured. #}
+  <tr><th>Prepared by</th><td>{% if pdf.show_company_name %}{{ brand.company_name or "nextgen-dast" }}{% if brand.contact_email %} &lt;{{ brand.contact_email }}&gt;{% endif %}{% elif brand.contact_email %}{{ brand.contact_email }}{% else %}—{% endif %}</td></tr>
   <tr><th>Distribution</th><td>Recipients listed in cover sheet only.</td></tr>
 </table>
 

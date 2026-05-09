@@ -976,6 +976,21 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **Branding — "Show company name" toggles per surface.** The web
+  app branding page and the PDF branding page each grew a Show /
+  Don't show radio control for the company name. When OFF on the
+  web side, the sidebar brand text, the login splash heading, and
+  the browser tab title drop the name (the logo, if uploaded, still
+  identifies the install). When OFF on the PDF side, the cover-page
+  H1, the running header on every page, the document `<title>`, and
+  the Prepared-by row all drop the name — so a report titled
+  `HackRange — Penetration Test Report` becomes simply
+  `Penetration Test Report`. Stored as two independent TINYINT(1)
+  columns (`web_show_company_name`, `pdf_show_company_name`) on the
+  `branding` row, defaulting to 1 so existing installs keep their
+  current behavior on upgrade. The Prepared-by cell continues to
+  surface the contact email when the company name is hidden, so the
+  row still identifies a point of contact.
 - **Bulk Challenge re-evaluates `validated` findings.** Previously
   the bulk runner skipped any finding whose `validation_status` was
   `validated` OR `false_positive`, on the theory that a confident

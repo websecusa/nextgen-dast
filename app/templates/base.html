@@ -16,7 +16,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>{% block title %}{{ brand.company_name or "nextgen-dast" }}{% endblock %}</title>
+  {# When the operator has hidden the company name, fall back to the
+     product name so the browser tab still has a meaningful label. #}
+  <title>{% block title %}{% if web.show_company_name %}{{ brand.company_name or "nextgen-dast" }}{% else %}nextgen-dast{% endif %}{% endblock %}</title>
   {# Cache-bust the stylesheet so browsers don't serve a stale theme
      after a CSS-only redeploy. The query-string value is a build
      counter (not the docker tag); bump it when style.css meaningfully
@@ -119,7 +121,12 @@
              style="max-height:56px; max-width:100%; width:auto; height:auto;
                     object-fit:contain; flex-shrink:0; display:block">
       {% endif %}
+      {# Sidebar brand text is gated by the web "Show company name?" toggle.
+         When OFF the brand area becomes logo-only (or empty if no logo
+         is uploaded) — the Dashboard nav item still labels the surface. #}
+      {% if web.show_company_name %}
       <span>{{ brand.company_name or "nextgen-dast" }}</span>
+      {% endif %}
     </a>
 
     <a href="{{ base }}/assess" class="cta">

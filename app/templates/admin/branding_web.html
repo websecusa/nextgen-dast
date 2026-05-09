@@ -13,7 +13,10 @@
   <p class="muted small">The values you save below take effect immediately. Severity is rendered as color-on-text only — readable for color-blind users because the word itself stays the primary signal.</p>
   <div style="border:1px solid var(--border); border-radius:6px; padding:1em; margin-top:.5em; background:#0a1218">
     <p style="font-family: {{ web.font }}; color: {{ web.primary }}; font-size:1.4em; font-weight:600; margin:0">
-      {{ brand.company_name or "nextgen-dast" }}
+      {# Live preview of the sidebar heading. When "Show company name" is
+         off the heading is hidden in the actual app, so the preview shows
+         a placeholder dash to make the suppressed slot visible. #}
+      {% if web.show_company_name %}{{ brand.company_name or "nextgen-dast" }}{% else %}—{% endif %}
     </p>
     <p style="font-family: {{ web.font }}; color: var(--muted); margin:.2em 0 1em">Sample dashboard heading at primary color.</p>
     <table style="font-family: {{ web.font }}">
@@ -105,6 +108,30 @@
         <option value="custom" {% if web.mode == 'custom' %}selected{% endif %}>Custom (use the colors below)</option>
       </select>
     </label>
+
+    {# Show / Don't show the company name on the live web app. When OFF, the
+       sidebar brand and login splash render the logo (if uploaded) without
+       the company-name text alongside it, and the browser tab title falls
+       back to the product name. Stored as a separate column from the PDF
+       toggle so an operator can keep the company name in the dashboard but
+       leave it out of the customer-facing PDF, or vice-versa. #}
+    <fieldset style="margin-top:.6em; padding:.6em .8em; border:1px solid var(--border); border-radius:6px">
+      <legend style="padding:0 .4em">Company name on web app</legend>
+      <p class="muted small" style="margin:.2em 0 .6em">
+        Controls the sidebar heading, login splash, and browser tab title.
+        Hide this if you only want the logo to identify the product.
+      </p>
+      <label style="display:inline-block; margin-right:1.2em">
+        <input type="radio" name="web_show_company_name" value="1"
+               {% if web.show_company_name %}checked{% endif %}>
+        Show company name
+      </label>
+      <label style="display:inline-block">
+        <input type="radio" name="web_show_company_name" value="0"
+               {% if not web.show_company_name %}checked{% endif %}>
+        Do not show company name
+      </label>
+    </fieldset>
 
     <label>Font family (CSS font stack)
       <input name="web_font_family" value="{{ brand.web_font_family or '' }}"
