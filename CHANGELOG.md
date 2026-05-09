@@ -248,6 +248,83 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-09** — **Enhanced-AI weakness pass: feed it real evidence,
+  let probes pre-validate candidates, stop the role text from gating
+  output.** Four-part change targeting the symptom on assessment 52
+  where the LLM was returning `[]` for every weakness scenario.
+
+  (1) **`app/flow_index.py`** (new). Every scanner already runs through
+  the mitmproxy addon and writes `flows.jsonl` + `flows/<id>_response.txt`
+  into the scan dir, so we already had request/response evidence for
+  every probe -- it just was never plumbed back into `raw_data`. The
+  new module reads those captures, normalizes URLs (drops default ports,
+  query, fragment), and provides a `(method, URL) → FlowRecord` lookup
+  with a path-only fallback. Bodies are loaded lazily and sanitized
+  for rotating secrets (CSRF tokens, session cookies, bearer tokens,
+  long base64 blobs) before they reach the LLM.
+
+  (2) **`app/enhanced_ai.py:build_telemetry`** wires the FlowIndex into
+  the per-finding `_raw` dict, populating `response_body_excerpt`,
+  `response_status`, `response_content_type`, and an
+  `response_headers_excerpt` slice (Server, X-Powered-By, Set-Cookie,
+  Location, security headers). The existing `_render_response_samples`
+  helper already read these keys, so the prompt's `RESPONSE SAMPLES`
+  block stops emitting `(no response bodies captured by scanners)` --
+  which was the line that, combined with the prompt's verbatim-quote
+  rule, was guaranteeing zero findings on every weakness call.
+
+  (3) **`app/enhanced_ai.py` — runtime safety preamble + role-text
+  sanitizer.** Rewrote rule #1 of `_RUNTIME_SAFETY_PREAMBLE` so a
+  finding without a captured body excerpt is allowed through with the
+  literal phrase `inferred-from-telemetry:` and a confidence cap of
+  0.6 (instead of being silently omitted). Added a new rule #4 stating
+  the weakness pass produces *candidates*, not verdicts — the fidelity
+  pass remains the source of truth at >= 0.75 confidence. Added
+  `_sanitize_role_text` which strips the recurring `ONLY SHOW FINDINGS
+  WITH A CONFIDENCE SCORE OF 0.75 OR HIGHER` / `IF CONFIDENCE SCORE IS
+  LESS THAN 0.75, DON'T REPORT IT` / `DON'T REPORT IT` directives that
+  operators paste into the role-scope and role-restrictions fields.
+  Those directives belong in the code-owned preamble; when they live
+  in the role text they collide with the candidate-vs-verdict contract
+  and the LLM correctly returns `[]`.
+
+  (4) **`app/enhanced_ai.py:run` — candidate-validation pass.** After
+  the weakness loop inserts candidates and before the fidelity loop
+  spends LLM tokens grading them, invoke
+  `scripts.challenge_runner.run(aid, safe_only=True)`. Read-only
+  toolkit probes (the manifest declares `safety_class: read-only`) run
+  against any new unvalidated candidate whose CWE / title matches a
+  probe under `enhanced_testing/probes/`. Verdicts land in
+  `validation_status` + `validation_evidence`, which the fidelity batch
+  already surfaces per-finding via `prior_probe_verdict` /
+  `prior_probe_evidence` (`_render_fidelity_batch:2050-2065`).
+  Validated and false-positive verdicts are excluded from the fidelity
+  SELECT entirely, so the net effect is *fewer* fidelity tokens spent,
+  not more.
+
+  (5) **`app/auth_recapture.py`** (new). Final lift for the case where
+  scanners did not probe a high-value adjacent path (admin / api /
+  settings / users / config / dashboard / grc-*). When credentials are
+  configured, scores cluster URLs missing from FlowIndex by path-token
+  weight and GETs the top 20 with the same session cookie
+  challenge_runner uses. Single GET per URL, no redirect-follow (the
+  immediate response shape — 302 to login, 401, 403 — is the LLM
+  signal). Capped at `MAX_RECAPTURE=20` URLs and per-body bytes at
+  `PER_FINDING_QUOTE_MAX`; injected into the same canonical
+  `response_body_excerpt` keys so no new placeholder block was
+  required.
+
+  Token-economy net: in the common case (assessment with creds and a
+  scanner-covered path set) added cost is one form-login + the body
+  excerpts already captured -- ~0 new HTTP requests, +1-2K input
+  tokens per weakness scenario, but the weakness pass goes from
+  emitting `[]` to emitting validated candidates, which the fidelity
+  filter then SKIPS because their verdicts are already final. Net
+  spend per scan goes DOWN, not up, while findings volume goes from
+  zero to real.
+
+
+
 - **2026-05-07** — **Finding detail page: render proof + remediation
   for non-LLM probes; admin-login probe drops to info severity.** Two
   fixes that move closely together because they were filed together
