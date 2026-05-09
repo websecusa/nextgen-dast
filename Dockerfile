@@ -45,6 +45,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # nmap is used by the testssl-style cipher-order reproduction to
         # confirm server preference per protocol (ssl-enum-ciphers).
         nmap \
+        # python3-saml depends on the xmlsec Python wheel which dynamically
+        # links libxmlsec1 + libxml2 at runtime and needs their dev headers
+        # plus pkg-config + a C toolchain to build at pip install time.
+        # The runtime libs are tiny; the dev/build packages are kept in
+        # the image because removing them would require a multi-stage
+        # build and the savings (~25 MB) aren't worth the layer churn for
+        # a single-image deployment model. libxmlsec1-openssl supplies the
+        # OpenSSL crypto backend xmlsec selects at runtime when verifying
+        # IdP-signed SAML assertions.
+        libxmlsec1-dev \
+        libxmlsec1-openssl \
+        libxml2-dev \
+        pkg-config \
+        gcc \
+        g++ \
+        make \
     && rm -rf /var/lib/apt/lists/*
 
 # Nikto is a Perl script — install from upstream (not in Debian trixie main)
@@ -138,7 +154,14 @@ RUN pip install \
         "pydyf==0.10.0" \
         "pypdf==5.1.0" \
         "croniter==3.0.3" \
-        "markdown==3.7"
+        "markdown==3.7" \
+        # SSO: SAML 2.0 SP toolkit (signature-verifying via libxmlsec1).
+        # python3-saml pulls lxml + xmlsec wheels; both compile against
+        # the libxmlsec1 / libxml2 dev headers installed above.
+        "python3-saml==1.16.0" \
+        # /security TOTP enrolment helper. Pure-Python QR rendering keeps
+        # the image free of a Pillow/libjpeg dependency.
+        "segno==1.6.1"
 
 # Swagger UI assets, vendored into the image so the API playground at
 # /api/v1/docs works on hosts that have no outbound internet access (or

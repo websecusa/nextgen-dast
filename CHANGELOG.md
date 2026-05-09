@@ -976,6 +976,66 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## Pending — not yet released
 
+- **Single sign-on (SAML 2.0) + per-user TOTP + Okta-aware setup UX.**
+  Three layered authentication options ship together so an operator
+  can mix-and-match per install:
+  - **Local password (existing) + opt-in TOTP.** New `/security`
+    page lets any signed-in user enrol an authenticator app
+    (Google Authenticator, Authy, 1Password, etc.). Enrolment
+    generates a 160-bit base32 secret, renders a QR via the new
+    `app/totp.py` module (RFC 6238, ±1 step skew window), and
+    persists the secret + `totp_enrolled_at` only after the user
+    types a matching code. Subsequent logins go through a
+    second-step page that gates the session-cookie issue on a valid
+    6-digit code. Disable from the same page.
+  - **SAML 2.0 SP via `python3-saml`.** New `app/saml.py`
+    wraps OneLogin's spec-correct toolkit (libxmlsec1 signature
+    verification). New routes `/saml/login` (SP-initiated),
+    `/saml/acs` (assertion consumer), `/saml/sls` (single
+    logout), and `/saml/metadata` (SP XML for one-shot Okta
+    import). First successful SSO login JIT-creates a local user
+    row with role `readonly` and `auth_source='saml'`; admins
+    promote from /admin/users like any other account. SLO is
+    wired so logging out of nextgen-dast also signs the user out
+    of Okta when the IdP SLO URL is configured.
+  - **`/admin/sso` config page with "Use Okta" relabelling.** A
+    single radio toggle swaps every IdP-field label and
+    placeholder into Okta's nomenclature (Identity Provider Issuer
+    → IdP Entity ID, etc.) with realistic Okta-shaped examples
+    (`http://www.okta.com/exk1abcd1234EFGH5678`,
+    `https://example.okta.com/app/example_app/exk.../sso/saml`).
+    Inline help text on every field tells the operator which
+    Okta panel it maps to. SP URLs auto-derive from the install's
+    request host so Okta-side config is copy/paste rather than
+    hand-typed. Wire protocol is standard SAML 2.0 either way.
+  - **Force-SAML toggle with file-flag escape hatch.** A second
+    checkbox on /admin/sso requires SSO and disables the local
+    `/login` form. Critical: existence of `/data/.saml_bypass` on
+    the host re-enables `/login` regardless of the toggle, so a
+    broken IdP / expired cert / Okta outage never locks the
+    operator out. The bypass file lives in the data volume so it
+    survives container recreate; the login page renders a yellow
+    banner whenever the file is present so anyone who ends up
+    there knows they are on the broken-glass path.
+  - **Schema additions (idempotent).** Three columns on `users`
+    (`totp_secret`, `totp_enrolled_at`, `auth_source`) and one new
+    `saml_config` table with IdP / SP / mode fields. Auto-healed
+    by the existing `verify_schema.py` + `schema.sql` startup
+    pass; existing 2.1.1 DBs pick the columns up on first boot of
+    the new image with no manual step.
+  - **Image deltas.** Adds `python3-saml==1.16.0` and
+    `segno==1.6.1` Python deps (the latter is a pure-Python QR
+    renderer — no Pillow). Adds `libxmlsec1-dev`,
+    `libxmlsec1-openssl`, `libxml2-dev`, `pkg-config`, `gcc`,
+    `g++`, `make` apt packages (libxmlsec1-openssl is the runtime
+    crypto backend python3-saml uses to verify IdP signatures;
+    the rest are build-time).
+  - **Encrypted-assertion support is deliberately deferred** —
+    the SP would need its own private-key/cert pair and a key-
+    rotation surface, which is the wrong shape for v1. Standard
+    Okta deployments don't need it (assertions are signed and
+    over TLS).
+
 - **PDF download URL — cache-busting query string.** The
   per-assessment "Download PDF" link on the assessment detail page now
   appends `?v=<mtime>` to the report URL. The on-disk filename is
