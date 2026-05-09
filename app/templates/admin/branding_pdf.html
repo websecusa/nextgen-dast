@@ -48,13 +48,13 @@
                        border-radius:4px"></p>
         <form method="post" action="{{ base }}/admin/branding/logo/{{ kind }}/delete"
               onsubmit="return confirm('Remove {{ label }}?')">
-          <button type="submit" class="warn">Remove</button>
+          <button type="submit" class="warn" style="align-self:flex-start">Remove</button>
         </form>
       {% else %}<p class="muted">— not set —</p>{% endif %}
       <form method="post" action="{{ base }}/admin/branding/logo/{{ kind }}"
             enctype="multipart/form-data" style="margin-top:.6em">
         <input type="file" name="file" accept="image/png,image/jpeg" required>
-        <button type="submit">Upload</button>
+        <button type="submit" style="align-self:flex-start">Upload</button>
       </form>
     </div>
     {% endfor %}
@@ -138,7 +138,7 @@
       Hyperlink color is decoupled from <em>Primary</em> on purpose — primary doubles as the cover-page background, so a pale brand primary would render link text invisible. Default is a print-friendly blue (<code>#0645ad</code>) that stays legible on a black-and-white printout.
     </p>
 
-    <button type="submit" style="margin-top:1em">Save PDF theme</button>
+    <button type="submit" style="margin-top:1em; align-self:flex-start">Save PDF theme</button>
   </form>
 </section>
 {% endblock %}

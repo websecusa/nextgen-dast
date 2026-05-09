@@ -35,7 +35,7 @@
     <form method="post" action="{{ base }}/security/disable"
           onsubmit="return confirm('Disable TOTP for your account? You will only need a password to sign in after this.')">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="warn">Disable TOTP</button>
+      <button type="submit" class="warn" style="align-self:flex-start">Disable TOTP</button>
     </form>
 
   {% elif pending_secret %}
@@ -67,7 +67,7 @@
                    inputmode="numeric" autocomplete="one-time-code"
                    placeholder="123 456" style="font-family:monospace; letter-spacing:.1em">
           </label>
-          <button type="submit">Confirm and enable</button>
+          <button type="submit" style="align-self:flex-start">Confirm and enable</button>
         </form>
         {% if verify_error %}<p class="err" style="margin-top:.6em">{{ verify_error }}</p>{% endif %}
         <p class="muted small" style="margin-top:1em">
@@ -87,7 +87,10 @@
        6-digit code from your phone to sign in.</p>
     <form method="post" action="{{ base }}/security/enroll" style="margin-top:.6em">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Set up an authenticator app</button>
+      {# align-self overrides the global `form { flex-direction:column }`
+         rule (style.css:505) that would otherwise stretch the button to
+         fill the card. #}
+      <button type="submit" style="align-self:flex-start">Set up an authenticator app</button>
     </form>
   {% endif %}
 </section>
