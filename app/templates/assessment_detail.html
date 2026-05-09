@@ -203,7 +203,13 @@
   {% if reports %}
   <div class="kpi">
     {% for r in reports %}
-      <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}" target="_blank">
+      {# `?v=<mtime>` busts any browser cache when the PDF is
+         regenerated. The on-disk filename is deterministic
+         (<fqdn>_<finished_date>_report.pdf), so without a cache buster
+         the browser happily serves a stale copy after a re-run that
+         changed only the branding/theme but not the filename. Same
+         pattern as /branding/logo URLs in base.html. #}
+      <a href="{{ base }}/assessment/{{ a.id }}/report/{{ r.filename }}?v={{ r.created_at.timestamp() | int }}" target="_blank">
         Download PDF ({{ (r.size_bytes / 1024) | round(1) }} KB)
       </a>
     {% endfor %}
