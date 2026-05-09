@@ -551,6 +551,15 @@ form > button:not(.fullwidth),
 form > .button:not(.fullwidth),
 form > input[type="submit"]:not(.fullwidth) {
   align-self: flex-start;
+  /* align-self: flex-start should be enough on its own (it disables the
+     default align-items: stretch on the cross axis), but some browsers
+     and user-agent stylesheets still let the button grow when an
+     ancestor force-stretches it (e.g. nested form-in-card layouts).
+     Pin width to the button's intrinsic content size and cap at 100%
+     so very long labels still line-wrap inside the form column rather
+     than overflowing the card. */
+  width: fit-content;
+  max-width: 100%;
 }
 button:hover, .button:hover { background: var(--accent-2); }
 button:disabled { opacity: .45; cursor: not-allowed; }
