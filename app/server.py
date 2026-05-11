@@ -3254,6 +3254,17 @@ def assessment_detail(request: Request, aid: int,
     scan_ids = [s for s in scan_ids if s]
     reports = reports_mod.list_reports(aid)
 
+    # LLM cost / token rollup for the KPI strip. Aggregates llm_analyses
+    # rows for this assessment per model (consolidation, enrichment,
+    # enhanced_ai weakness / fidelity all write here), then runs each
+    # bucket through llm.cost() so the displayed number uses the same
+    # per-million-token rate the rest of the system uses for accounting.
+    # We only surface the chip when the assessment actually used an LLM
+    # — `llm_tier='none'` scans (or any scan that emitted zero billable
+    # calls) skip the chip entirely so the strip doesn't carry a misleading
+    # "$0.00" tile.
+    llm_usage = _compute_llm_usage_for_assessment(a)
+
     # The detail + aside columns render the FIRST visible finding so the
     # workspace is never blank on first paint. Subsequent clicks swap
     # the panels in via fetch (no page reload).
@@ -3270,9 +3281,109 @@ def assessment_detail(request: Request, aid: int,
             filter_info=filter_info,
             scan_ids=scan_ids, reports=reports,
             counts=counts_by_status,
+            llm_usage=llm_usage,
             filter_status=status, filter_sev=sev, sort=sort, q=q,
             **detail_ctx),
     )
+
+
+def _compute_llm_usage_for_assessment(a: dict) -> Optional[dict]:
+    """Aggregate LLM token usage + USD cost for an assessment.
+
+    Returns a dict shaped for the assessment_detail KPI chip, or None
+    when no billable LLM call ran for this assessment. The dict carries:
+      - used         (bool)  : at least one finished LLM call existed
+      - total_cost   (float) : sum of per-model costs in USD
+      - total_in     (int)   : input/prompt tokens across all calls
+      - total_out    (int)   : output/completion tokens across all calls
+      - call_count   (int)   : number of distinct llm_analyses rows
+      - models       (list)  : per-model breakdown for the tooltip.
+                                Each entry: {model, in, out, cost, calls}.
+      - source       (str)   : 'llm_analyses' when per-call rows existed,
+                                'assessment_row' when we fell back to the
+                                cached running totals on the assessments
+                                row (older scans that pre-date the
+                                per-call accounting, or scans whose
+                                llm_analyses rows were pruned by the
+                                lifespan sweeper).
+
+    Pricing math goes through llm.cost() so the chip and the per-call
+    cost accounting in consolidation / enhanced_ai never drift.
+    """
+    aid = a.get("id")
+    if not aid:
+        return None
+    try:
+        rows = db.query(
+            "SELECT model, "
+            "       COALESCE(SUM(request_tokens), 0)  AS in_tokens, "
+            "       COALESCE(SUM(response_tokens), 0) AS out_tokens, "
+            "       COUNT(*)                          AS calls "
+            "FROM llm_analyses "
+            "WHERE assessment_id = %s AND status = 'done' "
+            "GROUP BY model",
+            (aid,)) or []
+    except Exception:
+        rows = []
+
+    models: list[dict] = []
+    total_cost = 0.0
+    total_in = 0
+    total_out = 0
+    total_calls = 0
+    for r in rows:
+        model = r.get("model") or "unknown"
+        in_t = int(r.get("in_tokens") or 0)
+        out_t = int(r.get("out_tokens") or 0)
+        calls = int(r.get("calls") or 0)
+        if not (in_t or out_t):
+            # A row with both token counts zero indicates a streaming /
+            # bookkeeping artifact; skip it so the chip doesn't claim
+            # a billable call where none happened.
+            continue
+        try:
+            cost = llm_mod.cost(in_t, out_t, model)
+        except Exception:
+            cost = 0.0
+        total_cost += cost
+        total_in += in_t
+        total_out += out_t
+        total_calls += calls
+        models.append({"model": model, "in": in_t, "out": out_t,
+                       "cost": cost, "calls": calls})
+
+    if models:
+        models.sort(key=lambda m: m["cost"], reverse=True)
+        return {
+            "used": True,
+            "total_cost": round(total_cost, 4),
+            "total_in": total_in,
+            "total_out": total_out,
+            "call_count": total_calls,
+            "models": models,
+            "source": "llm_analyses",
+        }
+
+    # Fallback: no per-call rows survived but the assessment row carries
+    # a cached cost / token total. This is the path for older scans
+    # whose llm_analyses rows were pruned by the lifespan sweeper. We
+    # still want the chip to render — the analyst should always be able
+    # to see what an assessment cost — just without the per-model
+    # breakdown.
+    cached_cost = a.get("llm_cost_usd")
+    cached_in = int(a.get("llm_in_tokens") or 0)
+    cached_out = int(a.get("llm_out_tokens") or 0)
+    if (cached_cost in (None, 0) and not cached_in and not cached_out):
+        return None
+    return {
+        "used": True,
+        "total_cost": round(float(cached_cost or 0.0), 4),
+        "total_in": cached_in,
+        "total_out": cached_out,
+        "call_count": 0,
+        "models": [],
+        "source": "assessment_row",
+    }
 
 
 EXCLUDED_FROM_SCORE = ("false_positive", "fixed", "accepted_risk")

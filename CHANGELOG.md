@@ -248,6 +248,25 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-11** — **Estimated LLM cost chip on the assessment
+  workspace.** New KPI tile on the assessment-detail page, anchored
+  immediately to the left of the "Hide info-severity (page + PDF)"
+  toggle, surfaces the running USD spend for the scan's LLM work
+  (consolidation roll-up, per-finding enrichment, enhanced_ai weakness
+  and fidelity passes). The number is computed live by aggregating
+  `llm_analyses` per-model (input + output tokens), then running each
+  bucket through `llm.cost()` so the displayed figure uses the same
+  per-million-token rates that drove the per-call accounting — chip,
+  PDF, and `assessments.llm_cost_usd` cannot drift. A tooltip on the
+  chip lists the per-model breakdown (calls, in tokens, out tokens,
+  cost). The chip is suppressed entirely when no billable LLM call
+  ran for the assessment, so `llm_tier='none'` scans show the strip
+  unchanged. Falls back to the cached `llm_cost_usd` /
+  `llm_in_tokens` / `llm_out_tokens` totals on the assessment row
+  for older scans whose `llm_analyses` rows have been pruned by the
+  lifespan sweeper — the chip still renders, just without the
+  per-model breakdown.
+
 - **2026-05-11** — **Validated-only scoring + errored-retry +
   inconclusive→info.** Three-part change to make the grade reflect
   only what the challenge pass could actually prove.
