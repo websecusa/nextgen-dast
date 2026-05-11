@@ -248,6 +248,39 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-11** — **Challenge fast-path target resolution — derive
+  the test URL from raw_data / assessment fqdn when evidence_url is
+  empty.** LLM-emitted findings (`enhanced_ai_testing`) frequently
+  omit the top-level `evidence_url` and embed the test URL inside
+  `raw_data.llm_reproduction` (the curl block) or `raw_data.llm_evidence`
+  (the prose preface). Before this change, `_dispatch_finding_fast_path`
+  bailed out at the very first check (`if not evidence_url: return None`)
+  and the per-finding **Challenge** button surfaced the unhelpful
+  `"This finding has no deterministic fast-path classifier. Use the
+  toolkit Challenge or Challenge-with-LLM buttons instead."` message
+  even when the title was a clean fast-path match (e.g. *"Missing
+  Referrer-Policy, Permissions-Policy, COOP, COEP, CORP on
+  authenticated and login responses"* on assessment 62 finding 2960
+  — the LLM had cited `https://<host>/login.php` in the reproduction
+  block but never promoted it to `evidence_url`).
+
+  New helper `_resolve_finding_target(finding) -> (host, port)` tries,
+  in order: `evidence_url` → first `https?://…` found in
+  `raw_data.llm_reproduction` → first URL in `raw_data.llm_evidence`
+  → assessment row's `fqdn` + `scan_https` (host-level header / cookie
+  / TLS checks already probe `https://{host}:{port}/` and ignore the
+  path on `evidence_url`, so the assessment fqdn is a perfectly valid
+  fallback target). `_dispatch_finding_fast_path` now calls the helper
+  and only refuses when *all four* sources come up empty.
+
+  The bulk runner (`scripts/challenge_runner.py`) used to filter
+  candidates with `WHERE evidence_url IS NOT NULL AND evidence_url <> ''`
+  at the SQL level — that filter is dropped as part of the same change
+  so the bulk pass and the manual click stay in agreement on what is
+  eligible. The classifier is now the single source of truth for "can
+  this finding be fast-pathed?", regardless of how the source tool
+  chose to record the URL.
+
 - **2026-05-09** — **Enhanced-AI weakness pass: feed it real evidence,
   let probes pre-validate candidates, stop the role text from gating
   output.** Four-part change targeting the symptom on assessment 52
