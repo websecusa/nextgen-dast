@@ -40,13 +40,14 @@ OWASP_LABELS = dict(OWASP_TOP10)
 
 
 # Severity → demerit points used by the scoring function. Higher = worse.
-# Validated findings hit harder than unvalidated ones (still penalising
-# unvalidated so a blizzard of scanner suspicions doesn't get a free pass).
+# Only validated findings contribute to the score: the post-scan challenge
+# pass (read-only probes + LLM fidelity) is what decides whether a finding
+# is real, and an engagement should be graded on what was proven — not on
+# the raw scanner noise. Unvalidated, inconclusive, and errored findings
+# carry zero weight; the challenge pipeline is responsible for moving real
+# issues into the `validated` bucket before this function sees them.
 SEV_DEMERIT_VALIDATED = {
     "critical": 25, "high": 12, "medium": 5, "low": 2, "info": 0,
-}
-SEV_DEMERIT_UNVALIDATED = {
-    "critical": 12, "high": 6, "medium": 2.5, "low": 1, "info": 0,
 }
 
 # Maximum demerit any single OWASP category can contribute to the OVERALL
@@ -112,15 +113,18 @@ def _score_findings(findings: list, *, scope: Optional[str] = None) -> dict:
        as failing on its own scorecard."""
     # Bucket findings by OWASP category so we can apply diminishing
     # returns and the per-category cap independently in each bucket.
+    # Only validated findings are considered — anything still flagged
+    # as unvalidated / inconclusive / errored after the challenge pass
+    # is treated as informational and carries no demerit.
     by_cat: dict[str, list[float]] = {}
     contributing = 0
     for f in findings:
         if scope and f.get("owasp_category") != scope:
             continue
+        if f.get("validation_status") != "validated":
+            continue
         sev = f.get("severity") or "info"
-        validated = (f.get("validation_status") == "validated")
-        table = SEV_DEMERIT_VALIDATED if validated else SEV_DEMERIT_UNVALIDATED
-        weight = table.get(sev, 0)
+        weight = SEV_DEMERIT_VALIDATED.get(sev, 0)
         if weight <= 0:
             # info-level findings carry no demerit by design
             continue
@@ -217,15 +221,16 @@ def _exploitability_grade_cap(findings: list) -> Optional[dict]:
         Below that, the demerit math + per-category cap + validation
         floor decide the letter on their own; an isolated validated
         medium should not drag an otherwise clean engagement to D.
-      * A volume of unconfirmed criticals (>=5 T4 critical) is itself
-        a posture signal even when nothing was validated, and earns D.
+
+    Unconfirmed-critical volume used to feed a D-cap here too, but the
+    grading policy is now strictly validated-only: anything the
+    challenge pass couldn't confirm is treated as informational and
+    cannot pull the letter down on its own.
     """
-    counts = {"T1": 0, "T2": 0, "T2b": 0, "T3": 0, "T4_critical": 0}
+    counts = {"T1": 0, "T2": 0, "T2b": 0, "T3": 0}
     for f in findings:
         tier = _exploit_tier(f)
-        if tier == "T4" and (f.get("severity") == "critical"):
-            counts["T4_critical"] += 1
-        elif tier in counts:
+        if tier in counts:
             counts[tier] += 1
 
     if counts["T1"] >= 1:
@@ -247,10 +252,6 @@ def _exploitability_grade_cap(findings: list) -> Optional[dict]:
         return {"grade": "D",
                 "reason": (f"{counts['T3']} validated medium-severity "
                            "findings — pattern of mid-severity exposure")}
-    if counts["T4_critical"] >= 5:
-        return {"grade": "D",
-                "reason": (f"{counts['T4_critical']} unconfirmed critical "
-                           "findings — volume signal")}
     return None
 
 

@@ -248,6 +248,49 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-11** — **Validated-only scoring + errored-retry +
+  inconclusive→info.** Three-part change to make the grade reflect
+  only what the challenge pass could actually prove.
+
+  1. **Scoring is now strictly validated-only.** `reports._score_findings`
+     used to apply a half-weight demerit to unvalidated findings as
+     well so a "blizzard of scanner suspicions" couldn't get a free
+     pass. With the challenge pass (read-only probes + LLM fidelity)
+     now running on the critical path of every scan, the unvalidated
+     bucket is by definition "we couldn't prove this" — and grading
+     against unproven findings rewards noisy scanners and punishes
+     clean ones. The `SEV_DEMERIT_UNVALIDATED` table is removed; the
+     loop now skips any finding whose `validation_status` is not
+     `validated`. The exploitability cap loses its
+     `T4_critical >= 5 → D` clause for the same reason (volume of
+     unconfirmed criticals no longer caps the grade).
+
+  2. **Errored verdicts retry up to 3 times.** `scripts/challenge_runner.py`
+     wraps each probe / fast-path invocation in a small retry loop
+     keyed on `verdict_to_status(...) == 'errored'`. A transient
+     subprocess crash, network blip, or rate-limit timeout used to
+     park a real finding in the `errored` bucket for the rest of the
+     scan; now it gets two extra attempts with a short growing delay
+     before the final verdict lands. Retries are bounded so a
+     persistently broken probe still finishes the batch in
+     reasonable time, and the final verdict carries
+     `challenge_attempts` in its evidence blob so an analyst can see
+     it took N tries.
+
+  3. **Inconclusive verdicts force severity=info.** The challenge
+     runner write-path now downgrades `severity` to `info` whenever
+     it records `validation_status='inconclusive'`. The probe ran
+     but couldn't prove the finding; the UI / heatmap / PDF should
+     stop showing a critical/high badge the evidence doesn't
+     support. The original severity is preserved in
+     `raw_data.original_severity` so the downgrade is auditable and
+     a future re-challenge can surface it.
+
+  Net effect: the score reflects what was proven, errored is now
+  recoverable, and unproven findings present at the severity their
+  evidence supports rather than the severity the source scanner
+  hopefully suggested.
+
 - **2026-05-11** — **Challenge fast-path target resolution — derive
   the test URL from raw_data / assessment fqdn when evidence_url is
   empty.** LLM-emitted findings (`enhanced_ai_testing`) frequently

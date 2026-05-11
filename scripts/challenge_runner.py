@@ -35,6 +35,18 @@ endpoint with N parallel re-logins. If the session expires mid-batch
 return a non-2xx and the verdict will fall through to 'inconclusive',
 which is the safe behavior; the analyst can re-run or click the per-
 finding Challenge button for those.
+
+Scoring policy (must stay in sync with reports._score_findings):
+  * Errored verdicts are retried up to ERROR_RETRY_ATTEMPTS times
+    (currently 3) so a transient subprocess crash or network blip
+    doesn't park a real finding in the errored bucket.
+  * Inconclusive verdicts force severity='info' on the finding so the
+    UI / report / heatmap stop showing a critical/high badge the
+    probe couldn't prove. The original severity is preserved in
+    raw_data.original_severity for analyst review.
+  * Only `validated` findings ever contribute to the score; the
+    challenge pass is therefore on the critical path of every scan
+    (called by the orchestrator before status='done' is written).
 """
 from __future__ import annotations
 
@@ -250,56 +262,98 @@ def run(aid: int, safe_only: bool = False) -> None:
     # 4. Run each probe. Light pacing between findings to be polite to
     # the target — the per-probe SafeClient already rate-limits per
     # max_rps but we add a 0.5s gap between findings on top of that.
+    #
+    # Each probe gets up to ERROR_RETRY_ATTEMPTS total attempts when the
+    # verdict comes back 'errored' (subprocess crash, network blip,
+    # transient SafeClient failure). Two extra retries on top of the
+    # first attempt brings the bulk pass in line with the scoring
+    # policy: only validated findings count, and the analyst should not
+    # see a flaky one-shot run drop a real exploit into the errored
+    # bucket. Retries are bounded so a persistently broken probe still
+    # finishes the batch in reasonable time. Inconclusive verdicts are
+    # NOT retried here — those are decisive enough (the probe ran, the
+    # evidence was ambiguous) and the analyst can manually re-challenge.
+    ERROR_RETRY_ATTEMPTS = 3
     counts = {"validated": 0, "false_positive": 0,
               "inconclusive": 0, "errored": 0}
-    for i, (f, p) in enumerate(plan, 1):
-        # Branch by entry type: probe=None means use the fast-path
-        # dispatcher (header / cookie / cert / protocol / cipher /
-        # vuln / DNS) instead of a toolkit probe subprocess.
-        if p is None:
-            probe_label = "fast_path"
-            _step(aid, f"{label}: running probe {i}/{total} "
-                       f"(fast_path on finding #{f['id']})")
+
+    def _run_once(finding, probe):
+        """Execute one attempt of (finding, probe). probe=None routes
+        to the fast-path dispatcher. Returns a verdict dict; never
+        raises (any exception is wrapped into a verdict with
+        error=type:msg so the caller can decide whether to retry)."""
+        if probe is None:
             try:
-                resp = _dispatch_fast_path(f)
+                resp = _dispatch_fast_path(finding)
                 if resp is None:
                     # Defensive — has_fast_path said yes but dispatcher
                     # returned None. Treat as errored so the analyst
                     # can investigate; don't silently skip.
-                    verdict = {"ok": False, "error": "dispatcher_miss"}
-                else:
-                    verdict = _fast_path_to_verdict(resp)
+                    return {"ok": False, "error": "dispatcher_miss"}
+                return _fast_path_to_verdict(resp)
             except Exception as e:
-                verdict = {"ok": False,
-                            "error": f"{type(e).__name__}: {e}"}
+                return {"ok": False,
+                        "error": f"{type(e).__name__}: {e}"}
+        # Shared config + timeout + verdict mapping with the per-finding
+        # /challenge route. See toolkit.build_finding_config for what
+        # gets populated; the bulk runner used to have its own stripped-
+        # down version, which was the root cause of probes (auth_logout,
+        # config_hsts on path-only urls, etc.) silently erroring under
+        # bulk Challenge while the per-finding click validated them.
+        cfg = toolkit_mod.build_finding_config(
+            finding, probe, cookie=session_cookie)
+        tout = toolkit_mod.probe_timeout(probe)
+        try:
+            return toolkit_mod.run_probe(probe["name"], cfg, timeout=tout)
+        except Exception as e:
+            return {"ok": False,
+                    "error": f"{type(e).__name__}: {e}"}
+
+    for i, (f, p) in enumerate(plan, 1):
+        # Branch by entry type for the status line: probe=None means
+        # use the fast-path dispatcher (header / cookie / cert /
+        # protocol / cipher / vuln / DNS) instead of a toolkit probe
+        # subprocess.
+        if p is None:
+            probe_label = "fast_path"
+            _step(aid, f"{label}: running probe {i}/{total} "
+                       f"(fast_path on finding #{f['id']})")
         else:
             probe_label = p["name"][:64]
             _step(aid, f"{label}: running probe {i}/{total} "
                        f"({p['name']} on finding #{f['id']})")
-            # Shared config + timeout + verdict mapping with the per-finding
-            # /challenge route. See toolkit.build_finding_config for what
-            # gets populated; the bulk runner used to have its own stripped-
-            # down version, which was the root cause of probes (auth_logout,
-            # config_hsts on path-only urls, etc.) silently erroring under
-            # bulk Challenge while the per-finding click validated them.
-            config = toolkit_mod.build_finding_config(
-                f, p, cookie=session_cookie)
-            timeout = toolkit_mod.probe_timeout(p)
-            try:
-                verdict = toolkit_mod.run_probe(
-                    p["name"], config, timeout=timeout)
-            except Exception as e:
-                verdict = {"ok": False,
-                            "error": f"{type(e).__name__}: {e}"}
+
+        # Run, with retries when the verdict bucket is 'errored'.
+        # Each retry waits a short, growing delay so a target that's
+        # briefly overloaded gets time to recover.
+        verdict = _run_once(f, p)
+        new_status = toolkit_mod.verdict_to_status(verdict)
+        attempts = 1
+        while new_status == "errored" and attempts < ERROR_RETRY_ATTEMPTS:
+            print(f"[challenge_runner] errored attempt {attempts}/"
+                  f"{ERROR_RETRY_ATTEMPTS} on finding #{f['id']} "
+                  f"(probe={probe_label}, error="
+                  f"{verdict.get('error') if isinstance(verdict, dict) else 'unknown'!r}) "
+                  "— retrying", flush=True)
+            _step(aid, f"{label}: retry {attempts}/{ERROR_RETRY_ATTEMPTS - 1} "
+                       f"on finding #{f['id']} ({probe_label})")
+            time.sleep(1.0 * attempts)
+            verdict = _run_once(f, p)
+            new_status = toolkit_mod.verdict_to_status(verdict)
+            attempts += 1
 
         # Decorate with auth diagnostics + scrub any echoed Cookie headers.
         if isinstance(verdict, dict):
             verdict.setdefault("auth", {}).update(auth_diag)
+            if attempts > 1:
+                # Surface retry count in evidence so the analyst can see
+                # this verdict took N tries (helpful when triaging an
+                # 'errored' that finally landed on inconclusive).
+                verdict["challenge_attempts"] = attempts
             for entry in verdict.get("audit_log") or []:
                 if "headers" in entry:
                     entry["headers"].pop("Cookie", None)
 
-        new_status = toolkit_mod.verdict_to_status(verdict)
         counts[new_status] = counts.get(new_status, 0) + 1
 
         # No-downgrade guard. We re-run validated findings (so a
@@ -323,7 +377,14 @@ def run(aid: int, safe_only: bool = False) -> None:
             continue
 
         # Same write logic as the per-finding route: flip findings.status
-        # too when the verdict is a confident false positive.
+        # too when the verdict is a confident false positive. An
+        # inconclusive verdict additionally downgrades the finding's
+        # severity to 'info' — the scoring policy is validated-only, and
+        # an unprovable finding should not present in the UI with a
+        # critical/high badge it didn't earn. The original severity is
+        # preserved in raw_data.original_severity so an analyst who
+        # later re-challenges can see what the scanner originally
+        # claimed.
         if new_status == "false_positive":
             db.execute(
                 "UPDATE findings SET validation_status = %s, "
@@ -332,6 +393,35 @@ def run(aid: int, safe_only: bool = False) -> None:
                 "WHERE id = %s",
                 (new_status, probe_label,
                  json.dumps(verdict, default=str)[:65000], f["id"]))
+        elif new_status == "inconclusive":
+            original_sev = (f.get("severity") or "info").lower()
+            if original_sev != "info":
+                # Stash the original severity in raw_data so the
+                # downgrade is reversible and auditable. raw_data is a
+                # JSON TEXT column.
+                try:
+                    raw_obj = json.loads(f.get("raw_data") or "{}")
+                    if not isinstance(raw_obj, dict):
+                        raw_obj = {"_wrapped": raw_obj}
+                except Exception:
+                    raw_obj = {}
+                raw_obj.setdefault("original_severity", original_sev)
+                new_raw = json.dumps(raw_obj, default=str)[:65000]
+                db.execute(
+                    "UPDATE findings SET validation_status = %s, "
+                    "validation_probe = %s, validation_run_at = NOW(), "
+                    "validation_evidence = %s, severity = 'info', "
+                    "raw_data = %s WHERE id = %s",
+                    (new_status, probe_label,
+                     json.dumps(verdict, default=str)[:65000],
+                     new_raw, f["id"]))
+            else:
+                db.execute(
+                    "UPDATE findings SET validation_status = %s, "
+                    "validation_probe = %s, validation_run_at = NOW(), "
+                    "validation_evidence = %s WHERE id = %s",
+                    (new_status, probe_label,
+                     json.dumps(verdict, default=str)[:65000], f["id"]))
         else:
             db.execute(
                 "UPDATE findings SET validation_status = %s, "
