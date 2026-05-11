@@ -144,9 +144,17 @@ def run(aid: int, safe_only: bool = False) -> None:
     #                         triage decision.
     #   * no probe match    → no toolkit probe is registered for this
     #                         (source_tool, owasp, cwe) combination.
+    # No evidence_url filter here on purpose: LLM-emitted findings
+    # often omit the top-level evidence_url and embed the test URL
+    # inside raw_data.llm_reproduction / llm_evidence instead, and
+    # _dispatch_finding_fast_path will derive a target host from those
+    # (or fall back to the assessment fqdn) for header / cookie / TLS
+    # checks. The classifier is the source of truth for "can we run a
+    # fast path?"; rejecting URL-less findings at the SQL layer would
+    # silently skip them and disagree with the per-finding Challenge
+    # button.
     candidates = db.query(
         "SELECT * FROM findings WHERE assessment_id = %s "
-        "  AND evidence_url IS NOT NULL AND evidence_url <> '' "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (aid,))
 

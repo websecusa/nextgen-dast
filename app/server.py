@@ -4824,6 +4824,77 @@ def _normalize_testssl_id(rid: str) -> str:
     return _TESTSSL_HOSTCERT_SUFFIX.sub("", rid).strip()
 
 
+def _resolve_finding_target(finding: dict) -> Optional[tuple[str, int]]:
+    """Resolve a (host, port) tuple to point the deterministic Challenge
+    fast paths at for this finding.
+
+    Tries, in order:
+      1. The finding's evidence_url (the common case — populated by
+         every traditional scanner: nikto, nuclei, wapiti, testssl, etc).
+      2. A URL parsed out of raw_data.llm_reproduction (the curl block
+         the LLM emits with its findings) — covers enhanced_ai_testing
+         findings that omit a top-level evidence_url because the raw
+         response body lives inside the LLM payload instead.
+      3. A URL parsed out of raw_data.llm_evidence (some LLM scenarios
+         put the URL in the evidence preface like "headers from
+         GET https://…/login.php" rather than the reproduction block).
+      4. The assessment's fqdn + scan_https setting — last-resort
+         fallback so a header / cookie finding still has a target host
+         to probe even when the LLM declined to repeat the URL.
+
+    Returning None means we genuinely have nowhere to point the probe
+    (no evidence_url, no URL anywhere in raw_data, and the assessment
+    row is missing or empty) — only then should the caller refuse to
+    run the fast path."""
+    from urllib.parse import urlparse as _urlparse
+
+    candidates: list[str] = []
+    primary = (finding.get("evidence_url") or "").strip()
+    if primary:
+        candidates.append(primary)
+
+    # LLM-emitted findings tend to embed the test URL in raw_data
+    # rather than promote it to evidence_url. Pick the first http(s)
+    # URL out of the reproduction / evidence prose; both fields are
+    # free-form strings (often a fenced ```bash``` block).
+    raw = finding.get("raw") or {}
+    for key in ("llm_reproduction", "llm_evidence"):
+        text = raw.get(key)
+        if isinstance(text, str) and "://" in text:
+            m = re.search(r"https?://[^\s'\"`)<>|]+", text)
+            if m:
+                candidates.append(m.group(0))
+
+    for cand in candidates:
+        try:
+            parsed = _urlparse(cand)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        host = (parsed.hostname or "").lower()
+        if not host:
+            continue
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return host, port
+
+    # Last-resort fallback: derive the target from the assessment row.
+    # Header / cookie / TLS findings are host-level checks anyway —
+    # _finding_test_header_fast probes "https://{host}:{port}/" and
+    # ignores any path on evidence_url, so the assessment's fqdn is a
+    # perfectly valid target when the finding itself didn't carry a URL.
+    aid = finding.get("assessment_id")
+    if aid:
+        a = db.query_one(
+            "SELECT fqdn, scan_https FROM assessments WHERE id=%s", (aid,))
+        if a and (a.get("fqdn") or "").strip():
+            host = a["fqdn"].strip().lower()
+            scheme = "https" if a.get("scan_https") else "http"
+            port = 443 if scheme == "https" else 80
+            return host, port
+    return None
+
+
 def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
     """Single source of truth for "does this finding have a sub-second
     deterministic verification path?" If yes, run it and return the
@@ -4842,17 +4913,10 @@ def _dispatch_finding_fast_path(finding: dict) -> Optional[JSONResponse]:
     in sync. Tool-agnostic dispatch intentionally fires BEFORE the
     testssl-id table because a "missing HSTS" finding from nikto or
     the LLM should use the same urllib path as a testssl HSTS row."""
-    url = (finding.get("evidence_url") or "").strip()
-    if not url:
+    target = _resolve_finding_target(finding)
+    if not target:
         return None
-    from urllib.parse import urlparse as _urlparse
-    parsed = _urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return None
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return None
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    host, port = target
 
     # 1. Title-pattern detectors (work regardless of source_tool).
     detected_header = _detect_header_check_target(finding)
