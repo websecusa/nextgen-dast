@@ -76,6 +76,69 @@
 <p style="white-space:pre-wrap">{{ e.impact }}</p>
 {% endif %}
 
+{# Compact attacker-workflow & likelihood block for the side panel.
+   Mirrors the full card on finding_detail.html but is more terse
+   so the slide-out stays usable. Suppressed entirely when no
+   exploit-chain enrichment exists for this finding's signature. #}
+{% set _panel_has_chain = (e and (e.likelihood
+                                  or e.likelihood_rationale
+                                  or e.attacker_workflow
+                                  or (e.prerequisites and e.prerequisites|length)
+                                  or (e.exploit_chain and e.exploit_chain|length))) %}
+{% if _panel_has_chain %}
+{% set _lk_label = {"very_low": "Very Low", "low": "Low",
+                    "medium": "Medium", "high": "High",
+                    "very_high": "Very High"}.get(e.likelihood, "") %}
+{% set _lk_bg = {"very_low": "#1f3a2b", "low": "#2b3a1f",
+                 "medium": "#3a341f", "high": "#3a2a1f",
+                 "very_high": "#3a1f1f"}.get(e.likelihood, "#2a2f3a") %}
+{% set _lk_fg = {"very_low": "#9be8a8", "low": "#cfe89b",
+                 "medium": "#e8d99b", "high": "#e8b89b",
+                 "very_high": "#e89b9b"}.get(e.likelihood, "#cfd5e6") %}
+<h3 class="section">Attacker workflow</h3>
+{% if _lk_label %}
+  <p style="margin:.2em 0">
+    <span style="display:inline-block; background:{{ _lk_bg }};
+                 color:{{ _lk_fg }}; padding:.15em .55em;
+                 border-radius:999px; font-size:.78em; font-weight:600">
+      Likelihood: {{ _lk_label }}
+    </span>
+    {% if e.detection_difficulty %}
+      <span class="muted small" style="margin-left:.5em">
+        ({{ e.detection_difficulty }} to detect)
+      </span>
+    {% endif %}
+  </p>
+{% endif %}
+{% if e.likelihood_rationale %}
+  <p class="small" style="white-space:pre-wrap; margin-top:.4em">{{ e.likelihood_rationale }}</p>
+{% endif %}
+{% if e.prerequisites and e.prerequisites|length %}
+  <p class="small muted" style="margin-bottom:.2em"><strong>Prerequisites:</strong></p>
+  <ul class="small">
+    {% for p in e.prerequisites %}<li>{{ p }}</li>{% endfor %}
+  </ul>
+{% endif %}
+{% if e.exploit_chain and e.exploit_chain|length %}
+  <p class="small muted" style="margin-bottom:.2em"><strong>Chain:</strong></p>
+  <ol class="small" style="padding-left:1.2em">
+    {% for step in e.exploit_chain %}
+      <li>
+        {% if step is mapping %}
+          {% if step.phase %}<strong>{{ step.phase }}.</strong> {% endif %}
+          {{ step.action or '' }}
+        {% else %}
+          {{ step }}
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+{% endif %}
+{% if e.attacker_workflow %}
+  <p class="small" style="white-space:pre-wrap; margin-top:.4em">{{ e.attacker_workflow }}</p>
+{% endif %}
+{% endif %}
+
 <h3 class="section">Technical details</h3>
 {% if f.evidence_url %}
   <p style="margin-top:0">

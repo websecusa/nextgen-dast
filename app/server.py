@@ -3470,6 +3470,19 @@ def _finding_panel_context(f: Optional[dict]) -> dict:
                 e["references"] = json.loads(e.get("references_json") or "[]")
             except Exception:
                 e["references"] = []
+            # Exploit-chain enrichment v2 fields. These columns are
+            # populated by the LLM enrichment pipeline (or by an admin
+            # manual edit); they may be absent on rows created before
+            # the 2026-05-12 migration. Decode the JSON-encoded lists
+            # into Python lists so the template can iterate directly.
+            try:
+                e["prerequisites"] = json.loads(e.get("prerequisites_json") or "[]")
+            except Exception:
+                e["prerequisites"] = []
+            try:
+                e["exploit_chain"] = json.loads(e.get("exploit_chain_json") or "[]")
+            except Exception:
+                e["exploit_chain"] = []
     # Decode the raw_data JSON once so reproduction and evidence helpers
     # both see structured fields (matcher-name, http_request, etc.) rather
     # than each having to parse the blob on its own.
@@ -8033,6 +8046,17 @@ def admin_finding_enrichment_save(
     user_story: str = Form(""),
     suggested_priority: str = Form(""),
     notes: str = Form(""),
+    # Exploit-chain / attacker-workflow / likelihood editable fields.
+    # `prerequisites` is one item per line. `exploit_chain` is encoded
+    # one step per line in the form `Phase | Action | Evidence` so a
+    # textarea is enough — admins rarely edit this by hand but when
+    # they do, the pipe-separated format keeps the schema explicit.
+    prerequisites: str = Form(""),
+    exploit_chain: str = Form(""),
+    attacker_workflow: str = Form(""),
+    likelihood: str = Form(""),
+    likelihood_rationale: str = Form(""),
+    detection_difficulty: str = Form(""),
 ):
     """Admin: edit (or create-on-the-fly) enrichment for this finding's type.
     The edit applies to the *signature*, so every other finding of the same
@@ -8045,6 +8069,29 @@ def admin_finding_enrichment_save(
     user = current_user(request) or {}
     steps_list = [s.strip() for s in remediation_steps.splitlines() if s.strip()]
     refs_list = [r.strip() for r in references.splitlines() if r.strip()]
+    # Prerequisites: one item per line.
+    prereq_list = [p.strip() for p in prerequisites.splitlines() if p.strip()]
+    # Exploit chain: one step per line, with optional "Phase | Action |
+    # Evidence" separator. Missing fields default to empty strings.
+    chain_list: list = []
+    for raw_line in (exploit_chain or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|", 2)]
+        while len(parts) < 3:
+            parts.append("")
+        chain_list.append({
+            "phase": parts[0], "action": parts[1], "evidence": parts[2],
+        })
+    # Constrain the enum-like inputs so a typo in the form does not
+    # silently disable the badge rendering downstream.
+    lk = (likelihood or "").strip().lower()
+    if lk not in ("very_low", "low", "medium", "high", "very_high"):
+        lk = ""
+    dd = (detection_difficulty or "").strip().lower()
+    if dd not in ("easy", "moderate", "hard"):
+        dd = ""
     edits = {
         "owasp_category": owasp_category.strip() or None,
         "cwe": cwe.strip() or None,
@@ -8057,6 +8104,12 @@ def admin_finding_enrichment_save(
         "user_story": user_story,
         "suggested_priority": suggested_priority.strip() or None,
         "notes": notes,
+        "prerequisites_json": json.dumps(prereq_list),
+        "exploit_chain_json": json.dumps(chain_list),
+        "attacker_workflow": attacker_workflow,
+        "likelihood": lk or None,
+        "likelihood_rationale": likelihood_rationale,
+        "detection_difficulty": dd or None,
     }
     if f.get("enrichment_id"):
         enrichment_mod.update_manual(f["enrichment_id"], edits, user.get("id"))
@@ -8081,6 +8134,14 @@ def admin_finding_enrichment_save(
         "references": json.loads(e_row.get("references_json") or "[]"),
         "user_story": e_row.get("user_story") or "",
         "owasp_category": e_row.get("owasp_category") or "",
+        # The bug-report markdown export also covers the exploit-chain
+        # block so the assignee sees attacker context in the ticket.
+        "prerequisites": json.loads(e_row.get("prerequisites_json") or "[]"),
+        "exploit_chain": json.loads(e_row.get("exploit_chain_json") or "[]"),
+        "attacker_workflow": e_row.get("attacker_workflow") or "",
+        "likelihood": e_row.get("likelihood") or "",
+        "likelihood_rationale": e_row.get("likelihood_rationale") or "",
+        "detection_difficulty": e_row.get("detection_difficulty") or "",
     }
     db.execute(
         "UPDATE finding_enrichment SET bug_report_md = %s, jira_summary = %s "

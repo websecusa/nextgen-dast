@@ -496,6 +496,52 @@ def _gather(assessment_id: int) -> Optional[dict]:
             f["raw"] = json.loads(f["raw_data"]) if f.get("raw_data") else None
         except Exception:
             f["raw"] = None
+        # Attach the per-signature enrichment so the PDF can render the
+        # LLM-driven exploit-chain and attacker-workflow narrative
+        # alongside each finding. We only need a handful of columns;
+        # everything else (bug-report markdown, jira summary) is
+        # ticket-only and would just bloat the PDF. The query is
+        # joined on enrichment_id rather than re-signaturing so the
+        # PDF and the web UI agree on which enrichment row is bound
+        # to which finding row.
+        f["enrichment"] = None
+        f["enrichment_id"] = None
+        # The findings SELECT a few rows up doesn't include
+        # enrichment_id (kept lean for the heat-map / scoring pipeline);
+        # fetch the pointer here per finding. Single-row indexed
+        # lookup so the extra query is cheap.
+        eid_row = db.query_one(
+            "SELECT enrichment_id FROM findings WHERE id = %s", (f["id"],))
+        eid = (eid_row or {}).get("enrichment_id")
+        if eid:
+            e = db.query_one(
+                "SELECT description_long, impact, remediation_long, "
+                "       remediation_steps, references_json, "
+                "       prerequisites_json, exploit_chain_json, "
+                "       attacker_workflow, likelihood, "
+                "       likelihood_rationale, detection_difficulty "
+                "FROM finding_enrichment WHERE id = %s", (eid,))
+            if e:
+                # Decode JSON columns once so the Jinja template can
+                # iterate them directly without filter gymnastics.
+                try:
+                    e["steps"] = json.loads(e.get("remediation_steps") or "[]")
+                except Exception:
+                    e["steps"] = []
+                try:
+                    e["references"] = json.loads(e.get("references_json") or "[]")
+                except Exception:
+                    e["references"] = []
+                try:
+                    e["prerequisites"] = json.loads(e.get("prerequisites_json") or "[]")
+                except Exception:
+                    e["prerequisites"] = []
+                try:
+                    e["exploit_chain"] = json.loads(e.get("exploit_chain_json") or "[]")
+                except Exception:
+                    e["exploit_chain"] = []
+                f["enrichment"] = e
+                f["enrichment_id"] = eid
         # The probe stores the confirmed credential pair under
         # evidence.confirmed (and the per-attempt log under
         # evidence.attempts[]). We pull the password from there to
