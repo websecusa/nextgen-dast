@@ -248,6 +248,45 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Hotfix: orchestrator log.info NameError +
+  operator "Stop agentic_ai_testing" button.**
+
+  Bug fix: the Round-4 cross-source dedup pass at
+  `scripts/orchestrator.py` lines 938 / 946 used `log.info(...)` /
+  `log.warning(...)` against a name that doesn't exist in the
+  orchestrator module (the orchestrator writes to its log via
+  `print()`, not a `logging` logger). Result: every scan that
+  reached the dedup pass crashed with `NameError: name 'log' is not
+  defined` -- the agentic findings landed safely but the
+  consolidation pass never ran, and the assessment row went to
+  `status='error'`. Fix: replace both calls with `print(...)` to
+  the same stream the rest of the orchestrator uses. Caught after
+  it bit assessment 66 (recovered manually by running
+  `dedup.apply_cross_source_dedup(66)` + `consolidation.run(66, ep)`
+  via docker-exec; 37 clusters demoted, $0.25 consolidation spend,
+  risk_score 96).
+
+  Feature: operator kill switch for the agentic_ai_testing phase.
+  Long-running agentic runs (per-finding x N + free-roam) can rack
+  up meaningful LLM spend on installs that pre-date Round 5 (no
+  per-turn budget gate). The "Stop agentic_ai_testing" button on
+  the workspace flips `assessments.agentic_stop_requested=1`; the
+  agent polls that column at the top of each turn + before each
+  per-finding dive and exits gracefully with
+  `stopped_by_operator=true` in its summary. The orchestrator then
+  continues to dedup + consolidation as if the agent had finished
+  naturally -- the already-spent budget is not recovered, but the
+  rest of the pass is. The button only renders during the agentic
+  phase (`current_step LIKE 'agentic_ai:%' AND status IN
+  ('running','queued')`); once the agent acknowledges the stop and
+  the orchestrator moves to dedup, the button disappears and a
+  brief "stop requested -- agent will exit on its next turn"
+  indicator takes its place until the page next polls.
+
+  Schema: `assessments.agentic_stop_requested TINYINT(1) NOT NULL
+  DEFAULT 0`, boot migration
+  `m_2026_05_12_add_agentic_stop_requested` (idempotent).
+
 - **2026-05-12** — **Round-5 shared LLM budget + downstream
   reservation, admin button to backfill exploit-chain enrichment
   on legacy rows.** Two related fixes for "the agentic pass can

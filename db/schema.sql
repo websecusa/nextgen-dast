@@ -683,6 +683,16 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
   -- the semantics. Copied into every materialized assessment.
   agentic_deep_dive_count INT NOT NULL DEFAULT 5,
   agentic_extra TINYINT(1) NOT NULL DEFAULT 0,
+  -- Operator-set kill switch for the agentic_ai_testing phase. The
+  -- agentic loop polls this column at the top of each turn + before
+  -- each per-finding dive and exits gracefully when it flips to 1.
+  -- The orchestrator then proceeds to dedup + consolidation as if
+  -- the agent had finished naturally. Cost-control mechanism for
+  -- long-running agentic runs an operator wants to abort. Only
+  -- applies to one assessment; reset to 0 implicitly by the next
+  -- scan since this column lives on the assessments row not in a
+  -- session-level place.
+  agentic_stop_requested TINYINT(1) NOT NULL DEFAULT 0,
   next_run_at DATETIME NULL,
   last_run_at DATETIME NULL,
   last_assessment_id INT NULL,

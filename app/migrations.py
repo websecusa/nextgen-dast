@@ -585,6 +585,13 @@ MIGRATIONS: list = [
     # the loser of a dedup tie. Idempotent.
     ("2026_05_12_add_dedup_of",
      lambda: __import__("__main__")),
+    # 2026-05-12 (post-Round-5): operator kill-switch column for the
+    # agentic_ai_testing phase. Add agentic_stop_requested TINYINT(1)
+    # on assessments so the "Stop agentic_ai_testing" button can
+    # signal the running agent to exit gracefully and let the
+    # orchestrator continue to dedup + consolidation. Idempotent.
+    ("2026_05_12_add_agentic_stop_requested",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -804,6 +811,35 @@ def m_2026_05_12_add_agentic_columns() -> str:
     return "all agentic columns already present -- no-op"
 
 
+def m_2026_05_12_add_agentic_stop_requested() -> str:
+    """Add the operator-set agentic kill-switch column to assessments
+    on existing 2.1.1 deployments.
+
+    Why: long-running agentic_ai_testing passes can rack up
+    meaningful LLM spend before the per-turn budget gate catches up
+    (and on installs that pre-date Round 5, the gate doesn't exist
+    at all). The "Stop agentic_ai_testing" button on the assessment
+    workspace flips this column to 1; the agentic loop polls it at
+    the top of each turn + before each per-finding dive and exits
+    gracefully, letting the orchestrator proceed to dedup +
+    consolidation as if the agent finished naturally.
+
+    Idempotent: gated on information_schema. Default 0 matches the
+    fresh-install schema."""
+    row = db.query_one(
+        "SELECT 1 AS exists_ FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() "
+        "  AND table_name = 'assessments' "
+        "  AND column_name = 'agentic_stop_requested'")
+    if row and row.get("exists_"):
+        return "assessments.agentic_stop_requested already present -- no-op"
+    db.execute(
+        "ALTER TABLE assessments "
+        "ADD COLUMN agentic_stop_requested TINYINT(1) NOT NULL DEFAULT 0 "
+        "AFTER agentic_extra")
+    return "added assessments.agentic_stop_requested"
+
+
 def m_2026_05_12_add_dedup_of() -> str:
     """Add the cross-source dedup pointer column to findings on
     existing 2.1.1 deployments.
@@ -911,6 +947,8 @@ _LATE_BIND = {
         m_2026_05_12_add_agentic_columns,
     "2026_05_12_add_dedup_of":
         m_2026_05_12_add_dedup_of,
+    "2026_05_12_add_agentic_stop_requested":
+        m_2026_05_12_add_agentic_stop_requested,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:

@@ -319,6 +319,24 @@ def _safety_check(method: str, url: str, body: dict | None) -> str:
 # SafeClient construction
 # ---------------------------------------------------------------------------
 
+def _stop_requested(aid: int) -> bool:
+    """Read the operator kill-switch column. Returns True when the
+    "Stop agentic_ai_testing" button has been clicked for this
+    assessment. A False return on a DB error is intentional: a
+    transient query failure must not abort the agent (the alternative
+    is to crash the loop on a network blip), so absence of evidence
+    is treated as 'keep going'."""
+    try:
+        row = db.query_one(
+            "SELECT agentic_stop_requested FROM assessments "
+            "WHERE id=%s", (aid,))
+    except Exception:
+        return False
+    if not row:
+        return False
+    return int(row.get("agentic_stop_requested") or 0) == 1
+
+
 def _build_safeclient(scope_hosts: tuple[str, ...],
                       max_requests: int,
                       session_cookie: Optional[str],
@@ -656,7 +674,7 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
     out = {"findings_inserted": 0, "turns": 0,
            "llm_in": 0, "llm_out": 0, "errors": [],
            "finish_rationale": "", "dedup_refused": 0,
-           "budget_exhausted": False}
+           "budget_exhausted": False, "stopped_by_operator": False}
     api_key = endpoint.get("api_key") or ""
     # Round 5A: shared per-assessment budget. The agent's slice is
     # `cap - reservation`; the closing passes (enrichment +
@@ -668,6 +686,23 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
     budget = llm_budget.get(aid)
     projected = llm_budget.project_turn_cost(model)
     for _ in range(max_turns):
+        # Operator-set kill switch (assessments.agentic_stop_requested).
+        # Polled per-turn so the "Stop agentic_ai_testing" button on
+        # the workspace can abort the loop within a few seconds. We
+        # poll the DB rather than using a Python event because the
+        # orchestrator + agent live in the same process tree but the
+        # button is a request to the OTHER process (the web server),
+        # which has no shared-memory channel back. The DB column is
+        # the cheapest cross-process signal we have.
+        if _stop_requested(aid):
+            out["stopped_by_operator"] = True
+            out["finish_rationale"] = (
+                "stopped by operator via 'Stop agentic_ai_testing' "
+                "button; orchestrator will continue to dedup + "
+                "consolidation")
+            logger.info("agentic_ai: %s -- aid=%s mode=%s",
+                        out["finish_rationale"], aid, mode)
+            break
         if budget.would_exhaust_pass(projected):
             out["budget_exhausted"] = True
             out["finish_rationale"] = (
@@ -1017,7 +1052,8 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
     summary = {"runs": 0, "findings_inserted": 0,
                 "llm_in": 0, "llm_out": 0,
                 "errors": [], "dedup_refused": 0,
-                "budget_exhausted": False}
+                "budget_exhausted": False,
+                "stopped_by_operator": False}
     # Build the live dedup index ONCE for the whole pass. Each
     # per-finding sub-run shares it so an agent emission in run 2
     # is checked against agent emissions in run 1 too. Excludes
@@ -1031,6 +1067,18 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
     preamble = dedup_mod.build_already_known_preamble(
         aid, exclude_source_tools={"agentic_ai_testing"})
     for f in candidates:
+        # Operator stop signal between dives. Each per-finding dive
+        # can run 3-5 minutes, so the inner-loop per-turn check is
+        # the main responsiveness gate; this is the coarse backup
+        # that catches a click between dives even if the inner
+        # check happened to fall right after the previous dive's
+        # last turn.
+        if _stop_requested(aid):
+            summary["stopped_by_operator"] = True
+            logger.info(
+                "agentic_ai: per-finding loop stopped by operator "
+                "after %d runs -- aid=%s", summary["runs"], aid)
+            break
         # Re-check budget between dives -- prior runs in this loop
         # may have burned through the slice, and we want subsequent
         # dives to bail out cleanly rather than start a doomed loop.
@@ -1164,6 +1212,12 @@ def run_free_roam(aid: int, fqdn: str) -> dict:
         return {"errors": ["no anthropic llm_endpoint available"]}
     model = _agentic_model()
     session_cookie = _get_session_cookie(a)
+    # Operator stop signal before free-roam fires its first turn.
+    # If the per-finding pass was killed by the button, free-roam
+    # would inherit the same kill intent -- there's no concept of
+    # "stop deep-dive but run free-roam." Skip the pass entirely.
+    if _stop_requested(aid):
+        return {"skipped": "stopped by operator before free-roam started"}
     # Round 5A: same pre-check as per-finding. Free-roam is the more
     # expensive pass (80 HTTP / 60 turns) so it's the most likely to
     # be skipped on a budget that's already been heavily used by the
