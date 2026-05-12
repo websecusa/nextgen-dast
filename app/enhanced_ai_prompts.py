@@ -228,6 +228,59 @@ RESPONSE SAMPLES (subset of bodies showing data shape)
 """
 
 
+_COLLECTION_AUDIT_BODY = """\
+You are an API Security Reviewer. Your only task on this run is to look at GET endpoints that return COLLECTIONS (lists of records, paginated or not) and decide, for each one, whether the response contains rows belonging to users other than the authenticated session that issued the request.
+
+The common failure mode you are hunting:
+  - A GET /api/{Resource} (no id in the URL) returns the underlying table rather than rows scoped to the caller's user_id / tenant_id.
+  - The endpoint authenticates the caller but does NOT filter the result set by ownership.
+  - Symptoms in the captured response: UserId / OwnerId / TenantId fields that differ from the session's identity; record counts >= the global user count; cross-account email addresses; admin records visible to non-admin sessions.
+
+Procedure per candidate endpoint:
+1. Identify candidate collection endpoints from AUTHENTICATED ENDPOINTS — paths that match GET /api/{Resource}, GET /api/{Resource}s, GET /rest/{Resource}, or any GraphQL `query { resourceConnection { nodes { ... } } }` shape. Skip endpoints whose URL includes a path id (those are the per-record BOLA case the other scenario covers).
+2. For each candidate, locate its body in AUTHENTICATED RESPONSE SAMPLES. Quote a verbatim excerpt that shows ownership-bearing fields (UserId, AuthorId, TenantId, customerId, ownerEmail, etc.).
+3. Emit a finding only when the excerpt PROVES cross-tenant exposure — i.e., the excerpt shows at least one record whose ownership field is not the authenticated identity. If the response is empty / single-record / clearly scoped, skip; do not speculate.
+4. For each finding, the reproduction MUST be a curl that fetches the endpoint with the authenticated bearer token and pipes the response through `jq` to count distinct UserId values. The remediation MUST name the server-side filter clause that needs to be added (e.g., `WHERE UserId = :session.user_id`).
+
+Severity rubric:
+  - critical = collection exposes admin-only authentication metadata (deluxeToken, totpSecret, password hash, security answer) across users
+  - high    = collection exposes PII or business activity belonging to other users (addresses, orders, baskets, recycle records, feedback, complaints)
+  - medium  = collection exposes identifiers and timestamps but no sensitive payload
+  - low     = collection exposes counts / aggregates that enable enumeration but no per-record data
+
+Hard rules carried over from the global HEADER:
+  - Reproduction must be a non-destructive GET. Never propose POST / PUT / DELETE here -- this scenario is read-only by construction.
+  - Do not emit findings whose evidence is only an URL line ("GET /api/Whatever returned 200"); the excerpt must show the cross-tenant rows.
+  - One finding per distinct collection endpoint. Do not produce a separate finding per leaked record.
+"""
+
+_COLLECTION_AUDIT_USER = """\
+TARGET
+======
+{fqdn} ({profile} scan)
+
+AUTHENTICATED ENDPOINTS captured during the scan
+==================================================
+{authenticated_endpoints}
+
+STATE-MUTATING ENDPOINTS (used here only as a signal that the app has a real authenticated API surface — NOT the audit target)
+================================================================================================================================
+{state_mutating_endpoints}
+
+AUTHENTICATED RESPONSE SAMPLES (collection bodies captured under the session)
+============================================================================
+{authenticated_responses}
+
+OBJECT-ID PATTERNS auto-extracted from the captured traffic (sanity-check the ownership fields you see in response bodies against this list)
+==============================================================================================================================================
+{object_id_patterns}
+
+TENANT IDENTIFIERS observed in the captured traffic (these are the values that must scope the response — if a collection returns rows whose tenant value is NOT one of these, that's the bug)
+=========================================================================================================================================================================================
+{tenant_identifiers}
+"""
+
+
 _MASS_ASSIGNMENT_BODY = """\
 You are an Application Security Engineer specializing in modern MVC and API frameworks (Rails ActiveRecord, Django ORM, Spring Data, Laravel Eloquent, Sequelize). You are reviewing telemetry from an authorized DAST scan to find Mass Assignment / Auto-Binding vulnerabilities that regex scanners cannot detect.
 
@@ -1059,6 +1112,17 @@ DEFAULTS: list[dict] = [
        "Construct rate-limiter bypasses (GraphQL aliases, IP-spoofing headers, "
        "application-layer key tricks) for high-value endpoints.",
        _RATE_LIMIT_BODY, _RATE_LIMIT_USER),
+
+    _w("Collection Endpoint Authorization Audit", 105,
+       "has_creds AND (has_state_mutating_endpoint OR findings_count >= 5)",
+       "bola_idor",
+       "Audit every GET collection endpoint reachable under the captured "
+       "authenticated session for cross-tenant data exposure. The scenario "
+       "is BOLA-shaped but targets list/collection paths (no id in URL) "
+       "where missing server-side ownership filters return rows belonging "
+       "to other users -- a class the per-record BOLA scenario does not "
+       "always reach.",
+       _COLLECTION_AUDIT_BODY, _COLLECTION_AUDIT_USER),
 
     # ---- extended scenarios (sort_order 110-200) -------------------------
     # Each fires unconditionally on every scan because none of the existing

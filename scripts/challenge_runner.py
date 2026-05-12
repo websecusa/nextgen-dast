@@ -423,12 +423,35 @@ def run(aid: int, safe_only: bool = False) -> None:
                     (new_status, probe_label,
                      json.dumps(verdict, default=str)[:65000], f["id"]))
         else:
-            db.execute(
-                "UPDATE findings SET validation_status = %s, "
-                "validation_probe = %s, validation_run_at = NOW(), "
-                "validation_evidence = %s WHERE id = %s",
-                (new_status, probe_label,
-                 json.dumps(verdict, default=str)[:65000], f["id"]))
+            # Special case: a probe that errors out against an
+            # enhanced_ai_testing-source finding is almost always a
+            # schema mismatch (the LLM emits a vulnerability
+            # description without a probe-shaped evidence_url, so the
+            # toolkit probe or fast-path dispatcher cannot construct a
+            # valid request) rather than a real refutation. Writing
+            # 'errored' onto these rows traps them in a non-default
+            # validation_status that the LLM fidelity grader then
+            # skips, leaving the LLM's most actionable findings stuck
+            # in limbo. Preserve the prior validation_status (typically
+            # the default 'unvalidated') so the fidelity loop and the
+            # UI both see them as still triageable; record what the
+            # probe attempted in validation_evidence so an analyst can
+            # see why no verdict landed.
+            if (new_status == "errored"
+                    and (f.get("source_tool") or "").lower() == "enhanced_ai_testing"):
+                db.execute(
+                    "UPDATE findings SET "
+                    "validation_probe = %s, validation_run_at = NOW(), "
+                    "validation_evidence = %s WHERE id = %s",
+                    (probe_label,
+                     json.dumps(verdict, default=str)[:65000], f["id"]))
+            else:
+                db.execute(
+                    "UPDATE findings SET validation_status = %s, "
+                    "validation_probe = %s, validation_run_at = NOW(), "
+                    "validation_evidence = %s WHERE id = %s",
+                    (new_status, probe_label,
+                     json.dumps(verdict, default=str)[:65000], f["id"]))
 
         time.sleep(0.5)
 

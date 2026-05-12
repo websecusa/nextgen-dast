@@ -1878,6 +1878,120 @@ def _g3_downgrade_if_scanner_only(item: dict) -> dict | None:
     return audit
 
 
+_DEDUP_STOPWORDS = frozenset((
+    "the", "a", "an", "is", "are", "in", "on", "of", "to", "for", "and",
+    "or", "with", "via", "by", "from", "as", "at", "be", "this", "that",
+    "endpoint", "endpoints", "exposed", "unauthenticated", "missing",
+    "request", "response", "leak", "leaks", "leaking", "internal",
+    "external", "application", "applications", "leakage",
+))
+
+
+_DEDUP_VULN_CLASSES = (
+    # Order matters: longer / more specific phrases first so "xss" doesn't
+    # win over "stored xss" when the title carries both.
+    ("stored_xss",          (r"stored\s+xss",)),
+    ("reflected_xss",       (r"reflected\s+xss",)),
+    ("dom_xss",             (r"dom[\s-]+xss",)),
+    ("xss",                 (r"\bxss\b", r"cross[\s-]+site\s+scripting")),
+    ("sqli_union",          (r"union[\s-]+(?:based\s+)?sql", r"union\s+select")),
+    ("sqli",                (r"\bsqli\b", r"sql\s+injection")),
+    ("nosqli",              (r"nosql\s+injection", r"\bnosqli\b",
+                             r"mongo[\s-]*operator", r"\$ne\b")),
+    ("xxe",                 (r"\bxxe\b", r"xml\s+external\s+entity")),
+    ("ssrf",                (r"\bssrf\b", r"server[\s-]+side\s+request")),
+    ("idor_bola",           (r"\bidor\b", r"\bbola\b",
+                             r"broken\s+object[\s-]+level\s+authorization",
+                             r"object[\s-]+level\s+authorization")),
+    ("mass_assignment",     (r"mass[\s-]+assignment", r"auto[\s-]+bind")),
+    ("prototype_pollution", (r"prototype[\s-]+pollution", r"__proto__")),
+    ("open_redirect",       (r"open[\s-]+redirect",)),
+    ("jwt_alg_none",        (r"alg\s*[:=]\s*none",
+                             r"alg[\s-]*none",
+                             r"signature\s+not\s+verified")),
+    ("jwt_no_exp",          (r"no\s+exp(?:iration|iry)?",
+                             r"missing\s+(?:`?exp`?|expir)",
+                             r"never\s+expir")),
+    ("jwt_key_confusion",   (r"key\s+confusion", r"rs256.+hs256",
+                             r"hs256.+rs256")),
+    ("metrics_exposed",     (r"prometheus[\s/]*metrics", r"/metrics\b")),
+    ("swagger_exposed",     (r"swagger", r"openapi", r"/api-docs")),
+    ("admin_config_exposed",(r"application[\s-]+configuration",
+                             r"/rest/admin",)),
+    ("cors_wildcard",       (r"cors\s+wildcard",
+                             r"access[\s-]+control[\s-]+allow[\s-]+origin.*\*")),
+    ("verbose_error",       (r"verbose\s+error",
+                             r"stack\s+trace",
+                             r"framework\s+(?:version\s+)?(?:disclos|leak)")),
+    ("directory_listing",   (r"directory\s+listing",
+                             r"/ftp/?\s|^/ftp\b")),
+    ("hardcoded_secret",    (r"hardcoded\s+(?:credentials?|secrets?|"
+                             r"passwords?|tokens?)",
+                             r"client[\s-]*side\s+(?:credentials?|secrets?)",
+                             r"main\.js\s+.*creds?")),
+    ("rate_limit_missing",  (r"brute[\s-]+force",
+                             r"no\s+rate[\s-]+limit",
+                             r"missing\s+rate[\s-]+limit",
+                             r"account\s+lockout")),
+)
+
+
+def _classify_vuln_class(haystack: str) -> str:
+    """Map a title+evidence string to a coarse vuln-class key. Returns
+    '' when no class matched -- the caller falls back to the
+    URL+token signature for those rows."""
+    for key, patterns in _DEDUP_VULN_CLASSES:
+        for pat in patterns:
+            if re.search(pat, haystack, re.IGNORECASE):
+                return key
+    return ""
+
+
+def _dedup_signature(title: str, evidence: str, owasp: str,
+                     severity: str) -> str:
+    """Produce a normalised signature for cross-scenario LLM finding
+    dedup. Strategy (in order of precedence):
+      1. If a vuln-class keyword (xss / sqli / idor / metrics_exposed /
+         etc.) AND a URL path are both present in title+evidence, the
+         signature is severity|owasp|vuln_class|url_path. This is the
+         tight case: rephrasings of "Prometheus /metrics exposed"
+         across scenarios collapse into the same bucket regardless of
+         descriptive wording.
+      2. If only a vuln-class keyword fires, sig is
+         severity|owasp|vuln_class (groups every same-class finding
+         across this assessment -- aggressive, but appropriate for an
+         LLM that has a habit of restating the same bug under multiple
+         scenarios).
+      3. If only a URL fires, sig is severity|owasp|<url>.
+      4. Otherwise, fall back to the sorted content-token set.
+
+    Empty signature ('') disables dedup for that row -- the caller
+    inserts unconditionally."""
+    haystack = f"{title} {evidence}".lower()
+    url_paths = re.findall(r"/[a-z0-9_\-/.]{2,}", haystack)
+    # Strip URLs out before classifying words and tokens.
+    stripped = re.sub(r"https?://[^\s)>'\"]+|/[a-z0-9_\-/.]+", " ", haystack)
+    cls = _classify_vuln_class(haystack)
+    primary_url = ""
+    if url_paths:
+        # Pick the shortest URL path -- usually the most stable
+        # canonical form (`/metrics` over `/metrics/foo/bar`).
+        primary_url = min(
+            {u.rstrip("/.,;:") for u in url_paths},
+            key=len)
+    if cls and primary_url:
+        return f"{severity}|{owasp}|{cls}|{primary_url}"
+    if cls:
+        return f"{severity}|{owasp}|{cls}"
+    if primary_url:
+        return f"{severity}|{owasp}|url:{primary_url}"
+    words = re.findall(r"[a-z0-9]{3,}", stripped)
+    content = sorted({w for w in words if w not in _DEDUP_STOPWORDS})
+    if not content:
+        return ""
+    return f"{severity}|{owasp}|tok:" + "|".join(content)
+
+
 def _insert_weakness_findings(aid: int, prompt_row: dict,
                                 items: list) -> int:
     """Validate + insert LLM-emitted findings as source_tool=
@@ -1887,12 +2001,52 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
     constraints, and a strict caller would lose every other finding in
     the batch as collateral.
 
+    Cross-scenario dedup: each candidate is reduced to a stable
+    signature (severity + owasp_category + sorted content-token set
+    drawn from title + llm_evidence with URLs preserved). Signatures
+    seen in a prior enhanced_ai_testing finding on this assessment
+    cause the candidate to be skipped silently — this prevents the
+    `/metrics` exposed finding from emitting four near-duplicate
+    rows when multiple weakness-discovery scenarios independently
+    surface it. The signature set is loaded once at the top of the
+    inserter so the cost is one SELECT per scenario, not per item.
+
     Runs the mechanical G3 post-processor (`_g3_downgrade_if_scanner_only`)
     before insert so a finding whose only evidence is a scanner URL
     line cannot be persisted at high/critical."""
     if not items or not isinstance(items, list):
         return 0
+    # Pre-load signatures for every enhanced_ai_testing finding the
+    # assessment has accumulated so far. Includes findings emitted by
+    # earlier weakness-discovery scenarios in the same run as well as
+    # any findings carried over from re-runs. We do NOT cross-match
+    # against probe-emitted findings here -- the LLM may legitimately
+    # restate a probe finding with extra reasoning, and the
+    # consolidation pass groups by enrichment_id which catches the
+    # cross-source case at roll-up time.
+    seen_sigs: set[str] = set()
+    prior_rows = db.query_all(
+        "SELECT title, severity, owasp_category, raw_data "
+        "FROM findings "
+        "WHERE assessment_id=%s AND source_tool='enhanced_ai_testing'",
+        (aid,))
+    for pr in prior_rows:
+        prior_ev = ""
+        try:
+            pr_raw = json.loads(pr.get("raw_data") or "{}")
+            if isinstance(pr_raw, dict):
+                prior_ev = (pr_raw.get("llm_evidence") or "")
+        except Exception:
+            pr_raw = None
+        sig = _dedup_signature(
+            pr.get("title") or "", prior_ev,
+            pr.get("owasp_category") or "",
+            (pr.get("severity") or "").lower())
+        if sig:
+            seen_sigs.add(sig)
+
     n = 0
+    skipped_dups = 0
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -1939,6 +2093,22 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
         # The original scenario label is preserved in raw_data.
         # llm_category for traceability.
         owasp_code = _scenario_to_owasp(category)
+
+        # Cross-scenario dedup gate. Skip the insert if a previously-
+        # emitted enhanced_ai_testing finding on this assessment
+        # already carries the same content signature. Add the new
+        # signature to the set so duplicates WITHIN this scenario's
+        # JSON array also collapse (the LLM sometimes emits a same-
+        # bug pair under slightly different titles). Empty signature
+        # disables dedup for that row -- usually means the title was
+        # a single short generic phrase the heuristic can't bucket.
+        sig = _dedup_signature(title, evidence, owasp_code[:64], sev)
+        if sig and sig in seen_sigs:
+            skipped_dups += 1
+            continue
+        if sig:
+            seen_sigs.add(sig)
+
         raw = {"llm_scenario": prompt_row.get("name"),
                 "llm_prompt_id": prompt_row.get("id"),
                 "llm_category": category,
@@ -1966,6 +2136,11 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
             json.dumps(raw, default=str),
         ))
         n += 1
+    if skipped_dups:
+        logger.info("enhanced_ai dedup: skipped %d duplicate finding(s) "
+                    "from prompt #%s (%s)",
+                    skipped_dups, prompt_row.get("id"),
+                    prompt_row.get("name") or "")
     return n
 
 
@@ -1978,13 +2153,22 @@ def _run_fidelity(aid: int, endpoint: dict, telemetry: dict,
     for merging into the top-level run() summary."""
     out = {"evaluated": 0, "auto_flipped": 0, "batches_run": 0,
             "errors": []}
+    # Selection includes 'errored' so findings the probe pass could not
+    # decisively validate or refute (transient network failure, probe
+    # subprocess crash, schema mismatch on LLM-emitted rows) still get
+    # a shot at LLM triage. The fidelity grader does not need probe
+    # evidence -- it judges from the finding's title / evidence /
+    # raw_data -- so a probe-erroring verdict is not a reason to skip
+    # the row. Without this, any finding that exited challenge_runner
+    # in 'errored' state would stay there permanently regardless of
+    # how clear-cut the underlying evidence is.
     findings = db.query_all(
         "SELECT id, source_tool, severity, owasp_category, cwe, "
         "title, description, evidence_url, evidence_method, raw_data, "
         "validation_status, validation_probe, validation_evidence "
         "FROM findings WHERE assessment_id=%s "
         "  AND severity != 'info' "
-        "  AND validation_status IN ('unvalidated','inconclusive') "
+        "  AND validation_status IN ('unvalidated','inconclusive','errored') "
         "ORDER BY FIELD(severity,'critical','high','medium','low'), id",
         (aid,))
     if not findings:

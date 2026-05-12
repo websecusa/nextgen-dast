@@ -562,6 +562,16 @@ MIGRATIONS: list = [
     # safely re-runnable.
     ("2026_05_12_add_exploit_chain_columns",
      lambda: __import__("__main__")),
+    # 2026-05-12: rewind enhanced_ai_testing findings stuck on
+    # validation_status='errored' to 'unvalidated' so the (now-fixed)
+    # fidelity grader picks them up. See
+    # m_2026_05_12_unstick_llm_errored_validations for the full root
+    # cause writeup; the gist is that probe failures against
+    # URL-less LLM findings were being trapped on the row as a
+    # verdict the grader then skipped. Idempotent: re-runs against a
+    # clean database are a no-op.
+    ("2026_05_12_unstick_llm_errored_validations",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -728,6 +738,54 @@ def m_2026_05_12_add_exploit_chain_columns() -> str:
     return "all exploit-chain columns already present — no-op"
 
 
+def m_2026_05_12_unstick_llm_errored_validations() -> str:
+    """Reset validation_status='errored' on enhanced_ai_testing-source
+    findings back to 'unvalidated' so the LLM fidelity grader can pick
+    them up on the next re-run.
+
+    Why: the auto-validation pass (challenge_runner) was running
+    toolkit probes against LLM-emitted findings whose evidence_url
+    was NULL (LLM output rarely conforms to the strict probe schema).
+    The probe could not construct a valid request and returned an
+    'errored' verdict, which got written onto the finding row. The
+    fidelity selection then excluded 'errored' rows, so the LLM's
+    most actionable findings were stuck in limbo, neither validated
+    nor refuted, with no path back to triage. The new code path in
+    challenge_runner stops overwriting validation_status on these
+    rows; this migration backfills already-deployed databases so the
+    fix is visible without re-running the assessment.
+
+    The original probe error transcript is preserved in
+    validation_evidence (and accessible from the finding detail page)
+    so an analyst can still see what was attempted -- only the
+    status flag is rewound. Probes have been rerun on each finding
+    multiple times under ERROR_RETRY_ATTEMPTS, so 'errored' here is a
+    persistent schema mismatch, not a transient flake worth waiting
+    on.
+
+    Scope is narrowly limited to source_tool='enhanced_ai_testing'
+    because non-LLM sources DO have probe-shaped evidence -- an
+    'errored' verdict on a wapiti / nikto / nuclei finding usually
+    means a real probe failure (target offline, TLS handshake
+    failure, etc.) that the analyst should keep visible."""
+    rows = db.query_all(
+        """SELECT id FROM findings
+            WHERE source_tool = 'enhanced_ai_testing'
+              AND validation_status = 'errored'""")
+    if not rows:
+        return "no stuck enhanced_ai_testing errored rows to reset"
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join(["%s"] * len(ids))
+    db.execute(
+        f"""UPDATE findings
+              SET validation_status = 'unvalidated'
+            WHERE id IN ({placeholders})""",
+        tuple(ids))
+    return (f"reset {len(ids)} enhanced_ai_testing finding(s) from "
+            f"'errored' back to 'unvalidated' (probe error transcripts "
+            f"preserved in validation_evidence)")
+
+
 # Re-bind the placeholders in MIGRATIONS now that the functions exist.
 # The registration list is built at import time so we patch it here
 # rather than re-ordering the file (the dedup migrations need their
@@ -741,6 +799,8 @@ _LATE_BIND = {
         m_2026_05_04_add_web_header_logo_dark_filename,
     "2026_05_12_add_exploit_chain_columns":
         m_2026_05_12_add_exploit_chain_columns,
+    "2026_05_12_unstick_llm_errored_validations":
+        m_2026_05_12_unstick_llm_errored_validations,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:
