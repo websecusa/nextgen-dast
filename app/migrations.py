@@ -553,6 +553,15 @@ MIGRATIONS: list = [
     # POSTs to it. Idempotent ALTER TABLE -- safe to re-run.
     ("2026_05_04_add_web_header_logo_dark_filename",
      lambda: __import__("__main__")),
+    # 2026-05-12: add the exploit-chain / attacker-workflow / likelihood
+    # columns to finding_enrichment so the LLM enrichment pipeline can
+    # persist its deeper exploit-chain validation, and the web detail
+    # page + PDF report can render an "attacker workflow" card. Fresh
+    # installs get the columns from schema.sql; this migration only
+    # adds the columns when they are not already present, so it is
+    # safely re-runnable.
+    ("2026_05_12_add_exploit_chain_columns",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -668,6 +677,57 @@ def m_2026_05_04_add_web_header_logo_dark_filename() -> str:
             "(dark-mode web logo)")
 
 
+def m_2026_05_12_add_exploit_chain_columns() -> str:
+    """Add the six exploit-chain / attacker-workflow / likelihood
+    columns to `finding_enrichment` on existing 2.1.1 deployments.
+
+    Why: the 2026-05 release extends finding enrichment so the LLM
+    output now includes a kill-chain breakdown, an attacker workflow
+    narrative, prerequisites the attacker needs to line up, an
+    exploitation-likelihood band with rationale, and a detection
+    difficulty hint. The web finding-detail page and the PDF report
+    both render these fields. Fresh installs pick them up from
+    schema.sql; this migration is the upgrade path for databases
+    seeded under the prior schema.
+
+    Idempotent: each ADD COLUMN is gated on an information_schema
+    lookup so a re-run on an already-migrated DB is a no-op. The
+    columns are added one at a time so a partial failure mid-list
+    leaves the rest intact for the next boot's retry."""
+    columns = [
+        ("prerequisites_json",   "TEXT",
+            "AFTER suggested_priority"),
+        ("exploit_chain_json",   "TEXT",
+            "AFTER prerequisites_json"),
+        ("attacker_workflow",    "TEXT",
+            "AFTER exploit_chain_json"),
+        ("likelihood",           "ENUM('very_low','low','medium','high','very_high') NULL",
+            "AFTER attacker_workflow"),
+        ("likelihood_rationale", "TEXT",
+            "AFTER likelihood"),
+        ("detection_difficulty", "ENUM('easy','moderate','hard') NULL",
+            "AFTER likelihood_rationale"),
+    ]
+    added = []
+    skipped = []
+    for name, ddl, position in columns:
+        row = db.query_one(
+            "SELECT 1 AS exists_ FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "  AND table_name = 'finding_enrichment' "
+            "  AND column_name = %s", (name,))
+        if row and row.get("exists_"):
+            skipped.append(name)
+            continue
+        db.execute(
+            f"ALTER TABLE finding_enrichment ADD COLUMN {name} {ddl} {position}")
+        added.append(name)
+    if added:
+        return (f"added {len(added)} column(s): {', '.join(added)}"
+                + (f"; {len(skipped)} already present" if skipped else ""))
+    return "all exploit-chain columns already present — no-op"
+
+
 # Re-bind the placeholders in MIGRATIONS now that the functions exist.
 # The registration list is built at import time so we patch it here
 # rather than re-ordering the file (the dedup migrations need their
@@ -679,6 +739,8 @@ _LATE_BIND = {
         m_2026_05_03_refresh_fidelity_prompt_for_role_scope,
     "2026_05_04_add_web_header_logo_dark_filename":
         m_2026_05_04_add_web_header_logo_dark_filename,
+    "2026_05_12_add_exploit_chain_columns":
+        m_2026_05_12_add_exploit_chain_columns,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:

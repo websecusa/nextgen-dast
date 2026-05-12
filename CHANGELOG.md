@@ -248,6 +248,56 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **LLM-driven exploit-chain validation and attacker
+  workflow demonstrations on every finding.** The per-finding
+  enrichment pipeline now asks the configured LLM endpoint not just
+  for description / impact / remediation but for a calibrated risk
+  story: a qualitative `likelihood` band (very-low ... very-high)
+  with a written `likelihood_rationale`, a `detection_difficulty`
+  hint (easy / moderate / hard), an ordered `prerequisites` list of
+  conditions that must line up for the exploit to succeed, an
+  ordered `exploit_chain` of `{phase, action, evidence}` kill-chain
+  steps, and a free-text `attacker_workflow` narrative that names
+  the realistic tools (Burp, sqlmap, ffuf, jwt_tool, etc.) a
+  moderately skilled attacker would use to weaponize the finding
+  into business impact. Phases follow a fixed vocabulary
+  (Reconnaissance, Initial Access, Discovery, Exploitation,
+  Privilege Escalation, Lateral Movement, Impact) so the PDF can
+  group by kill-chain stage. The prompt also gives the model
+  explicit calibration guidance — chained prerequisites lower
+  likelihood, unauthenticated RCE with public PoCs raises it — so
+  the band is honest rather than inflated by default.
+
+  Six new columns on `finding_enrichment` (`prerequisites_json`,
+  `exploit_chain_json`, `attacker_workflow`, `likelihood`,
+  `likelihood_rationale`, `detection_difficulty`) persist the
+  enrichment so the LLM is only billed once per signature.
+  Migration `2026_05_12_add_exploit_chain_columns` adds the columns
+  on existing 2.1.1 databases idempotently (per-column
+  `information_schema` gating, ALTERs done one at a time so a partial
+  failure mid-list retries the rest on the next boot). The web
+  finding-detail page renders an **Attacker workflow &
+  exploitability** card (color-coded likelihood badge,
+  detection-difficulty pill, rationale paragraph, prerequisites
+  list, numbered kill-chain with per-step "Signal" evidence, and the
+  full attacker workflow narrative). The slide-out side panel
+  renders a compact mirror so analysts triaging in the finding-list
+  view see the same context without leaving the row. The PDF
+  report's per-finding card renders the same block, with print-
+  friendly colors for the likelihood badge and a per-phase
+  rollover chip on each chain step so a manager scanning the PDF
+  sees instantly whether the finding is a "real attacker would walk
+  in here" item or a "interesting but needs five prerequisites"
+  item. The bug-report markdown export (Jira / ServiceNow / GitHub)
+  also includes the exploit chain so the ticket assignee gets the
+  attacker context inline. Admin manual-edit form on the finding-
+  detail page exposes all six fields (with `Phase | Action |
+  Evidence` line format for the chain), and a manual edit locks the
+  row so future automatic enrichment will not overwrite the
+  analyst's environment-specific take. LLM `max_tokens` raised from
+  2048 to 4096 to accommodate the larger response without
+  truncation.
+
 - **2026-05-11** — **Estimated LLM cost chip on the assessment
   workspace.** New KPI tile on the assessment-detail page, anchored
   immediately to the left of the "Hide info-severity (page + PDF)"

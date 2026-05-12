@@ -179,6 +179,35 @@ def _insert(sig: str, finding: dict, payload: dict, *, source: str,
     existing = get_cached(sig)
     if existing:
         return existing["id"]
+    # Sanitize the exploit-chain shape so the template renderer is never
+    # surprised. The LLM is asked for [{phase, action, evidence}, ...]
+    # but it sometimes returns plain strings; coerce either form into the
+    # canonical dict shape so finding_detail.html / report.html stay
+    # simple.
+    chain_in = payload.get("exploit_chain") or []
+    chain_norm: list = []
+    if isinstance(chain_in, list):
+        for step in chain_in:
+            if isinstance(step, dict):
+                chain_norm.append({
+                    "phase":    (step.get("phase") or "").strip(),
+                    "action":   (step.get("action") or "").strip(),
+                    "evidence": (step.get("evidence") or "").strip(),
+                })
+            elif isinstance(step, str):
+                chain_norm.append({
+                    "phase": "", "action": step.strip(), "evidence": "",
+                })
+    likelihood = (payload.get("likelihood") or "").strip().lower()
+    if likelihood not in ("very_low", "low", "medium", "high", "very_high"):
+        likelihood = ""
+    detection_difficulty = (payload.get("detection_difficulty") or "").strip().lower()
+    if detection_difficulty not in ("easy", "moderate", "hard"):
+        detection_difficulty = ""
+    prereqs_in = payload.get("prerequisites") or []
+    prereqs_norm = [p.strip() for p in prereqs_in
+                    if isinstance(p, str) and p.strip()]
+
     return db.execute(
         """INSERT INTO finding_enrichment
            (signature_hash, source_tool, title_norm, cwe, owasp_category,
@@ -186,8 +215,12 @@ def _insert(sig: str, finding: dict, payload: dict, *, source: str,
             description_long, impact, remediation_long, remediation_steps,
             code_example, references_json,
             user_story, bug_report_md, jira_summary, suggested_priority,
+            prerequisites_json, exploit_chain_json, attacker_workflow,
+            likelihood, likelihood_rationale, detection_difficulty,
             llm_endpoint_id, llm_model, llm_in_tokens, llm_out_tokens)
-           VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+           VALUES (%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                   %s,%s,%s,%s,%s,%s,
+                   %s,%s,%s,%s)""",
         (
             sig,
             (finding.get("source_tool") or "")[:64],
@@ -205,6 +238,12 @@ def _insert(sig: str, finding: dict, payload: dict, *, source: str,
             payload.get("bug_report_md") or build_bug_report_md(finding, payload),
             payload.get("jira_summary") or build_jira_summary(finding, payload),
             payload.get("suggested_priority") or _priority_for(finding),
+            json.dumps(prereqs_norm),
+            json.dumps(chain_norm),
+            payload.get("attacker_workflow") or "",
+            likelihood or None,
+            payload.get("likelihood_rationale") or "",
+            detection_difficulty or None,
             llm_endpoint_id, llm_model, llm_in_tokens, llm_out_tokens,
         ),
     )
@@ -261,6 +300,42 @@ def build_bug_report_md(finding: dict, payload: dict) -> str:
         lines.append("### Impact")
         lines.append(payload["impact"])
         lines.append("")
+    # Exploit-chain summary: pasted into the ticket so the assignee
+    # doesn't have to open the report to understand WHY the bug is
+    # interesting. Likelihood + rationale lead so a triager can
+    # prioritize without scrolling.
+    lk = (payload.get("likelihood") or "").strip().lower()
+    if lk in ("very_low", "low", "medium", "high", "very_high"):
+        pretty = {"very_low": "Very Low", "low": "Low", "medium": "Medium",
+                  "high": "High", "very_high": "Very High"}[lk]
+        lines.append("### Exploitation Likelihood")
+        lines.append(f"**{pretty}** — {payload.get('likelihood_rationale') or 'no rationale recorded'}")
+        lines.append("")
+    prereqs = payload.get("prerequisites") or []
+    if isinstance(prereqs, list) and prereqs:
+        lines.append("### Prerequisites for exploitation")
+        for p in prereqs:
+            lines.append(f"- {p}")
+        lines.append("")
+    chain = payload.get("exploit_chain") or []
+    if isinstance(chain, list) and chain:
+        lines.append("### Attacker exploit chain")
+        for i, step in enumerate(chain, 1):
+            if isinstance(step, dict):
+                phase = step.get("phase") or ""
+                action = step.get("action") or ""
+                evidence = step.get("evidence") or ""
+                head = f"{i}. **{phase}** — {action}" if phase else f"{i}. {action}"
+                lines.append(head)
+                if evidence:
+                    lines.append(f"   - _Signal:_ {evidence}")
+            else:
+                lines.append(f"{i}. {step}")
+        lines.append("")
+    if payload.get("attacker_workflow"):
+        lines.append("### Attacker workflow")
+        lines.append(payload["attacker_workflow"])
+        lines.append("")
     if payload.get("remediation_long"):
         lines.append("### Remediation")
         lines.append(payload["remediation_long"])
@@ -292,7 +367,7 @@ def build_bug_report_md(finding: dict, payload: dict) -> str:
 
 # ---- LLM enrichment --------------------------------------------------------
 
-LLM_SYSTEM_PROMPT = """You are a senior application security engineer writing remediation guidance for a developer who has never seen this finding before. The finding came from an automated scanner; you must turn it into something actionable.
+LLM_SYSTEM_PROMPT = """You are a senior application security engineer writing remediation guidance for a developer who has never seen this finding before, AND an attacker-perspective walk-through so the analyst can judge realistic risk. The finding came from an automated scanner; you must turn it into something actionable.
 
 Respond with a single JSON object matching this exact schema (no markdown fences, no commentary):
 
@@ -304,8 +379,27 @@ Respond with a single JSON object matching this exact schema (no markdown fences
   "code_example": "language-appropriate snippet showing the right way (or '' if not applicable)",
   "references": ["https://owasp.org/...", "https://cwe.mitre.org/...", "vendor docs..."],
   "user_story": "As a <role>, I want <capability> so that <outcome>. One sentence.",
-  "suggested_priority": "p0|p1|p2|p3|p4"
+  "suggested_priority": "p0|p1|p2|p3|p4",
+  "prerequisites": [
+    "specific condition that must hold for the exploit to succeed (e.g. 'attacker has a low-privileged authenticated session')",
+    "another condition (e.g. 'target endpoint reachable from the attacker network')"
+  ],
+  "exploit_chain": [
+    {
+      "phase": "Reconnaissance | Initial Access | Discovery | Exploitation | Privilege Escalation | Lateral Movement | Impact",
+      "action": "what the attacker does in this step — concrete, named tool or technique where applicable",
+      "evidence": "observable signal the attacker uses to know the step worked (HTTP status, response body fragment, side-channel, etc.)"
+    }
+  ],
+  "attacker_workflow": "4-8 sentences describing the realistic end-to-end workflow a moderately skilled attacker would follow to weaponize this finding into business impact. Name the tools (Burp Suite, sqlmap, ffuf, jwt_tool, etc.), describe what they paste / chain together, and end at a concrete outcome (data exfil, account takeover, RCE, etc.). Mention the chain that has to line up: which other weaknesses or environment facts make the difference between a curiosity and a breach.",
+  "likelihood": "very_low | low | medium | high | very_high",
+  "likelihood_rationale": "1-3 sentences: WHY that likelihood. Reference exploit complexity, public tooling availability, authentication required, network exposure, prerequisite stacking. Be honest — most informational findings are 'low' even if technically exploitable.",
+  "detection_difficulty": "easy | moderate | hard — how hard it is for a defender to NOTICE the exploit happening (log signal, WAF rule, anomaly). Affects realistic risk because hard-to-detect exploits get more attempts."
 }
+
+The exploit_chain MUST be ordered and end in a concrete impact step. Each phase value SHOULD come from the enumerated list above so the report can group by kill-chain stage. If a step is purely environmental (e.g. attacker already has a session), put it in prerequisites instead of exploit_chain.
+
+Be calibrated on likelihood — don't inflate. A finding that requires (a) admin auth (b) a specific browser plugin (c) the user clicking a crafted link is 'low' even though the technical exploit is real. Conversely, an unauthenticated RCE that public PoCs exist for is 'very_high' even if you have not personally observed it being abused.
 
 Steps must be specific enough that a developer can do them without further research. References must be real URLs. Output only the JSON object."""
 
@@ -339,7 +433,7 @@ def enrich_via_llm(finding: dict, endpoint: dict) -> Optional[dict]:
     if backend == "anthropic":
         result = llm_mod.call_anthropic(endpoint["api_key"], endpoint["model"],
                                         LLM_SYSTEM_PROMPT, user,
-                                        max_tokens=2048)
+                                        max_tokens=4096)
     elif backend == "openai_compat":
         extra = {}
         if endpoint.get("extra_headers"):
@@ -349,7 +443,7 @@ def enrich_via_llm(finding: dict, endpoint: dict) -> Optional[dict]:
                 extra = {}
         result = llm_mod.call_openai_compat(
             endpoint["base_url"], endpoint["api_key"], endpoint["model"],
-            LLM_SYSTEM_PROMPT, user, max_tokens=2048, extra_headers=extra,
+            LLM_SYSTEM_PROMPT, user, max_tokens=4096, extra_headers=extra,
         )
     else:
         return None
@@ -444,6 +538,13 @@ EDITABLE_FIELDS = (
     "remediation_long", "remediation_steps", "code_example",
     "references_json", "user_story", "bug_report_md", "jira_summary",
     "suggested_priority", "notes",
+    # Exploit-chain / attacker-workflow / risk-judgment fields. Stored
+    # as JSON in *_json columns where they are lists; the admin form
+    # encodes user-entered text into the right format before passing
+    # it here.
+    "prerequisites_json", "exploit_chain_json",
+    "attacker_workflow", "likelihood",
+    "likelihood_rationale", "detection_difficulty",
 )
 
 
@@ -489,6 +590,15 @@ def create_manual_stub(finding: dict, edits: dict,
         "user_story": edits.get("user_story", ""),
         "suggested_priority": edits.get("suggested_priority"),
         "owasp_category": edits.get("owasp_category") or finding.get("owasp_category"),
+        # Exploit-chain / attacker-workflow / likelihood. Forwarded
+        # through so a hand-authored stub can include these fields
+        # right from the start instead of waiting for an LLM pass.
+        "prerequisites": edits.get("prerequisites") or [],
+        "exploit_chain": edits.get("exploit_chain") or [],
+        "attacker_workflow": edits.get("attacker_workflow", ""),
+        "likelihood": edits.get("likelihood", ""),
+        "likelihood_rationale": edits.get("likelihood_rationale", ""),
+        "detection_difficulty": edits.get("detection_difficulty", ""),
     }
     new_id = _insert(sig, finding, payload, source="manual")
     db.execute(

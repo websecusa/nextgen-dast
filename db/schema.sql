@@ -347,6 +347,22 @@ CREATE TABLE IF NOT EXISTS finding_enrichment (
   bug_report_md TEXT,
   jira_summary VARCHAR(255),
   suggested_priority ENUM('p0','p1','p2','p3','p4'),
+  -- Exploit-chain / attacker-workflow / risk-judgment columns.
+  -- prerequisites_json: JSON array of strings — conditions that must
+  --   line up for the finding to be weaponizable.
+  -- exploit_chain_json: JSON array of {phase, action, evidence} objects
+  --   describing the kill-chain stages.
+  -- attacker_workflow: free-text 4-8 sentence narrative of the realistic
+  --   workflow a moderately skilled attacker would follow.
+  -- likelihood: qualitative band; rationale lives in the next column.
+  -- detection_difficulty: how hard it is for a defender to NOTICE the
+  --   exploit happening (affects realistic risk).
+  prerequisites_json TEXT,
+  exploit_chain_json TEXT,
+  attacker_workflow TEXT,
+  likelihood ENUM('very_low','low','medium','high','very_high') NULL,
+  likelihood_rationale TEXT,
+  detection_difficulty ENUM('easy','moderate','hard') NULL,
   llm_endpoint_id INT NULL,
   llm_model VARCHAR(128),
   llm_in_tokens INT,

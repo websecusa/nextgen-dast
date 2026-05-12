@@ -241,6 +241,46 @@
                               border-radius: 3pt; margin-right: .3em; }
   .finding pre { font-size: 8.5pt; }
 
+  /* ---- Exploit-chain / attacker-workflow card ------------------------- */
+  /* Rendered inside each .finding box for LLM-enriched findings that
+     have likelihood / exploit-chain / attacker-workflow content. The
+     intent is to give the reader a clear, scannable "could this
+     actually be used against us, and how" block alongside the
+     remediation. The whole block is suppressed when none of the
+     underlying fields are populated (legacy / catalog-only findings). */
+  .finding .ec-block { background: #f7f8fb; border: 1px solid #dde2eb;
+                       border-radius: 5px; padding: .7em .9em;
+                       margin: .8em 0; page-break-inside: avoid; }
+  .finding .ec-block h4 { margin: 0 0 .4em; font-size: 10pt; }
+  .finding .ec-block h5 { margin: .8em 0 .25em; font-size: 9.5pt;
+                          color: #2a3140; }
+  .finding .ec-block p, .finding .ec-block li { font-size: 9.5pt; }
+  .finding .ec-badge { display: inline-block; padding: 1pt 7pt;
+                       border-radius: 999px; font-size: 8.5pt;
+                       font-weight: 600; margin-right: .35em;
+                       border: 1px solid #cdd5e2; background: #eef1f6;
+                       color: #2a3140; }
+  .finding .ec-badge.lk-very_low  { background: #e3f3e7; color: #1f5a32;
+                                    border-color: #b9dec3; }
+  .finding .ec-badge.lk-low       { background: #ecf3dc; color: #4a5a1f;
+                                    border-color: #cfdba0; }
+  .finding .ec-badge.lk-medium    { background: #f6efd1; color: #6a5212;
+                                    border-color: #e3d28a; }
+  .finding .ec-badge.lk-high      { background: #f6dfd1; color: #7a3014;
+                                    border-color: #e3b29a; }
+  .finding .ec-badge.lk-very_high { background: #f3d1d1; color: #6b1f1f;
+                                    border-color: #dc9a9a; }
+  .finding .ec-phase { display: inline-block; background: #2a3140;
+                       color: #fff; padding: 0pt 5pt; border-radius: 3px;
+                       font-size: 8pt; font-weight: 700;
+                       letter-spacing: .03em; text-transform: uppercase;
+                       margin-right: .4em; }
+  .finding .ec-signal { margin-top: 2pt; padding-left: 6pt;
+                        border-left: 2px solid #c0392b; color: #555;
+                        font-style: italic; font-size: 9pt; }
+  .finding .ec-chain { padding-left: 1.1em; }
+  .finding .ec-chain li { margin-bottom: .35em; }
+
   .muted { color: #6c757d; }
   .small { font-size: 9pt; }
   .nowrap { white-space: nowrap; }
@@ -603,6 +643,78 @@
       {% if f.evidence_method %}<code>{{ f.evidence_method }}</code>{% endif %}
       <code>{{ f.evidence_url }}</code>
     </p>
+  {% endif %}
+
+  {# ------------------------------------------------------------
+     Attacker workflow & exploitability — the LLM-driven exploit-
+     chain card for the PDF. Mirrors the same card in
+     finding_detail.html so the web and the PDF tell the same
+     story about realistic risk. The block is suppressed entirely
+     when no enrichment fields are populated (catalog-only or
+     legacy findings).
+     ------------------------------------------------------------ #}
+  {% set _e = f.enrichment %}
+  {% set _ec_has = (_e and (_e.likelihood
+                            or _e.likelihood_rationale
+                            or _e.attacker_workflow
+                            or (_e.prerequisites and _e.prerequisites|length)
+                            or (_e.exploit_chain and _e.exploit_chain|length))) %}
+  {% if _ec_has %}
+    {% set _lk_label = {"very_low": "Very Low", "low": "Low",
+                        "medium": "Medium", "high": "High",
+                        "very_high": "Very High"}.get(_e.likelihood, "") %}
+    {% set _dd_label = {"easy": "Easy to detect",
+                        "moderate": "Moderate to detect",
+                        "hard": "Hard to detect"}.get(_e.detection_difficulty, "") %}
+    <div class="ec-block">
+      <h4>Attacker workflow &amp; exploitability</h4>
+      {% if _lk_label or _dd_label %}
+        <p style="margin:.2em 0">
+          {% if _lk_label %}
+            <span class="ec-badge lk-{{ _e.likelihood }}">
+              Likelihood: {{ _lk_label }}
+            </span>
+          {% endif %}
+          {% if _dd_label %}
+            <span class="ec-badge">{{ _dd_label }}</span>
+          {% endif %}
+        </p>
+      {% endif %}
+      {% if _e.likelihood_rationale %}
+        <p style="white-space:pre-wrap; margin-top:.4em">
+          <strong>Why this likelihood:</strong>
+          {{ _e.likelihood_rationale }}
+        </p>
+      {% endif %}
+      {% if _e.prerequisites and _e.prerequisites|length %}
+        <h5>Prerequisites that must line up</h5>
+        <ul>
+          {% for p in _e.prerequisites %}<li>{{ p }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+      {% if _e.exploit_chain and _e.exploit_chain|length %}
+        <h5>Exploit chain</h5>
+        <ol class="ec-chain">
+          {% for step in _e.exploit_chain %}
+            <li>
+              {% if step is mapping %}
+                {% if step.phase %}<span class="ec-phase">{{ step.phase }}</span>{% endif %}
+                {% if step.action %}{{ step.action }}{% endif %}
+                {% if step.evidence %}
+                  <div class="ec-signal"><em>Signal:</em> {{ step.evidence }}</div>
+                {% endif %}
+              {% else %}
+                {{ step }}
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ol>
+      {% endif %}
+      {% if _e.attacker_workflow %}
+        <h5>End-to-end attacker workflow</h5>
+        <p style="white-space:pre-wrap">{{ _e.attacker_workflow }}</p>
+      {% endif %}
+    </div>
   {% endif %}
 
   {% if f.repro and (f.repro.curl or f.repro.hint) %}

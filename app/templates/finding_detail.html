@@ -426,6 +426,114 @@ or matches_tools array.">
   </section>
   {% endif %}
 
+  {# ------------------------------------------------------------
+     Attacker workflow & exploitability — the LLM-driven exploit-
+     chain card. Always rendered as a single section so the
+     analyst can read the realistic-risk story top-to-bottom:
+       1. Likelihood + detection-difficulty badges
+       2. Likelihood rationale (one or two sentences)
+       3. Prerequisites that must line up
+       4. Numbered exploit chain (Recon → Impact)
+       5. Free-text attacker workflow narrative
+     The whole card is suppressed when none of the underlying
+     fields are populated — typical for legacy findings produced
+     before the enrichment schema gained these columns.
+     ------------------------------------------------------------ #}
+  {% set _has_chain = (e.likelihood
+                       or e.likelihood_rationale
+                       or e.attacker_workflow
+                       or (e.prerequisites and e.prerequisites|length)
+                       or (e.exploit_chain and e.exploit_chain|length)) %}
+  {% if _has_chain %}
+  {% set _lk_label = {"very_low": "Very Low", "low": "Low",
+                      "medium": "Medium", "high": "High",
+                      "very_high": "Very High"}.get(e.likelihood, "") %}
+  {% set _lk_bg = {"very_low": "#1f3a2b", "low": "#2b3a1f",
+                   "medium": "#3a341f", "high": "#3a2a1f",
+                   "very_high": "#3a1f1f"}.get(e.likelihood, "#2a2f3a") %}
+  {% set _lk_fg = {"very_low": "#9be8a8", "low": "#cfe89b",
+                   "medium": "#e8d99b", "high": "#e8b89b",
+                   "very_high": "#e89b9b"}.get(e.likelihood, "#cfd5e6") %}
+  {% set _dd_label = {"easy": "Easy to detect",
+                      "moderate": "Moderate to detect",
+                      "hard": "Hard to detect"}.get(e.detection_difficulty, "") %}
+  <section class="card">
+    <h2>Attacker workflow &amp; exploitability</h2>
+    {% if _lk_label or _dd_label %}
+      <p style="margin-top:.2em">
+        {% if _lk_label %}
+          <span style="display:inline-block; background:{{ _lk_bg }};
+                       color:{{ _lk_fg }}; padding:.2em .65em;
+                       border-radius:999px; font-size:.85em;
+                       font-weight:600; margin-right:.4em">
+            Likelihood: {{ _lk_label }}
+          </span>
+        {% endif %}
+        {% if _dd_label %}
+          <span style="display:inline-block; background:#1f2a3a;
+                       color:#9bb8e8; padding:.2em .65em;
+                       border-radius:999px; font-size:.85em;
+                       font-weight:600">
+            {{ _dd_label }}
+          </span>
+        {% endif %}
+      </p>
+    {% endif %}
+    {% if e.likelihood_rationale %}
+      <p style="white-space:pre-wrap; margin-top:.6em">
+        <strong>Why this likelihood:</strong>
+        {{ e.likelihood_rationale }}
+      </p>
+    {% endif %}
+    {% if e.prerequisites and e.prerequisites|length %}
+      <h3 class="muted" style="margin-top:1em">Prerequisites that must line up</h3>
+      <ul>
+        {% for p in e.prerequisites %}
+          <li>{{ p }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if e.exploit_chain and e.exploit_chain|length %}
+      <h3 class="muted" style="margin-top:1em">Exploit chain</h3>
+      <ol style="padding-left:1.2em">
+        {% for step in e.exploit_chain %}
+          <li style="margin-bottom:.5em">
+            {% if step is mapping %}
+              {% if step.phase %}
+                <span style="display:inline-block; background:#2a2f3a;
+                             color:#cfd5e6; padding:.1em .5em;
+                             border-radius:4px; font-size:.75em;
+                             font-weight:600; margin-right:.4em;
+                             text-transform:uppercase; letter-spacing:.05em">
+                  {{ step.phase }}
+                </span>
+              {% endif %}
+              {% if step.action %}{{ step.action }}{% endif %}
+              {% if step.evidence %}
+                <div class="muted small" style="margin-top:.2em;
+                     padding-left:.4em; border-left:2px solid var(--accent)">
+                  <em>Signal:</em> {{ step.evidence }}
+                </div>
+              {% endif %}
+            {% else %}
+              {{ step }}
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+    {% if e.attacker_workflow %}
+      <h3 class="muted" style="margin-top:1em">End-to-end attacker workflow</h3>
+      <p style="white-space:pre-wrap">{{ e.attacker_workflow }}</p>
+    {% endif %}
+    <p class="muted small" style="margin-top:1em">
+      This breakdown is LLM-generated from the finding's signature, tool
+      output, and OWASP / CWE classification. Validate against your
+      environment before treating likelihood as authoritative.
+    </p>
+  </section>
+  {% endif %}
+
   {% if e.remediation_long or e.steps %}
   <section class="card">
     <h2>Remediation</h2>
@@ -560,6 +668,59 @@ or matches_tools array.">
           <textarea name="user_story" rows="2" style="width:100%">{{ e.user_story or '' }}</textarea>
         </label>
       </p>
+
+      {# Attacker-workflow / exploitability fields. Manual edits override
+         the LLM-generated content; admins typically use this when the
+         generic LLM output doesn't reflect environment-specific
+         exploitability (e.g. our SSO blocks the obvious chain). #}
+      <p>
+        <label>Exploitation likelihood<br>
+          <select name="likelihood">
+            {% for opt, txt in [('','—'),
+                                ('very_low','Very Low'),
+                                ('low','Low'),
+                                ('medium','Medium'),
+                                ('high','High'),
+                                ('very_high','Very High')] %}
+              <option value="{{ opt }}" {% if e.likelihood == opt %}selected{% endif %}>{{ txt }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </p>
+      <p>
+        <label>Likelihood rationale<br>
+          <textarea name="likelihood_rationale" rows="3" style="width:100%">{{ e.likelihood_rationale or '' }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Detection difficulty<br>
+          <select name="detection_difficulty">
+            {% for opt, txt in [('','—'),
+                                ('easy','Easy'),
+                                ('moderate','Moderate'),
+                                ('hard','Hard')] %}
+              <option value="{{ opt }}" {% if e.detection_difficulty == opt %}selected{% endif %}>{{ txt }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </p>
+      <p>
+        <label>Prerequisites (one condition per line)<br>
+          <textarea name="prerequisites" rows="4" style="width:100%">{{ (e.prerequisites or [])|join('\n') }}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Exploit chain (one step per line as <code>Phase | Action | Evidence</code>)<br>
+          <textarea name="exploit_chain" rows="6" style="width:100%; font-family:ui-monospace,Menlo,monospace">{% for step in (e.exploit_chain or []) %}{{ step.phase or '' }} | {{ step.action or '' }} | {{ step.evidence or '' }}
+{% endfor %}</textarea>
+        </label>
+      </p>
+      <p>
+        <label>Attacker workflow narrative<br>
+          <textarea name="attacker_workflow" rows="6" style="width:100%">{{ e.attacker_workflow or '' }}</textarea>
+        </label>
+      </p>
+
       <p>
         <label>Internal notes (not exported)<br>
           <textarea name="notes" rows="2" style="width:100%">{{ e.notes or '' }}</textarea>
