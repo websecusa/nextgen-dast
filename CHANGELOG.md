@@ -248,6 +248,72 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Round-5 shared LLM budget + downstream
+  reservation, admin button to backfill exploit-chain enrichment
+  on legacy rows.** Two related fixes for "the agentic pass can
+  silently overspend the per-assessment cap and starve
+  consolidation / enrichment of the budget they need to close out
+  the assessment cleanly."
+
+  Shared accountant (`app/llm_budget.py`, new). All four LLM
+  consumers -- enhanced_ai, agentic_ai, enrichment, consolidation
+  -- now write to one per-assessment `BudgetState` keyed by
+  assessment id. Cost is computed via the existing `llm.cost()`
+  pricing table so the accumulator and the on-page cost chip
+  agree.
+
+  Reservation rule (hybrid floor + percentage): `reserved =
+  max($2.50, 0.10 * cap)`. The floor protects small budgets from
+  consolidation getting starved; the percentage scales naturally
+  for large budgets. Both env-overridable
+  (`NEXTGEN_DAST_LLM_RESERVED_USD_FLOOR`,
+  `NEXTGEN_DAST_LLM_RESERVED_PCT`) so ops can tune without
+  rebuilding. At the default $50 cap that's $5 reserved / $45
+  available to the agent + weakness pass. At $500 cap: $50 / $450.
+
+  Policy split:
+  - `enhanced_ai_testing` + `agentic_ai_testing` are GATED on
+    `remaining_for_pass()` (which subtracts the reservation). They
+    stop early when their slice is exhausted, leaving headroom
+    for the closing passes. Agentic adds a per-turn projection
+    using `llm_budget.project_turn_cost()` and exits the loop
+    gracefully with a `budget_exhausted` rationale instead of
+    looping until the HTTP / turn caps.
+  - `enrichment` + `consolidation` ALWAYS run while their work is
+    critical for the assessment to be readable. If cumulative
+    spend has pushed past the cap, they log a single warning via
+    `llm_budget.warn_if_over_cap()` and proceed -- an assessment
+    with $0.40 of overrun beats one with no exec summary and stub
+    remediation rows.
+
+  Cost chip on the assessment workspace now shows
+  `$<spent> / $<cap> (<pct>%)` when a cap is configured, with the
+  chip border tinted amber at >= 80% and red at >= 100% so the
+  analyst sees the budget pressure at a glance. Uncapped
+  assessments keep the original `$<spent>` shape. Tooltip carries
+  per-model breakdown plus the reservation explanation.
+
+  Backfill admin button (`/llm`). For rows that were enriched
+  before the 2026-05-12 exploit-chain feature shipped and still
+  carry an empty `exploit_chain_json`, a superadmin "Backfill
+  exploit-chain enrichment" widget shows the count + estimated
+  cost. One click re-calls the LLM for each stale signature whose
+  finding(s) are still open at crit/high/medium severity, updates
+  ONLY the new exploit-chain / attacker-workflow / likelihood
+  columns, and leaves the curated `description_long`, `impact`,
+  and `remediation_long` untouched. Bounded at 250 rows per click
+  so wall time stays around 30-60 seconds; larger backlogs need
+  repeated clicks (the widget updates after each pass). Audit-
+  logged with the actor, scanned/refreshed/failed counts, and
+  spend.
+
+  Behavioral note: agentic / weakness passes stop EARLIER than
+  before on a given cap because the reservation effectively
+  shrinks their slice. That's deliberate -- the trade is fewer
+  agent turns for a guaranteed clean consolidation. Increase
+  `enhanced_ai_budget_usd` on the assess form, or raise the
+  system default, if you need both at higher volume.
+
 - **2026-05-12** — **Round-4 cross-source dedup, agent visibility
   preamble, hard pre-emit gate, and enrichment for AI-emitted
   findings.** Three-layer fix for the "agentic pass emits 27 near-

@@ -50,6 +50,7 @@ from urllib.parse import urlsplit
 import db
 import enrichment_catalog
 import llm as llm_mod
+import llm_budget
 
 
 # ---- signature -------------------------------------------------------------
@@ -460,6 +461,24 @@ def enrich_via_llm(finding: dict, endpoint: dict) -> Optional[dict]:
         return None
     payload["_in_tokens"] = result.get("in_tokens")
     payload["_out_tokens"] = result.get("out_tokens")
+    # Round 5A: record cost against the shared per-assessment
+    # accumulator and emit a soft warning if this call has just
+    # pushed us past the cap. Enrichment ALWAYS runs (its work is
+    # critical for assessment readability) so the warning is the
+    # right policy here, not a hard block.
+    aid = finding.get("assessment_id")
+    if aid:
+        try:
+            llm_budget.record(
+                aid, in_tokens=int(result.get("in_tokens") or 0),
+                out_tokens=int(result.get("out_tokens") or 0),
+                model=endpoint.get("model") or "",
+                cached_in_tokens=int(
+                    result.get("cache_read_tokens") or 0))
+            llm_budget.warn_if_over_cap(aid, context="enrichment")
+        except Exception:
+            # Cost accounting failure must not lose the enrichment.
+            pass
     return payload
 
 
@@ -642,3 +661,182 @@ def render_export(enrichment: dict, finding: dict, fmt: str) -> tuple[str, str]:
         ])
         return "text/csv; charset=utf-8", buf.getvalue()
     return "text/plain; charset=utf-8", enrichment.get("bug_report_md") or ""
+
+
+# ---- exploit-chain backfill (Round 5B) -------------------------------------
+
+# Cap on rows touched by one backfill pass. The button is admin-
+# triggered (synchronous wait), so an effectively-unbounded sweep
+# would surprise the operator. 250 rows at ~$0.02 each comes in
+# around $5 of total spend and 30-60 seconds wall time, which is
+# the right order of magnitude for one admin click.
+MAX_BACKFILL_ROWS = 250
+
+
+def backfill_candidates_count() -> int:
+    """How many LLM-enriched rows pre-date the exploit-chain feature
+    and have at least one open crit/high/medium finding attached.
+    Drives the admin button's "N rows, est. $X" preview."""
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM ("
+        "  SELECT DISTINCT fe.id "
+        "  FROM finding_enrichment fe "
+        "  JOIN findings f ON f.enrichment_id = fe.id "
+        "  WHERE fe.source = 'llm' "
+        "    AND fe.is_locked = 0 "
+        "    AND (fe.exploit_chain_json IS NULL "
+        "         OR fe.exploit_chain_json = '[]') "
+        "    AND f.severity IN ('critical','high','medium') "
+        "    AND COALESCE(f.status,'open') NOT IN "
+        "        ('false_positive','fixed','accepted_risk') "
+        ") sub")
+    return int((row or {}).get("n") or 0)
+
+
+def _backfill_candidate_rows(limit: int) -> list[dict]:
+    """Return the actual finding_enrichment rows that need backfill,
+    each paired with one example finding so we have a payload to
+    re-prompt the LLM with."""
+    return db.query_all(
+        "SELECT fe.id AS enrichment_id, fe.signature_hash, "
+        "       fe.title_norm, fe.cwe AS enr_cwe, "
+        "       fe.owasp_category AS enr_owasp, "
+        "       MIN(f.id) AS sample_finding_id "
+        "FROM finding_enrichment fe "
+        "JOIN findings f ON f.enrichment_id = fe.id "
+        "WHERE fe.source = 'llm' "
+        "  AND fe.is_locked = 0 "
+        "  AND (fe.exploit_chain_json IS NULL "
+        "       OR fe.exploit_chain_json = '[]') "
+        "  AND f.severity IN ('critical','high','medium') "
+        "  AND COALESCE(f.status,'open') NOT IN "
+        "      ('false_positive','fixed','accepted_risk') "
+        "GROUP BY fe.id, fe.signature_hash, fe.title_norm, "
+        "         fe.cwe, fe.owasp_category "
+        "LIMIT %s", (int(limit),))
+
+
+def _update_chain_fields_only(enrichment_id: int, payload: dict,
+                                in_tokens: int, out_tokens: int,
+                                model: str) -> None:
+    """Patch in just the exploit-chain / attacker-workflow / likelihood
+    columns on an existing enrichment row. Leaves the curated copy
+    columns (description_long / impact / remediation_long /
+    remediation_steps / code_example / references_json / user_story)
+    UNTOUCHED so an analyst's manual edits on those fields are
+    preserved across the backfill.
+
+    The row's source stays 'llm' (not bumped to 'manual') and
+    is_locked stays 0 so future automatic refreshes still apply.
+    Tokens / model are added to the cumulative LLM call counters."""
+    # Sanitise the chain shape (same logic as _insert).
+    chain_in = payload.get("exploit_chain") or []
+    chain_norm: list = []
+    if isinstance(chain_in, list):
+        for step in chain_in:
+            if isinstance(step, dict):
+                chain_norm.append({
+                    "phase":    (step.get("phase") or "").strip(),
+                    "action":   (step.get("action") or "").strip(),
+                    "evidence": (step.get("evidence") or "").strip(),
+                })
+            elif isinstance(step, str):
+                chain_norm.append({
+                    "phase": "", "action": step.strip(), "evidence": "",
+                })
+    likelihood = (payload.get("likelihood") or "").strip().lower()
+    if likelihood not in ("very_low", "low", "medium", "high", "very_high"):
+        likelihood = ""
+    detection_difficulty = (
+        payload.get("detection_difficulty") or "").strip().lower()
+    if detection_difficulty not in ("easy", "moderate", "hard"):
+        detection_difficulty = ""
+    prereqs_in = payload.get("prerequisites") or []
+    prereqs_norm = [p.strip() for p in prereqs_in
+                    if isinstance(p, str) and p.strip()]
+    db.execute(
+        """UPDATE finding_enrichment
+              SET prerequisites_json     = %s,
+                  exploit_chain_json     = %s,
+                  attacker_workflow      = %s,
+                  likelihood             = %s,
+                  likelihood_rationale   = %s,
+                  detection_difficulty   = %s,
+                  llm_in_tokens          = COALESCE(llm_in_tokens, 0) + %s,
+                  llm_out_tokens         = COALESCE(llm_out_tokens, 0) + %s,
+                  llm_model              = COALESCE(%s, llm_model)
+            WHERE id = %s""",
+        (json.dumps(prereqs_norm),
+         json.dumps(chain_norm),
+         payload.get("attacker_workflow") or "",
+         likelihood or None,
+         payload.get("likelihood_rationale") or "",
+         detection_difficulty or None,
+         in_tokens, out_tokens, model or None,
+         enrichment_id))
+
+
+def backfill_exploit_chains(endpoint: Optional[dict],
+                              *, limit: int = MAX_BACKFILL_ROWS
+                              ) -> dict:
+    """Re-call the LLM for every stale enriched signature with a
+    crit/high/medium finding attached. Updates ONLY the exploit-chain
+    / attacker-workflow / likelihood columns; the curated remediation
+    copy stays as the operator (or earlier LLM run) left it.
+
+    Returns a summary dict:
+      {scanned, refreshed, failed, in_tokens, out_tokens, cost_usd}
+
+    Bounded at `limit` rows so the admin button is predictable. Each
+    iteration is independent -- if the LLM endpoint becomes
+    unreachable mid-pass, earlier successful updates land and the
+    summary reports the failure count without rolling back.
+
+    Caller must pre-check that `endpoint` is an Anthropic / openai-
+    compat endpoint; a None / unknown backend short-circuits with
+    `endpoint_missing=True` in the summary so the UI message stays
+    actionable."""
+    summary = {
+        "scanned": 0, "refreshed": 0, "failed": 0,
+        "in_tokens": 0, "out_tokens": 0, "cost_usd": 0.0,
+        "endpoint_missing": False,
+    }
+    if not endpoint or endpoint.get("backend") not in (
+            "anthropic", "openai_compat"):
+        summary["endpoint_missing"] = True
+        return summary
+    candidates = _backfill_candidate_rows(limit)
+    summary["scanned"] = len(candidates)
+    if not candidates:
+        return summary
+    import llm as llm_mod_local  # local alias avoids name clash if
+                                  # callers patched llm at module level
+    model = endpoint.get("model") or ""
+    for c in candidates:
+        f = db.query_one(
+            "SELECT * FROM findings WHERE id = %s",
+            (c["sample_finding_id"],))
+        if not f:
+            summary["failed"] += 1
+            continue
+        payload = enrich_via_llm(f, endpoint)
+        if not payload:
+            summary["failed"] += 1
+            continue
+        in_t = int(payload.get("_in_tokens") or 0)
+        out_t = int(payload.get("_out_tokens") or 0)
+        try:
+            _update_chain_fields_only(
+                c["enrichment_id"], payload, in_t, out_t, model)
+        except Exception:
+            summary["failed"] += 1
+            continue
+        summary["refreshed"] += 1
+        summary["in_tokens"] += in_t
+        summary["out_tokens"] += out_t
+        try:
+            summary["cost_usd"] += llm_mod_local.cost(in_t, out_t, model)
+        except Exception:
+            pass
+    summary["cost_usd"] = round(summary["cost_usd"], 4)
+    return summary

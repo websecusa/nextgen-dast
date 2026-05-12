@@ -73,6 +73,7 @@ import db
 import dedup as dedup_mod
 import enrichment as enrichment_mod
 import llm as llm_mod
+import llm_budget
 
 logger = logging.getLogger(__name__)
 
@@ -654,9 +655,29 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
         {"role": "user", "content": seed_user_message}]
     out = {"findings_inserted": 0, "turns": 0,
            "llm_in": 0, "llm_out": 0, "errors": [],
-           "finish_rationale": "", "dedup_refused": 0}
+           "finish_rationale": "", "dedup_refused": 0,
+           "budget_exhausted": False}
     api_key = endpoint.get("api_key") or ""
+    # Round 5A: shared per-assessment budget. The agent's slice is
+    # `cap - reservation`; the closing passes (enrichment +
+    # consolidation) get the reserved headroom. Check before EACH
+    # turn -- not just at the top -- because the agent emits +/- 2K
+    # output tokens per turn at Sonnet pricing, easily $0.03-$0.08
+    # per turn, so a 30-turn loop can land in the $1-3 range and
+    # blow through a small slice if we only checked once.
+    budget = llm_budget.get(aid)
+    projected = llm_budget.project_turn_cost(model)
     for _ in range(max_turns):
+        if budget.would_exhaust_pass(projected):
+            out["budget_exhausted"] = True
+            out["finish_rationale"] = (
+                f"budget slice exhausted (spent ${budget.spent:.4f} of "
+                f"${budget.cap_usd:.2f} cap; "
+                f"${budget.reservation:.2f} reserved for "
+                "consolidation/enrichment)")
+            logger.info("agentic_ai: %s -- aid=%s mode=%s",
+                        out["finish_rationale"], aid, mode)
+            break
         out["turns"] += 1
         try:
             resp = llm_mod.call_anthropic_tool_turn(
@@ -679,6 +700,13 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
                         if parent_finding_id else f"agentic_{mode}"),
             mode=mode, endpoint_id=endpoint.get("id"),
             model=model, response=resp)
+        # Record the same call's cost on the shared accumulator so
+        # the next iteration's `would_exhaust_pass` check is accurate.
+        llm_budget.record(aid, in_tokens=int(resp.get("in_tokens") or 0),
+                          out_tokens=int(resp.get("out_tokens") or 0),
+                          model=model,
+                          cached_in_tokens=int(
+                              resp.get("cache_read_tokens") or 0))
         out["llm_in"] += int(resp.get("in_tokens") or 0)
         out["llm_out"] += int(resp.get("out_tokens") or 0)
 
@@ -971,9 +999,25 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         (aid,))
     if not candidates:
         return {"skipped": "no open findings to deep-dive"}
+    # Round 5A: pre-check the assessment's budget slice. If the
+    # weakness pass already burned through the agent's share, skip
+    # the per-finding sub-runs entirely so the closing passes get
+    # their reserved headroom instead. The orchestrator log records
+    # the early-exit reason so an operator can raise the cap if they
+    # want more agentic depth on the next run.
+    budget = llm_budget.get(aid)
+    projected = llm_budget.project_turn_cost(_agentic_model())
+    if budget.would_exhaust_pass(projected):
+        return {
+            "skipped": (f"budget slice exhausted before per-finding "
+                         f"pass: spent ${budget.spent:.4f} of "
+                         f"${budget.cap_usd:.2f}, "
+                         f"${budget.reservation:.2f} reserved"),
+        }
     summary = {"runs": 0, "findings_inserted": 0,
                 "llm_in": 0, "llm_out": 0,
-                "errors": [], "dedup_refused": 0}
+                "errors": [], "dedup_refused": 0,
+                "budget_exhausted": False}
     # Build the live dedup index ONCE for the whole pass. Each
     # per-finding sub-run shares it so an agent emission in run 2
     # is checked against agent emissions in run 1 too. Excludes
@@ -987,7 +1031,18 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
     preamble = dedup_mod.build_already_known_preamble(
         aid, exclude_source_tools={"agentic_ai_testing"})
     for f in candidates:
-        client, _audit, budget = _build_safeclient(
+        # Re-check budget between dives -- prior runs in this loop
+        # may have burned through the slice, and we want subsequent
+        # dives to bail out cleanly rather than start a doomed loop.
+        if budget.would_exhaust_pass(projected):
+            summary["budget_exhausted"] = True
+            logger.info(
+                "agentic_ai: stopping per-finding loop after %d runs -- "
+                "aid=%s spent=$%.4f cap=$%.2f reservation=$%.2f",
+                summary["runs"], aid, budget.spent,
+                budget.cap_usd or 0.0, budget.reservation)
+            break
+        client, _audit, sc_budget = _build_safeclient(
             scope_hosts=(fqdn,),
             max_requests=PER_FINDING_HTTP_MAX,
             session_cookie=session_cookie,
@@ -1013,7 +1068,7 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         result = _run_loop(
             aid=aid, mode="per_finding", parent_finding_id=f["id"],
             system_prompt=sys_prompt, seed_user_message=user_msg,
-            client=client, budget=budget,
+            client=client, budget=sc_budget,
             max_turns=PER_FINDING_TURN_MAX,
             endpoint=endpoint, model=model,
             dedup_index=dedup_index)
@@ -1022,6 +1077,8 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         summary["llm_in"] += result.get("llm_in", 0)
         summary["llm_out"] += result.get("llm_out", 0)
         summary["dedup_refused"] += result.get("dedup_refused", 0)
+        if result.get("budget_exhausted"):
+            summary["budget_exhausted"] = True
         if result.get("errors"):
             summary["errors"].extend(result["errors"])
     return summary
@@ -1107,7 +1164,20 @@ def run_free_roam(aid: int, fqdn: str) -> dict:
         return {"errors": ["no anthropic llm_endpoint available"]}
     model = _agentic_model()
     session_cookie = _get_session_cookie(a)
-    client, _audit, budget = _build_safeclient(
+    # Round 5A: same pre-check as per-finding. Free-roam is the more
+    # expensive pass (80 HTTP / 60 turns) so it's the most likely to
+    # be skipped on a budget that's already been heavily used by the
+    # weakness pass or by an earlier deep-dive pass.
+    fr_budget = llm_budget.get(aid)
+    fr_projected = llm_budget.project_turn_cost(model)
+    if fr_budget.would_exhaust_pass(fr_projected):
+        return {
+            "skipped": (f"budget slice exhausted before free-roam "
+                         f"pass: spent ${fr_budget.spent:.4f} of "
+                         f"${fr_budget.cap_usd:.2f}, "
+                         f"${fr_budget.reservation:.2f} reserved"),
+        }
+    client, _audit, sc_budget = _build_safeclient(
         scope_hosts=(fqdn,),
         max_requests=FREE_ROAM_HTTP_MAX,
         session_cookie=session_cookie,
@@ -1128,7 +1198,7 @@ def run_free_roam(aid: int, fqdn: str) -> dict:
     result = _run_loop(
         aid=aid, mode="free_roam", parent_finding_id=None,
         system_prompt=sys_prompt, seed_user_message=user_msg,
-        client=client, budget=budget,
+        client=client, budget=sc_budget,
         max_turns=FREE_ROAM_TURN_MAX,
         endpoint=endpoint, model=model,
         dedup_index=dedup_index)

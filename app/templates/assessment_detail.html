@@ -190,7 +190,18 @@
      A tooltip carries the per-model breakdown (model, calls, tokens,
      cost). #}
   {% if llm_usage and llm_usage.used %}
-  <div class="kpi" style="margin-left:auto"
+  {# Color-tint the chip when nearing / past the cap. >=100% = red,
+     >=80% = amber, else neutral. Cap is the per-assessment
+     enhanced_ai_budget_usd (with system-default fallback). The
+     "$X / $Y" form replaces the bare "$X" only when a cap is
+     known -- uncapped assessments keep the original shape. #}
+  {% set _border = 'var(--border)' %}
+  {% if llm_usage.budget_pct is not none and llm_usage.budget_pct >= 100 %}
+    {% set _border = '#d14747' %}
+  {% elif llm_usage.budget_pct is not none and llm_usage.budget_pct >= 80 %}
+    {% set _border = '#d8a04a' %}
+  {% endif %}
+  <div class="kpi" style="margin-left:auto; border-color:{{ _border }}"
        title="Estimated LLM spend for this assessment, computed from per-model token usage.
 {%- for m in llm_usage.models %}
 {{ m.model }}: {{ m.calls }} call(s), {{ m.in + m.out }} tokens (in {{ m.in }} / out {{ m.out }}) ≈ ${{ '%.4f' % m.cost }}
@@ -198,8 +209,12 @@
 {%- if not llm_usage.models %}
 (No per-call breakdown available — figure shown is the running total cached on the assessment row.)
 {%- endif %}
-Total tokens: {{ llm_usage.total_in + llm_usage.total_out }} (in {{ llm_usage.total_in }} / out {{ llm_usage.total_out }})">
-    <span class="v">${{ '%.4f' % llm_usage.total_cost }}</span><span class="lbl">LLM cost</span>
+Total tokens: {{ llm_usage.total_in + llm_usage.total_out }} (in {{ llm_usage.total_in }} / out {{ llm_usage.total_out }})
+{% if llm_usage.cap_usd is not none %}
+Per-assessment cap: ${{ '%.2f' % llm_usage.cap_usd }} ({{ '%.1f' % llm_usage.budget_pct }}% used)
+Reservation kept aside for closing passes (consolidation + enrichment) means the agent / weakness pass stops when its slice is exhausted, not the full cap.
+{% endif %}">
+    <span class="v">${{ '%.4f' % llm_usage.total_cost }}{% if llm_usage.cap_usd is not none %} / ${{ '%.2f' % llm_usage.cap_usd }}{% endif %}</span><span class="lbl">LLM cost{% if llm_usage.budget_pct is not none %} ({{ '%.0f' % llm_usage.budget_pct }}%){% endif %}</span>
   </div>
   {% endif %}
   {# "Hide info-severity findings" toggle. Persists on the assessment

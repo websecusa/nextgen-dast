@@ -90,6 +90,26 @@
   </p>
 </section>
 
+{# Round 5B: backfill widget. Re-calls the LLM for stale enriched
+   signatures whose exploit_chain_json is empty (rows that pre-date
+   the 2026-05-12 exploit-chain feature) and that have at least one
+   open crit/high/medium finding attached. Bounded at
+   MAX_BACKFILL_ROWS per click for predictable wall-time and cost.
+   Hidden when there's nothing to do so the page stays clean. #}
+{% if is_superadmin and backfill_count and backfill_count > 0 %}
+<section class="card">
+  <h2>Backfill exploit-chain enrichment</h2>
+  <p>{{ backfill_count }} enriched finding signature{% if backfill_count != 1 %}s{% endif %} predate the 2026-05-12 attacker-workflow / exploit-chain feature and still have crit/high/medium findings attached. Re-running the LLM populates the missing fields and leaves the curated description / impact / remediation columns untouched.</p>
+  <p class="muted">One click processes up to {{ backfill_cap }} rows. Estimated cost: ~${{ '%.2f'|format(backfill_est_cost) }} at typical Sonnet-class pricing. Bigger backlogs need repeated clicks &mdash; this widget updates each time.</p>
+  <form method="post" action="{{ base }}/llm/backfill_exploit_chains"
+        onsubmit="this.querySelector('button').disabled = true;
+                  this.querySelector('button').textContent = 'Working&hellip; (30-60 sec)';">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Backfill now ({{ backfill_count }} row{% if backfill_count != 1 %}s{% endif %})</button>
+  </form>
+</section>
+{% endif %}
+
 <section class="card">
   <h2>Add / update endpoint</h2>
   <form method="post" action="{{ base }}/llm/endpoint">
