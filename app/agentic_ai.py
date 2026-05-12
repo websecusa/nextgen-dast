@@ -1010,6 +1010,95 @@ def _adjacent_findings_digest(aid: int, exclude_id: int) -> str:
         for r in rows)
 
 
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2,
+              "low": 3, "info": 4}
+
+
+def _select_dive_candidates(aid: int, dive_count: int) -> tuple:
+    """Round 6: pick the top-N findings worth a per-finding deep-dive.
+
+    Two filters layered on top of the prior 'pick top-N by severity':
+
+    (1) validation_status filter. Skip rows that the auto_validate
+        pass + LLM fidelity grader already labeled `validated` or
+        `false_positive` -- the agent has nothing to add when the
+        deterministic probe already confirmed (or refuted) the
+        finding. `inconclusive`, `unvalidated`, and `errored` rows
+        ARE eligible since those are where the agent's reasoning
+        adds the most value.
+
+    (2) Cross-source clustering by `dedup_signature_v2`. Findings
+        that share a signature (e.g. 15 testssl cipher rows that
+        all describe the same TLS-endpoint weakness) collapse to a
+        single dive candidate -- the canonical row of the cluster
+        (lowest tier, highest severity, lowest id) represents the
+        cluster. This stops the agent from spending 15 dives on the
+        same underlying bug just because the scanner emitted 15
+        per-cipher rows.
+
+    Returns (candidates, skip_summary) where:
+      - candidates: list of finding dicts ready to dive on, up to
+        dive_count items, ordered by severity then id.
+      - skip_summary: dict with counts for orchestrator logging:
+          {clusters_total, clusters_eligible, clusters_skipped_validated,
+           clusters_skipped_false_positive, rows_collapsed_by_dedup,
+           dive_count_requested}
+    """
+    pool = db.query_all(
+        "SELECT * FROM findings WHERE assessment_id=%s "
+        "  AND COALESCE(status,'open') NOT IN "
+        "      ('false_positive','fixed','accepted_risk') "
+        "  AND severity IN ('critical','high','medium') "
+        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
+        (aid,))
+    # Cluster by signature; rows with no computable signature each
+    # form their own singleton cluster (default to a unique key so
+    # they're not merged with each other accidentally).
+    clusters: dict = {}
+    for f in pool:
+        sig = dedup_mod.compute_signature_for_finding(f) or f"_singleton:{f['id']}"
+        clusters.setdefault(sig, []).append(f)
+    skip_summary = {
+        "clusters_total": len(clusters),
+        "clusters_eligible": 0,
+        "clusters_skipped_validated": 0,
+        "clusters_skipped_false_positive": 0,
+        "rows_collapsed_by_dedup": max(0, len(pool) - len(clusters)),
+        "dive_count_requested": dive_count,
+    }
+    # Pick canonical per cluster: lowest tier (highest fidelity)
+    # wins; tiebreak by severity rank, then lowest id.
+    eligible: list = []
+    for sig, members in clusters.items():
+        members_sorted = sorted(
+            members,
+            key=lambda r: (dedup_mod.tier_for(r.get("source_tool") or ""),
+                            _SEV_RANK.get(
+                                (r.get("severity") or "").lower(), 9),
+                            int(r.get("id") or 0)))
+        canonical = members_sorted[0]
+        vs = (canonical.get("validation_status") or "unvalidated").lower()
+        if vs == "validated":
+            skip_summary["clusters_skipped_validated"] += 1
+            continue
+        if vs == "false_positive":
+            skip_summary["clusters_skipped_false_positive"] += 1
+            continue
+        # 'inconclusive', 'unvalidated', 'errored' all dive. The
+        # inconclusive case is where the agent shines -- probe ran
+        # but the verdict was below 0.8 confidence, so a reasoning
+        # pass adds real value.
+        eligible.append(canonical)
+    skip_summary["clusters_eligible"] = len(eligible)
+    # Order eligible canonicals: highest severity first, then by id
+    # so the ordering is deterministic across re-runs of the same
+    # assessment.
+    eligible.sort(key=lambda r: (
+        _SEV_RANK.get((r.get("severity") or "").lower(), 9),
+        int(r.get("id") or 0)))
+    return eligible[:dive_count], skip_summary
+
+
 def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
     """Deep-dive the top-N open findings by severity. Returns a
     summary dict for the orchestrator to log."""
@@ -1024,16 +1113,18 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         return {"errors": ["no anthropic llm_endpoint available"]}
     model = _agentic_model()
     session_cookie = _get_session_cookie(a)
-    candidates = db.query_all(
-        "SELECT * FROM findings WHERE assessment_id=%s "
-        "  AND COALESCE(status,'open') NOT IN "
-        "      ('false_positive','fixed','accepted_risk') "
-        "  AND severity IN ('critical','high','medium') "
-        "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id "
-        f"LIMIT {int(dive_count)}",
-        (aid,))
+    candidates, skip_summary = _select_dive_candidates(aid, dive_count)
     if not candidates:
-        return {"skipped": "no open findings to deep-dive"}
+        return {
+            "skipped": (
+                f"no eligible findings to deep-dive "
+                f"(clusters_total={skip_summary['clusters_total']}, "
+                f"skipped_validated="
+                f"{skip_summary['clusters_skipped_validated']}, "
+                f"skipped_false_positive="
+                f"{skip_summary['clusters_skipped_false_positive']})"),
+            "skip_summary": skip_summary,
+        }
     # Round 5A: pre-check the assessment's budget slice. If the
     # weakness pass already burned through the agent's share, skip
     # the per-finding sub-runs entirely so the closing passes get
@@ -1053,7 +1144,25 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
                 "llm_in": 0, "llm_out": 0,
                 "errors": [], "dedup_refused": 0,
                 "budget_exhausted": False,
-                "stopped_by_operator": False}
+                "stopped_by_operator": False,
+                # Round 6: surface candidate-pool stats so an
+                # operator looking at the log can see "dove 3 of 15
+                # requested; 12 clusters skipped (all already-
+                # validated)" without having to reconstruct it from
+                # the DB.
+                "skip_summary": skip_summary,
+                "dive_count_actual": len(candidates)}
+    logger.info(
+        "agentic_ai: per-finding selection aid=%s requested=%d "
+        "clusters_total=%d eligible=%d skipped_validated=%d "
+        "skipped_false_positive=%d rows_collapsed_by_dedup=%d "
+        "actual_dives=%d",
+        aid, dive_count, skip_summary["clusters_total"],
+        skip_summary["clusters_eligible"],
+        skip_summary["clusters_skipped_validated"],
+        skip_summary["clusters_skipped_false_positive"],
+        skip_summary["rows_collapsed_by_dedup"],
+        len(candidates))
     # Build the live dedup index ONCE for the whole pass. Each
     # per-finding sub-run shares it so an agent emission in run 2
     # is checked against agent emissions in run 1 too. Excludes

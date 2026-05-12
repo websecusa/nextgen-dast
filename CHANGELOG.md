@@ -248,6 +248,50 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Round-6 validation-aware agentic candidate
+  selection.** The per-finding deep-dive pass now skips findings
+  that the deterministic auto_validate pass (or the LLM fidelity
+  grader) has already confirmed -- there's no value in spending
+  agent tokens to re-prove what testssl already confirmed via the
+  TLS handshake.
+
+  New helper `_select_dive_candidates(aid, dive_count)`:
+
+  1. Clusters the open crit/high/medium pool by
+     `dedup_signature_v2` so 15 testssl cipher rows that all
+     describe the same TLS-endpoint weakness collapse to one dive
+     candidate (the canonical row of the cluster: lowest
+     fidelity-tier number, highest severity, lowest id).
+
+  2. Drops clusters whose canonical row's `validation_status` is
+     `validated` (already confirmed) or `false_positive` (already
+     refuted). Eligible statuses are `unvalidated`, `inconclusive`,
+     and `errored` -- the cases where the agent's reasoning is
+     where the value lives.
+
+  3. Picks the top `dive_count` eligible clusters by severity, with
+     id-based deterministic tiebreak.
+
+  Surfaces selection stats in the run summary so the orchestrator
+  log records `dove 3 of 15 requested; 33 clusters skipped (all
+  already-validated)` instead of just `dove 15` -- an operator who
+  wonders why the agent under-used its quota can see the reason.
+
+  Cost impact, measured against assessment 66's actual data
+  (severity=critical/high/medium pool of 280 rows):
+    - clusters_total=107 (down from 280 due to signature
+      clustering)
+    - clusters_skipped_validated=33
+    - clusters_eligible=74
+    - rows_collapsed_by_dedup=91
+
+  With the old logic the per-finding pass dove on 15 already-
+  validated testssl cipher rows for ~$45. With Round 6 the same
+  15-slot quota would have gone to the JWT-bypass / PII-leak /
+  /encryptionkeys-leak / SQL-injection candidates that actually
+  needed deeper analysis. No change to the budget knob or the
+  Stop button.
+
 - **2026-05-12** — **Hotfix: orchestrator log.info NameError +
   operator "Stop agentic_ai_testing" button.**
 
