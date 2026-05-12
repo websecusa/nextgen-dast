@@ -98,6 +98,12 @@ _WRITABLE_FIELDS = (
     # combo before reaching here. The two TEXT fields are read verbatim
     # into the weakness-discovery and fidelity prompts.
     "enhanced_ai_testing", "role_scope_description", "role_restrictions",
+    # Agentic AI deep-dive knobs. agentic_deep_dive_count is the
+    # top-N findings the per-finding agent picks up (0 disables;
+    # clamped server-side to 0..25). agentic_extra toggles the free-
+    # roam pass on top. See app/agentic_ai.py for the runtime
+    # semantics.
+    "agentic_deep_dive_count", "agentic_extra",
 )
 
 
@@ -123,9 +129,19 @@ def _normalize(payload: dict) -> dict:
     # Booleans (forms send "on" / "1" / missing).
     for k in ("scan_http", "scan_https", "enabled",
               "skip_if_running", "keep_only_latest", "llm_debug",
-              "enhanced_ai_testing"):
+              "enhanced_ai_testing", "agentic_extra"):
         if k in out:
             out[k] = 1 if out[k] in (1, "1", True, "on", "true") else 0
+
+    # agentic_deep_dive_count: clamp to 0..25; default to 5 when
+    # set but non-numeric. Treat absence as "leave alone" (the
+    # column default kicks in at INSERT).
+    if "agentic_deep_dive_count" in out:
+        try:
+            v = int(out["agentic_deep_dive_count"])
+        except (TypeError, ValueError):
+            v = 5
+        out["agentic_deep_dive_count"] = max(0, min(25, v))
 
     # Empty strings → NULL for the nullable text columns.
     for k in ("creds_username", "creds_password", "login_url",
@@ -269,9 +285,11 @@ def _materialize(sched: dict) -> int:
                application_id, schedule_id, keep_only_latest,
                llm_debug, enhanced_ai_budget_usd,
                enhanced_ai_testing, role_scope_description,
-               role_restrictions, status)
+               role_restrictions,
+               agentic_deep_dive_count, agentic_extra,
+               status)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, %s, %s, 'queued')""",
+                   %s, %s, %s, %s, %s, %s, %s, 'queued')""",
         (
             sched["fqdn"],
             int(sched.get("scan_http") or 0),
@@ -291,6 +309,10 @@ def _materialize(sched: dict) -> int:
             int(sched.get("enhanced_ai_testing") or 0),
             sched.get("role_scope_description"),
             sched.get("role_restrictions"),
+            int(sched.get("agentic_deep_dive_count")
+                if sched.get("agentic_deep_dive_count") is not None
+                else 5),
+            int(sched.get("agentic_extra") or 0),
         ),
     )
 

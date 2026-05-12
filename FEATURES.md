@@ -454,6 +454,60 @@ The role context is persisted on the `assessments` row and travels
 with Re-scan prefill, so a recurring or repeated scan inherits the
 same authorization model without re-typing it.
 
+### 11.2 Agentic AI deep-dive
+
+Tool-using LLM pass that runs after `enhanced_ai_testing` and before
+consolidation. It marries the strengths of deterministic probes
+(coverage, speed, low cost) with an agent loop that can pivot on
+evidence (chain headers, mutate a payload, retry with a different
+verb) the way a human tester would.
+
+Two modes, both gated by the same per-assessment LLM budget:
+
+* **Per-finding deep-dive** (default). Re-examines the top-N existing
+  critical/high findings — number set by `agentic_deep_dive_count` on
+  the assess form (default 5, range 0–25; set 0 to skip). The agent
+  inherits the finding's URL, evidence, and validation status, and
+  decides whether to upgrade it, downgrade it, or emit a fresh
+  finding for an adjacent weakness it discovered while poking.
+* **Extra Agentic** (opt-in, "more cost"). Toggled by the
+  **Extra Agentic (More Cost)** checkbox. Runs a free-roaming agent
+  with no pre-selected finding — it picks the next request to send
+  based on what it has seen across the assessment. Useful for
+  multi-step business-logic bugs that no single probe targets but
+  costs roughly 3–5× a deep-dive pass.
+
+Safety rails are enforced in `app/agentic_ai.py`, not just in the
+prompt:
+
+* `DELETE` and any path containing `/delete`, `/destroy`,
+  `/transfer`, `/withdraw`, `/reset-password`, `/forgot-password`,
+  `/api/cancel`, `/api/refund` are refused before the request leaves
+  the container — the agent gets a `tool_result` describing the
+  refusal so it stays in the loop.
+* Request bodies are scanned for the same destructive markers
+  (`"delete":true`, transfer/refund JSON shapes) and refused.
+* All HTTP calls go through `SafeClient` (toolkit/lib) so the same
+  `Budget`, `AuditLog`, and `scope_hosts` allowlist apply as for the
+  deterministic scanners.
+* Per-finding pass: ≤25 HTTP calls, ≤30 model turns. Free-roam:
+  ≤80 HTTP calls, ≤60 turns. Each tool result body is truncated to
+  8 KB so a 1 MB JSON dump doesn't blow the context window.
+
+Model selection is decoupled from the codebase. The agent loop reads
+`NEXTGEN_DAST_AGENTIC_MODEL` from the environment and falls back to
+`claude-sonnet-4-6` when unset. To swap models — e.g. if a successor
+ships or the current one is deprecated — set
+`NEXTGEN_DAST_AGENTIC_MODEL=claude-sonnet-5` in `.env_<suffix>` and
+recreate the container; no rebuild required.
+
+Findings emitted by the agentic pass carry
+`source_tool='agentic_ai_testing'` and a `raw_data.agent_mode` of
+`per_finding` or `free_roam` so they can be filtered and audited
+separately. Token usage is logged to `llm_analyses` so the on-page
+cost chip and the audit trail attribute spend correctly across both
+agentic modes and the deterministic LLM passes.
+
 
 ## 12. Cleanup
 

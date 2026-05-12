@@ -572,6 +572,12 @@ MIGRATIONS: list = [
     # clean database are a no-op.
     ("2026_05_12_unstick_llm_errored_validations",
      lambda: __import__("__main__")),
+    # 2026-05-12: add the agentic-pass control columns to
+    # assessments + scan_schedules so the new agentic_deep_dive_count
+    # and agentic_extra knobs can be persisted. Idempotent; see
+    # m_2026_05_12_add_agentic_columns docstring for full writeup.
+    ("2026_05_12_add_agentic_columns",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -738,6 +744,59 @@ def m_2026_05_12_add_exploit_chain_columns() -> str:
     return "all exploit-chain columns already present — no-op"
 
 
+def m_2026_05_12_add_agentic_columns() -> str:
+    """Add the agentic-pass control columns to assessments and
+    scan_schedules on existing 2.1.1 deployments.
+
+    Why: round-3 of the parity push introduces an agentic AI deep-
+    dive that runs after the Enhanced-AI weakness pass. Two new
+    knobs per assessment / per schedule control it:
+      - agentic_deep_dive_count (INT) -- how many of the top-severity
+        open findings get a tool-calling LLM deep-dive. Default 5;
+        0 disables the per-finding pass entirely.
+      - agentic_extra (TINYINT(1)) -- opt-in flag for the second,
+        free-roaming agentic pass that explores the scan surface for
+        misses. When set, the assessment's effective LLM budget cap
+        is automatically doubled so the free-roam pass has room
+        without starving the per-finding pass.
+
+    Idempotent: each ADD COLUMN is gated on an information_schema
+    lookup, so a re-run on an already-migrated DB is a no-op. The
+    same columns are present in db/schema.sql for fresh installs."""
+    targets = [
+        ("assessments", "agentic_deep_dive_count",
+         "INT NOT NULL DEFAULT 5",
+         "AFTER role_restrictions"),
+        ("assessments", "agentic_extra",
+         "TINYINT(1) NOT NULL DEFAULT 0",
+         "AFTER agentic_deep_dive_count"),
+        ("scan_schedules", "agentic_deep_dive_count",
+         "INT NOT NULL DEFAULT 5",
+         "AFTER role_restrictions"),
+        ("scan_schedules", "agentic_extra",
+         "TINYINT(1) NOT NULL DEFAULT 0",
+         "AFTER agentic_deep_dive_count"),
+    ]
+    added = []
+    skipped = []
+    for table, col, ddl, position in targets:
+        row = db.query_one(
+            "SELECT 1 AS exists_ FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "  AND table_name = %s "
+            "  AND column_name = %s", (table, col))
+        if row and row.get("exists_"):
+            skipped.append(f"{table}.{col}")
+            continue
+        db.execute(
+            f"ALTER TABLE {table} ADD COLUMN {col} {ddl} {position}")
+        added.append(f"{table}.{col}")
+    if added:
+        return (f"added {len(added)} column(s): {', '.join(added)}"
+                + (f"; {len(skipped)} already present" if skipped else ""))
+    return "all agentic columns already present -- no-op"
+
+
 def m_2026_05_12_unstick_llm_errored_validations() -> str:
     """Reset validation_status='errored' on enhanced_ai_testing-source
     findings back to 'unvalidated' so the LLM fidelity grader can pick
@@ -801,6 +860,8 @@ _LATE_BIND = {
         m_2026_05_12_add_exploit_chain_columns,
     "2026_05_12_unstick_llm_errored_validations":
         m_2026_05_12_unstick_llm_errored_validations,
+    "2026_05_12_add_agentic_columns":
+        m_2026_05_12_add_agentic_columns,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:

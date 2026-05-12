@@ -391,6 +391,22 @@ class CreateScanRequest(BaseModel):
                     "user IS authorized for are auto-tagged "
                     "expected_behavior info-severity rather than "
                     "raised as findings.")
+    # Agentic AI deep-dive knobs. Mirrors the assess form fields.
+    # Server-side clamping: agentic_deep_dive_count is bounded to
+    # 0..25; values outside that range are clamped silently rather
+    # than rejected so an API client typo doesn't fail the request.
+    agentic_deep_dive_count: Optional[int] = Field(
+        5,
+        ge=0, le=25,
+        description="Top-N findings the per-finding agentic pass "
+                    "deep-dives. Default 5; 0 disables. Capped at 25 "
+                    "server-side. Only meaningful when the assessment "
+                    "is premium + advanced + enhanced_ai_testing.")
+    agentic_extra: bool = Field(
+        False,
+        description="Opt-in for the free-roaming agentic pass that "
+                    "runs after the per-finding deep-dive. Costs more "
+                    "LLM tokens; defaults to off.")
 
 
 class CreateScheduleRequest(BaseModel):
@@ -459,6 +475,15 @@ class CreateScheduleRequest(BaseModel):
         None,
         description="What the authenticated user must NOT be able to "
                     "do. See the matching field on CreateScanRequest.")
+    agentic_deep_dive_count: Optional[int] = Field(
+        5, ge=0, le=25,
+        description="Top-N findings the per-finding agentic pass "
+                    "deep-dives on every materialization. Default 5; "
+                    "0 disables.")
+    agentic_extra: bool = Field(
+        False,
+        description="Opt-in for the free-roaming agentic pass on every "
+                    "materialization. Costs more LLM tokens.")
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -488,6 +513,8 @@ class UpdateScheduleRequest(BaseModel):
     enhanced_ai_testing: Optional[bool] = None
     role_scope_description: Optional[str] = None
     role_restrictions: Optional[str] = None
+    agentic_deep_dive_count: Optional[int] = Field(None, ge=0, le=25)
+    agentic_extra: Optional[bool] = None
 
 
 class CreateScanResponse(BaseModel):
@@ -729,15 +756,22 @@ def api_create_scan(
         role_scope_value = None
         role_restrict_value = None
 
+    # Server-side clamp on agentic_deep_dive_count -- pydantic
+    # already enforced 0..25 at request-parse time, but a None comes
+    # in when the caller omitted the field; treat that as the default.
+    a_dive = (5 if body.agentic_deep_dive_count is None
+              else max(0, min(25, int(body.agentic_deep_dive_count))))
+    a_extra = 1 if body.agentic_extra else 0
     aid = db.execute(
         """INSERT INTO assessments
            (fqdn, scan_http, scan_https, profile, llm_tier, llm_endpoint_id,
             user_agent_id, creds_username, creds_password, login_url,
             application_id, keep_only_latest, llm_debug,
             enhanced_ai_budget_usd, enhanced_ai_testing,
-            role_scope_description, role_restrictions, status)
+            role_scope_description, role_restrictions,
+            agentic_deep_dive_count, agentic_extra, status)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                   'queued')""",
+                   %s,%s,'queued')""",
         (fqdn,
          1 if body.scan_http else 0,
          1 if body.scan_https else 0,
@@ -753,7 +787,9 @@ def api_create_scan(
          effective_budget,
          ear_flag,
          role_scope_value,
-         role_restrict_value),
+         role_restrict_value,
+         a_dive,
+         a_extra),
     )
     _spawn_orchestrator(aid)
     row = db.query_one(
