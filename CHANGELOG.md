@@ -248,6 +248,82 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Round-4 cross-source dedup, agent visibility
+  preamble, hard pre-emit gate, and enrichment for AI-emitted
+  findings.** Three-layer fix for the "agentic pass emits 27 near-
+  duplicate TLS findings while testssl already had the canonical
+  one" problem.
+
+  Layer 1 -- visibility preamble (`app/dedup.py`,
+  `app/agentic_ai.py`). The per-finding and free-roam agent passes
+  now build an "already confirmed by other scanners" bullet list at
+  the top of the user prompt, clustered by the new
+  `dedup_signature_v2`. The directive tells the agent to spend its
+  budget on new bugs or on chaining the listed bugs into deeper
+  impact, not on re-testing them.
+
+  Layer 2 -- pre-emit hard gate (`_insert_agentic_finding` +
+  `_insert_weakness_findings`). Every emit / insert computes a
+  severity-free signature and looks it up in a live index built at
+  the top of the run. When the same signature is already covered by
+  a higher-fidelity source (testssl, nuclei, enhanced_testing,
+  nikto, wapiti, dalfox, sqlmap, ffuf, sca -- tiers 1+2), the row
+  is refused with a tool_result that names the canonical id and
+  source: "Refused as duplicate of finding #3187 (already confirmed
+  by enhanced_testing)." The agent then pivots instead of retrying
+  the same payload under a new phrasing. Same gate runs across
+  prior emissions in the SAME run so the agent's own re-statements
+  of one bug under different titles also collapse.
+
+  Layer 3 -- post-hoc cross-source soft demote
+  (`dedup.apply_cross_source_dedup`, called from the orchestrator
+  just before consolidation). Walks every open finding on the
+  assessment, clusters by the same signature, picks the lowest-
+  tier (highest-fidelity) row as canonical, and sets
+  `dedup_of=<canonical_id>` on the losers. Soft demote -- nothing
+  is deleted; the demoted row's raw_data + exploit-chain reasoning
+  is preserved for forensic recovery. The workspace listing, the
+  severity rollup, the dashboard counts, the PDF report, and the
+  REST `/scans/{id}/results` endpoint all filter on
+  `dedup_of IS NULL` by default. Reversible if a signature was
+  wrong: clear the column on the affected rows.
+
+  Signature builder details (`dedup.dedup_signature_v2`):
+  - Title-only vuln-class classification (evidence body
+    excerpts were producing spurious matches -- HSTS findings
+    clustering as `cors_wildcard` because the response body echoed
+    "Access-Control-Allow-Origin: *").
+  - Host-level vuln classes (`hsts_missing`, `tls_null_cipher`,
+    `tls_weak_cipher`, `cors_wildcard`) emit a path-free signature
+    since these are properties of the endpoint, not a URL path.
+    Without this, "TLS aNULL/AECDH ..." extracts "/aecdh" as a
+    path and stops collapsing against "Anonymous TLS Cipher Suite
+    ..." from a different source.
+  - URL host:port prefixes are stripped before path extraction so
+    `https://host/` doesn't get parsed as a `//host/` "path" that
+    then collides every finding on the same host onto one bucket
+    (the catastrophic failure mode in the first dry-run pass).
+  - MIME-type / extension fragments (`/png`, `/zip`, `/json`,
+    `/html`, ...) are filtered from candidate paths since they're
+    almost always noise captured from response bodies.
+
+  Enrichment for AI-emitted findings (`app/agentic_ai.py` +
+  `app/enhanced_ai.py`). Crit/high/medium findings emitted by the
+  agentic pass and the LLM weakness pass now flow through
+  `enrichment.get_or_create()` so the rich "Attacker workflow &
+  exploitability" block (Likelihood + Why + Prerequisites +
+  Exploit chain + End-to-end narrative + Remediation) renders on
+  them the same way it does on deterministic scanner findings.
+  Cache-keyed by signature so a finding type that recurs across
+  scenarios pays one LLM call total. Low/info severities skip
+  enrichment to keep the bill bounded. Best-effort: a transient
+  LLM failure logs a warning and leaves `enrichment_id` NULL --
+  the finding row still lands.
+
+  Schema (`db/schema.sql` + boot migration
+  `m_2026_05_12_add_dedup_of`): adds `findings.dedup_of INT NULL`
+  + `idx_dedup_of` on existing 2.1.1 deployments.
+
 - **2026-05-12** — **Agentic AI deep-dive pass — per-finding
   re-examination + opt-in free-roaming agent.** Adds a tool-using LLM
   stage that runs after `enhanced_ai_testing` and before

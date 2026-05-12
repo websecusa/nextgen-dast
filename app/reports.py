@@ -440,7 +440,13 @@ def _gather(assessment_id: int) -> Optional[dict]:
         "status, "
         "COALESCE(seen_count, 1) AS seen_count, "
         "COALESCE(validation_status, 'unvalidated') AS validation_status "
+        # Round 4C: cross-source duplicates are hidden from the PDF;
+        # the canonical row is already present. dedup_of IS NULL on
+        # canonical rows. Soft demote -- the row still exists in the
+        # DB for analyst recovery via the workspace, just not in the
+        # printed report.
         "FROM findings WHERE assessment_id = %s "
+        "  AND dedup_of IS NULL "
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (assessment_id,))
     # Set of triaged-away statuses excluded from the body of the PDF.

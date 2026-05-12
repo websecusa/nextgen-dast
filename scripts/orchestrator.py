@@ -924,6 +924,27 @@ def main() -> int:
                     update(aid,
                            error_text=f"agentic_ai crashed: {e!r}")
 
+        # Round 4C: cross-source dedup soft-demote pass. Runs after
+        # every scanner + LLM + agent has finished writing so the
+        # canonical pick has the full pool to choose from. Soft demote
+        # (dedup_of column) so nothing is lost -- the workspace
+        # listing and PDF report hide demoted rows by default with a
+        # disclosure on the canonical row. Reversible if a signature
+        # was wrong. Failure here must not block consolidation.
+        update(aid, current_step="dedup: cross-source soft-demote pass")
+        try:
+            import dedup as _dedup_mod
+            ded_summary = _dedup_mod.apply_cross_source_dedup(aid)
+            log.info(
+                "dedup: aid=%s clusters_demoted=%s rows_demoted=%s "
+                "rows_untouched=%s total_open=%s",
+                aid, ded_summary.get("clusters_demoted"),
+                ded_summary.get("rows_demoted"),
+                ded_summary.get("rows_untouched"),
+                ded_summary.get("total_open"))
+        except Exception as e:
+            log.warning("dedup: apply_cross_source_dedup crashed: %r", e)
+
         # Basic-tier roll-up: ask the LLM to produce an executive summary,
         # an overall risk score, and a top-priorities list from the
         # deduplicated findings. On advanced tier this runs LAST so the

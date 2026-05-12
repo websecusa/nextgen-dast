@@ -151,6 +151,7 @@ def _fetch_buckets(aid: int) -> list[dict]:
         WHERE f.assessment_id = %s
           AND COALESCE(f.status, 'open')
               NOT IN ('false_positive', 'fixed', 'accepted_risk')
+          AND f.dedup_of IS NULL
         GROUP BY f.enrichment_id, f.title, f.severity, f.source_tool,
                  fe.owasp_category, f.owasp_category, fe.cwe, f.cwe,
                  fe.title_norm

@@ -1101,8 +1101,12 @@ def _dashboard_data(trend_filter: Optional[str] = None,
     # false-positive (suppressed), fixed (resolved), and accepted_risk
     # (archived) all drop out so the dashboard mirrors what's actually
     # actionable. The same exclusion drives the per-target live risk
-    # below and the trend-chart series.
-    triage_clause = "status NOT IN ('false_positive', 'fixed', 'accepted_risk')"
+    # below and the trend-chart series. Round 4C also excludes
+    # cross-source duplicates (dedup_of IS NOT NULL) -- the canonical
+    # row is already in the count.
+    triage_clause = (
+        "status NOT IN ('false_positive', 'fixed', 'accepted_risk') "
+        "AND dedup_of IS NULL")
 
     sev = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
     for r in db.query(
@@ -1110,6 +1114,7 @@ def _dashboard_data(trend_filter: Optional[str] = None,
             f"WHERE {triage_clause} GROUP BY severity"):
         sev[r["severity"]] = int(r["n"] or 0)
     open_total = sum(sev.values())
+    # Round 4C: live-per-target also wants the same filter.
 
     # 7-day delta: open findings created in the last 7 days vs the prior
     # 7-day window. Negative means we're trending down (good).
@@ -1155,7 +1160,8 @@ def _dashboard_data(trend_filter: Optional[str] = None,
         "FROM findings f "
         "JOIN (SELECT fqdn, MAX(id) AS mid FROM assessments "
         "      WHERE status='done' GROUP BY fqdn) t "
-        "  ON f.assessment_id = t.mid")
+        "  ON f.assessment_id = t.mid "
+        "WHERE f.dedup_of IS NULL")
     for r in rows:
         findings_by_aid.setdefault(r["assessment_id"], []).append(r)
     for aid, fs in findings_by_aid.items():
@@ -1535,7 +1541,8 @@ def _assessments_table_data(*, q: str, status: str, size: int, page: int,
         for f in db.query(
                 f"SELECT assessment_id, severity, status, validation_status, "
                 f"       owasp_category, source_tool "
-                f"FROM findings WHERE assessment_id IN ({ph})", ids):
+                f"FROM findings WHERE assessment_id IN ({ph}) "
+                f"  AND dedup_of IS NULL", ids):
             findings_by_aid.setdefault(f["assessment_id"], []).append(f)
         for r in rows:
             fs = findings_by_aid.get(r["id"], [])
@@ -3128,9 +3135,16 @@ def assessment_detail(request: Request, aid: int,
         "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
         "cwe, cvss, title, description, evidence_url, evidence_method, "
         "remediation, status, validation_status, validation_run_at, "
-        "COALESCE(seen_count, 1) AS seen_count, created_at "
+        "COALESCE(seen_count, 1) AS seen_count, dedup_of, created_at "
         "FROM findings WHERE assessment_id = %s",
         (aid,))
+    # Round 4C: cross-source duplicates were soft-demoted to point at
+    # a canonical finding. Track how many are hidden so the page can
+    # surface a "X duplicate findings hidden" disclosure, but filter
+    # them out of the rollup + visible list -- their canonical row
+    # is already in there.
+    dedup_hidden = sum(1 for r in rows if r.get("dedup_of"))
+    rows = [r for r in rows if not r.get("dedup_of")]
 
     # Severity rollup — anything the analyst has triaged out is
     # excluded so the KPI strip and the live risk score reflect what's
