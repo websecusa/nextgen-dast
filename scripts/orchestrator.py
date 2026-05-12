@@ -892,6 +892,38 @@ def main() -> int:
             except Exception as e:
                 update(aid, error_text=f"enhanced_ai_testing crashed: {e!r}")
 
+            # Agentic AI pass. Runs immediately after enhanced_ai_testing
+            # so the deep-dive agent can see the LLM-emitted findings
+            # alongside the probe-emitted ones, and so the per-finding
+            # mode has a richer pool of candidates to pick from. Gates
+            # are identical to enhanced_ai_testing (premium + advanced
+            # + enhanced_ai_testing=1) PLUS at least one positive knob
+            # on the agentic settings -- either agentic_deep_dive_count
+            # > 0 or agentic_extra=1. When neither is set the agentic
+            # module no-ops gracefully; the gate here is mostly a
+            # current_step display nicety.
+            a_dive = int(a.get("agentic_deep_dive_count") or 0)
+            a_extra = int(a.get("agentic_extra") or 0)
+            if a_dive > 0 or a_extra == 1:
+                label_bits = []
+                if a_dive > 0:
+                    label_bits.append(f"per-finding x{a_dive}")
+                if a_extra == 1:
+                    label_bits.append("free-roam")
+                update(aid,
+                       current_step=("agentic_ai: "
+                                      + " + ".join(label_bits)))
+                try:
+                    import agentic_ai as agentic_mod
+                    ag_summary = agentic_mod.run(aid)
+                    if ag_summary.get("errors"):
+                        update(aid, error_text=(
+                            "agentic_ai: "
+                            + "; ".join(ag_summary["errors"])[:1000]))
+                except Exception as e:
+                    update(aid,
+                           error_text=f"agentic_ai crashed: {e!r}")
+
         # Basic-tier roll-up: ask the LLM to produce an executive summary,
         # an overall risk score, and a top-priorities list from the
         # deduplicated findings. On advanced tier this runs LAST so the

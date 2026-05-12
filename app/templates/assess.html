@@ -195,6 +195,42 @@ ports, check only the scheme that actually listens on that port.</p>
           specific — the more concrete the role and restrictions, the
           fewer false positives the model emits.
         </small>
+
+        {# Agentic AI controls. Visible only when enhanced_ai_testing
+           is on (the fieldset's outer toggle already gates this);
+           a fresh assessment defaults to deep-dive count 5, Extra
+           Agentic off. The numeric is clamped server-side to 0-25
+           so a typo can't run away with the LLM budget. #}
+        <fieldset style="border:1px dashed var(--border); border-radius:6px;
+                          padding:.6em .8em; margin-top:.8em">
+          <legend style="padding:0 .4em; color: var(--muted)">
+            Agentic AI deep-dive
+          </legend>
+          <label>Agentic deep-dive count
+            <input name="agentic_deep_dive_count" type="number"
+                   min="0" max="25" step="1"
+                   value="{{ prefill.agentic_deep_dive_count if prefill.agentic_deep_dive_count is not none else 5 }}"
+                   style="width:6em">
+            <small class="muted">
+              — Per-finding LLM agent runs against the top-N
+              critical/high/medium findings, driving real HTTP
+              requests through the scan proxy to confirm or expand
+              each one. 0 disables. Defaults to 5; max 25.
+            </small>
+          </label>
+          <label class="check" style="margin-top:.4em">
+            <input type="checkbox" name="agentic_extra" value="1"
+                   {% if prefill.agentic_extra %}checked{% endif %}>
+            Extra Agentic (More Cost)
+            <small class="muted">
+              — Runs a SECOND free-roaming agent pass after the
+              per-finding deep-dive. The agent explores the scan
+              surface for misses the probes and weakness-discovery
+              scenarios did not cover. Costs more LLM tokens; opt in
+              when you want maximum coverage.
+            </small>
+          </label>
+        </fieldset>
       </div>
     </fieldset>
 

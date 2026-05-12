@@ -2648,6 +2648,14 @@ def assess_start(
     enhanced_ai_testing: Optional[str] = Form(None),
     role_scope_description: str = Form(""),
     role_restrictions: str = Form(""),
+    # Agentic AI deep-dive knobs. agentic_deep_dive_count is clamped
+    # server-side to 0..25; default 5 when omitted or non-numeric.
+    # agentic_extra toggles the free-roam pass; only meaningful when
+    # the assessment is also premium+advanced+enhanced_ai_testing
+    # (the orchestrator gate). See agentic_ai.py for the runtime
+    # semantics.
+    agentic_deep_dive_count: Optional[str] = Form(None),
+    agentic_extra: Optional[str] = Form(None),
     # Re-scan flow. When the form was reached via "Re-scan" on an
     # assessment detail page, this hidden field carries the source
     # assessment id. If the visible password field is left as the
@@ -2762,6 +2770,18 @@ def assess_start(
         role_scope_value = None
         role_restrict_value = None
 
+    # Agentic AI knobs. Clamp deep-dive count to 0..25 server-side
+    # regardless of what the form sent; default to 5 when omitted or
+    # non-numeric. agentic_extra is a checkbox so its presence (any
+    # truthy string) is what matters.
+    try:
+        agentic_dive_value = int(agentic_deep_dive_count) \
+            if agentic_deep_dive_count not in (None, "") else 5
+    except (TypeError, ValueError):
+        agentic_dive_value = 5
+    agentic_dive_value = max(0, min(25, agentic_dive_value))
+    agentic_extra_flag = 1 if (agentic_extra and str(agentic_extra).strip() not in ("", "0", "false", "off")) else 0
+
     # Schedule branch: persist a scan_schedules row instead of running now.
     # Validation lives in app/schedules.py; we surface ValueError as a 400
     # so the form can re-render with the message inline.
@@ -2791,6 +2811,8 @@ def assess_start(
                 "enhanced_ai_testing": ear_flag,
                 "role_scope_description": role_scope_value,
                 "role_restrictions": role_restrict_value,
+                "agentic_deep_dive_count": agentic_dive_value,
+                "agentic_extra": agentic_extra_flag,
             })
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -2802,9 +2824,10 @@ def assess_start(
             user_agent_id, creds_username, creds_password, login_url,
             application_id, keep_only_latest, llm_debug,
             enhanced_ai_budget_usd, enhanced_ai_testing,
-            role_scope_description, role_restrictions, status)
+            role_scope_description, role_restrictions,
+            agentic_deep_dive_count, agentic_extra, status)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                   %s, %s, %s, 'queued')""",
+                   %s, %s, %s, %s, %s, 'queued')""",
         (fqdn,
          1 if scan_http else 0,
          1 if scan_https else 0,
@@ -2819,7 +2842,9 @@ def assess_start(
          effective_budget,
          ear_flag,
          role_scope_value,
-         role_restrict_value),
+         role_restrict_value,
+         agentic_dive_value,
+         agentic_extra_flag),
     )
     # spawn detached orchestrator
     log_path = LOGS_DIR / f"orchestrator_{aid}.log"

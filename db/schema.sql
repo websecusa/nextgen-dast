@@ -230,6 +230,21 @@ CREATE TABLE IF NOT EXISTS assessments (
   enhanced_ai_testing TINYINT(1) NOT NULL DEFAULT 0,
   role_scope_description TEXT NULL,
   role_restrictions TEXT NULL,
+  -- Agentic AI deep-dive count. The agentic pass picks the top-N
+  -- open findings by severity and runs a tool-calling LLM agent
+  -- against each, driving real HTTP requests through the scan proxy
+  -- to confirm / expand the finding. 0 disables the per-finding
+  -- agentic pass entirely. Capped server-side at 25 so an admin
+  -- typo can't blow the LLM budget.
+  agentic_deep_dive_count INT NOT NULL DEFAULT 5,
+  -- "Extra Agentic" opt-in. When 1, a SECOND agentic pass runs
+  -- after the per-finding deep-dive: a free-roaming agent that
+  -- explores the scan surface looking for misses the probes and
+  -- weakness-discovery scenarios did not cover. Doubles the
+  -- effective enhanced_ai_budget_usd cap for the assessment so the
+  -- free-roam pass has its own room without starving the per-
+  -- finding pass.
+  agentic_extra TINYINT(1) NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
   finished_at DATETIME,
@@ -655,6 +670,10 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
   enhanced_ai_testing TINYINT(1) NOT NULL DEFAULT 0,
   role_scope_description TEXT NULL,
   role_restrictions TEXT NULL,
+  -- See assessments.agentic_deep_dive_count / agentic_extra for
+  -- the semantics. Copied into every materialized assessment.
+  agentic_deep_dive_count INT NOT NULL DEFAULT 5,
+  agentic_extra TINYINT(1) NOT NULL DEFAULT 0,
   next_run_at DATETIME NULL,
   last_run_at DATETIME NULL,
   last_assessment_id INT NULL,

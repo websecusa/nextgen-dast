@@ -129,6 +129,37 @@ For targets behind a standard HTML login form (no SSO).
 * Mixed-mode targets (form login + per-API Bearer token) need the
   capture-then-replay path — see §4.
 
+### 3.1 Adding the agentic AI deep-dive
+
+When the **Scan with enhanced_ai_testing** checkbox is on, two extra
+fields appear:
+
+* **Agentic deep-dive count** — number of top-severity findings the
+  agent re-examines (default 5, range 0–25). Set to 0 to skip the
+  deep-dive pass entirely.
+* **Extra Agentic (More Cost)** — opt-in checkbox. Adds a
+  free-roaming pass that picks its own requests and can chain
+  multi-step business-logic abuse the deterministic probes miss.
+  Expect roughly 3–5× the token spend of a deep-dive run.
+
+Both passes share the same LLM budget cap and are tracked on the
+on-page cost chip. Findings emitted by the agent carry
+`source_tool='agentic_ai_testing'` so you can filter or audit them
+separately.
+
+To swap the agent's model without rebuilding the image — for example
+when the default `claude-sonnet-4-6` is succeeded by a newer release
+— edit the random env file and recreate the container:
+
+```
+echo 'NEXTGEN_DAST_AGENTIC_MODEL=claude-sonnet-5' >> .env_<suffix>
+./pentest.sh up -d
+```
+
+Leaving the variable unset uses the built-in default. The agent loop
+reads the variable at scan start, so the change applies to every
+subsequent assessment.
+
 
 ---
 

@@ -248,6 +248,55 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Agentic AI deep-dive pass — per-finding
+  re-examination + opt-in free-roaming agent.** Adds a tool-using LLM
+  stage that runs after `enhanced_ai_testing` and before
+  consolidation. Two modes share the same per-assessment budget:
+  - **Per-finding deep-dive** (default). Re-examines the top-N
+    critical/high findings; N is set per-scan by the new
+    `agentic_deep_dive_count` field (default 5, range 0-25; 0 skips
+    the pass). The agent inherits the finding's URL, evidence, and
+    validation status, and decides whether to upgrade / downgrade
+    severity or emit a fresh adjacent finding.
+  - **Extra Agentic (more cost)**. Toggled by the new `agentic_extra`
+    checkbox. Runs a free-roaming agent that picks its own requests
+    based on what it has seen across the assessment -- useful for
+    multi-step business-logic abuse no single probe targets.
+
+  Safety rails are enforced in `app/agentic_ai.py`, not just in the
+  prompt: `DELETE` and any path containing
+  `/delete | /destroy | /transfer | /withdraw | /reset-password |
+  /forgot-password | /api/cancel | /api/refund` are refused before
+  the request leaves the container; request bodies are scanned for
+  the same destructive markers; all HTTP calls go through
+  `SafeClient` so `Budget`, `AuditLog`, and `scope_hosts` apply just
+  as for the deterministic scanners. Per-finding pass: <=25 HTTP
+  calls, <=30 model turns; free-roam: <=80 HTTP calls, <=60 turns;
+  each tool result body truncated to 8 KB.
+
+  Findings emitted by the agent carry
+  `source_tool='agentic_ai_testing'` and a `raw_data.agent_mode` of
+  `per_finding` or `free_roam`. Token usage is logged to
+  `llm_analyses` (target_type `enhanced_ai_weakness`) so the on-page
+  cost chip and the audit trail attribute spend correctly across
+  both agentic modes and the deterministic LLM passes.
+
+  Model is read from `NEXTGEN_DAST_AGENTIC_MODEL` with
+  `claude-sonnet-4-6` as the built-in default. Swapping models (e.g.
+  if the default is deprecated) is an env-file + restart, not a code
+  edit -- the loop reads the variable at scan start.
+
+  Schema: `agentic_deep_dive_count INT NOT NULL DEFAULT 5` and
+  `agentic_extra TINYINT(1) NOT NULL DEFAULT 0` on both `assessments`
+  and `scan_schedules`. Idempotent boot migration
+  `m_2026_05_12_add_agentic_columns` adds them on existing
+  deployments. The `/assess` form, schedule materializer, and three
+  POST endpoints (`/api/v1/assessments`,
+  `/api/v1/schedules` create + update) all accept and clamp the
+  values; the schedules layer's allowlist + `_normalize` + INSERT
+  paths are kept in lockstep so a scheduled scan inherits the same
+  configuration as a one-off.
+
 - **2026-05-12** — **Round-2 parity push against external DAST
   tooling on Juice Shop -- enhanced 5 existing enhanced_testing
   probes whose detection criteria did not match the actual bug

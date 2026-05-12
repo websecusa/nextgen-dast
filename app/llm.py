@@ -184,6 +184,58 @@ def call_anthropic(api_key: str, model: str, system: str,
     }
 
 
+def call_anthropic_tool_turn(api_key: str, model: str,
+                              system: str,
+                              messages: list,
+                              tools: list,
+                              max_tokens: int = 4096) -> dict:
+    """Single turn of the Anthropic tool-use protocol.
+
+    Caller is responsible for the loop: take the returned content
+    blocks, execute any tool_use blocks, append a {"role": "user",
+    "content": [tool_result, ...]} message, and call again.
+
+    Returns:
+      {
+        ok: bool,
+        raw: str (raw response body),
+        stop_reason: 'end_turn'|'tool_use'|'max_tokens'|'stop_sequence',
+        content_blocks: list  (raw assistant content; pass back as-is
+                                in the next {role: assistant, content: ...}
+                                so tool_use_ids reference correctly),
+        in_tokens, out_tokens, cache_read_tokens, cache_write_tokens
+      }
+    """
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    body = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "tools": tools,
+        "messages": messages,
+    }
+    status, text = _http_post(
+        "https://api.anthropic.com/v1/messages", headers, body)
+    if status != 200:
+        return {"ok": False, "raw": text, "error": f"HTTP {status}"}
+    parsed = json.loads(text)
+    usage = parsed.get("usage", {})
+    return {
+        "ok": True,
+        "raw": text,
+        "stop_reason": parsed.get("stop_reason"),
+        "content_blocks": parsed.get("content", []),
+        "in_tokens": usage.get("input_tokens"),
+        "out_tokens": usage.get("output_tokens"),
+        "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+        "cache_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+    }
+
+
 def call_openai_compat(base_url: str, api_key: str, model: str, system: str,
                        user_prompt: str, max_tokens: int = 4096,
                        extra_headers: Optional[dict] = None) -> dict:
