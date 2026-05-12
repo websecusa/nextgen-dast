@@ -2145,12 +2145,28 @@ def auth_capture(flow_id: str = Form(...), name: str = Form(...),
 @app.get("/llm", response_class=HTMLResponse)
 def llm_page(request: Request, msg: str = ""):
     endpoints = []
+    backfill_count = 0
+    backfill_est_cost = 0.0
     if db.healthy():
         endpoints = db.query("SELECT * FROM llm_endpoints ORDER BY name")
+        # Round 5B: stale exploit-chain enrichment count, for the
+        # admin "Backfill exploit-chain enrichment" widget. Counted
+        # cheaply -- a single COUNT over the join. The estimated
+        # cost is the count times the typical per-row enrichment
+        # spend (~$0.02 at Sonnet-class pricing); shown alongside
+        # so the admin knows roughly what one click will spend.
+        try:
+            backfill_count = enrichment_mod.backfill_candidates_count()
+            backfill_est_cost = round(backfill_count * 0.02, 2)
+        except Exception:
+            backfill_count = 0
     return templates.TemplateResponse(
         "llm.html",
         ctx(request, endpoints=endpoints, msg=msg, db_ok=db.healthy(),
-            ai_budget_system_default=_system_default_budget_usd()),
+            ai_budget_system_default=_system_default_budget_usd(),
+            backfill_count=backfill_count,
+            backfill_est_cost=backfill_est_cost,
+            backfill_cap=enrichment_mod.MAX_BACKFILL_ROWS),
     )
 
 
@@ -2182,6 +2198,54 @@ def llm_budget_default_save(request: Request,
         extra={"new_default_usd": val},
     )
     return redirect("/llm?msg=system+default+budget+updated")
+
+
+@app.post("/llm/backfill_exploit_chains")
+def llm_backfill_exploit_chains(request: Request,
+                                  csrf_token: str = Form("")):
+    """Superadmin-only. Re-call the LLM for every stale enriched
+    signature whose `exploit_chain_json` is empty (older rows that
+    pre-date the 2026-05-12 exploit-chain feature) and that has at
+    least one open crit/high/medium finding attached. Updates ONLY
+    the new exploit-chain / attacker-workflow / likelihood columns;
+    the curated `description_long`, `impact`, and `remediation_long`
+    are preserved.
+
+    Synchronous: the admin clicks, the page reloads after the pass
+    finishes. Bounded at enrichment.MAX_BACKFILL_ROWS so wall time
+    is predictable (~30-60 seconds for the default 250-row cap).
+    Larger backlogs need multiple clicks -- the count widget shows
+    how many remain after each pass."""
+    require_superadmin(request)
+    check_csrf(request, csrf_token)
+    # Pick the same Anthropic endpoint resolution the runtime
+    # enrichment path uses: prefer is_default=1, fall back to first
+    # by id. Backfill is a curation task -- it doesn't read the
+    # per-assessment llm_endpoint_id since we're operating on
+    # enrichment rows that span every assessment.
+    ep = db.query_one(
+        "SELECT * FROM llm_endpoints WHERE is_default=1 LIMIT 1")
+    if not ep:
+        ep = db.query_one(
+            "SELECT * FROM llm_endpoints ORDER BY id LIMIT 1")
+    summary = enrichment_mod.backfill_exploit_chains(ep)
+    if summary.get("endpoint_missing"):
+        return redirect(
+            "/llm?msg=backfill+failed%3A+no+anthropic+endpoint+"
+            "configured")
+    audit_mod.log_event(
+        "enrichment_backfill",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        ip=client_ip(request),
+        extra={"scanned": summary["scanned"],
+                "refreshed": summary["refreshed"],
+                "failed": summary["failed"],
+                "cost_usd": summary["cost_usd"]},
+    )
+    msg = (f"backfill+done%3A+{summary['refreshed']}+row(s)+refreshed%2C+"
+           f"{summary['failed']}+failed%2C+"
+           f"%24{summary['cost_usd']:.2f}+spent")
+    return redirect(f"/llm?msg={msg}")
 
 
 @app.post("/llm/endpoint")
@@ -3393,6 +3457,28 @@ def _compute_llm_usage_for_assessment(a: dict) -> Optional[dict]:
 
     if models:
         models.sort(key=lambda m: m["cost"], reverse=True)
+        # Round 5A: surface cap + remaining-for-pass + reservation so
+        # the chip can render "$X spent / $Y cap" with a color tint
+        # when nearing or past the cap.
+        cap_usd = a.get("enhanced_ai_budget_usd")
+        try:
+            cap_usd_f = float(cap_usd) if cap_usd is not None else None
+        except (TypeError, ValueError):
+            cap_usd_f = None
+        if cap_usd_f is None:
+            # Fall back to the system default config row when the
+            # assessment didn't pin its own cap.
+            cfg = db.query_one(
+                "SELECT value FROM config "
+                "WHERE `key`='advanced_ai_budget_default_usd'")
+            if cfg and cfg.get("value"):
+                try:
+                    cap_usd_f = float(cfg["value"])
+                except (TypeError, ValueError):
+                    cap_usd_f = None
+        budget_pct = None
+        if cap_usd_f and cap_usd_f > 0:
+            budget_pct = round(100.0 * total_cost / cap_usd_f, 1)
         return {
             "used": True,
             "total_cost": round(total_cost, 4),
@@ -3401,6 +3487,8 @@ def _compute_llm_usage_for_assessment(a: dict) -> Optional[dict]:
             "call_count": total_calls,
             "models": models,
             "source": "llm_analyses",
+            "cap_usd": cap_usd_f,
+            "budget_pct": budget_pct,
         }
 
     # Fallback: no per-call rows survived but the assessment row carries

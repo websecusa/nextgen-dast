@@ -66,6 +66,7 @@ import dedup as dedup_mod
 import enrichment as enrichment_mod
 import flow_index
 import llm as llm_mod
+import llm_budget
 import spa_fallback
 
 logger = logging.getLogger(__name__)
@@ -1248,65 +1249,24 @@ def _record_analysis(*, aid: int, target_type: str, target_id: str,
 
 
 # ---- budget tracking --------------------------------------------------------
+# Round 5A: the budget accumulator now lives in app/llm_budget.py and is
+# shared across enhanced_ai, agentic_ai, enrichment, and consolidation so
+# all four LLM consumers write to the same per-assessment USD total. The
+# `_BudgetState` alias and `_resolve_budget` shim below preserve the
+# previous in-file API for any call sites that still construct or annotate
+# against the old name -- the underlying object is now
+# llm_budget.BudgetState.
 
-class _BudgetState:
-    """Accumulator for per-assessment Enhanced-AI spend.
-
-    Kept as a lightweight class rather than module globals so the
-    accountant is per-run; multiple assessments running concurrently
-    don't share state. spent and cap are USD floats. tripped is set
-    True the first time a call would push us past the cap; downstream
-    iterations check tripped() and short-circuit with a graceful note."""
-
-    def __init__(self, cap_usd: Optional[float]):
-        # None = no cap (system-default lookup yielded NULL on a fresh DB
-        # before the seed config row landed; treat as uncapped to avoid
-        # silently disabling the feature).
-        self.cap_usd: Optional[float] = cap_usd
-        self.spent: float = 0.0
-        self.tripped: bool = False
-        self.tripped_at_cost: float = 0.0
-
-    def add(self, cost: float) -> None:
-        self.spent += float(cost or 0.0)
-
-    def would_trip_on_next(self, projected_cost: float) -> bool:
-        if self.cap_usd is None:
-            return False
-        return (self.spent + projected_cost) > float(self.cap_usd)
-
-    def trip(self) -> None:
-        if not self.tripped:
-            self.tripped = True
-            self.tripped_at_cost = self.spent
-
-    def remaining(self) -> Optional[float]:
-        if self.cap_usd is None:
-            return None
-        return max(0.0, float(self.cap_usd) - self.spent)
+_BudgetState = llm_budget.BudgetState
 
 
 def _resolve_budget(aid: int) -> Optional[float]:
-    """Resolve the per-assessment cap. Precedence:
-      1. assessments.enhanced_ai_budget_usd if set (admin-supplied per-scan).
-      2. config['advanced_ai_budget_default_usd'] (system default).
-      3. None — uncapped (only happens on a fresh DB before the seed
-         insert lands; should not occur in steady state)."""
-    a = db.query_one(
-        "SELECT enhanced_ai_budget_usd FROM assessments WHERE id=%s", (aid,))
-    if a and a.get("enhanced_ai_budget_usd") is not None:
-        try:
-            return float(a["enhanced_ai_budget_usd"])
-        except (TypeError, ValueError):
-            pass
-    row = db.query_one(
-        "SELECT value FROM config WHERE `key`='advanced_ai_budget_default_usd'")
-    if row and row.get("value"):
-        try:
-            return float(row["value"])
-        except (TypeError, ValueError):
-            return None
-    return None
+    """Backwards-compatible shim. Reads the per-assessment cap via
+    the shared accountant so test harnesses that monkey-patched this
+    function continue to work; the production path no longer relies
+    on the return value -- it asks llm_budget.get(aid) directly."""
+    state = llm_budget.get(aid)
+    return state.cap_usd
 
 
 # ---- public entry point -----------------------------------------------------
@@ -1499,8 +1459,11 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
         summary["errors"].append(f"telemetry build failed: {e!r}")
         return summary
 
-    cap = _resolve_budget(aid)
-    budget = _BudgetState(cap)
+    # Round 5A: shared accountant. enhanced_ai_testing draws from the
+    # SAME pool as the agentic pass + enrichment + consolidation, and
+    # its remaining-for-pass slice is `remaining - reservation` so it
+    # leaves headroom for the closing passes.
+    budget = llm_budget.get(aid)
 
     # ---- weakness-discovery loop ------------------------------------------
     rows = db.query_all(
@@ -1539,7 +1502,7 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
         approx_in = (len(sys_prompt) + len(rendered_user)) // 4
         approx_cost = llm_mod.cost(approx_in, WEAKNESS_MAX_OUTPUT_TOKENS,
                                      endpoint.get("model") or "")
-        if budget.would_trip_on_next(approx_cost):
+        if budget.would_exhaust_pass(approx_cost):
             budget.trip()
             summary["scenarios_skipped"] += 1
             continue
@@ -2332,7 +2295,7 @@ def _run_fidelity(aid: int, endpoint: dict, telemetry: dict,
         approx_in = (len(sys_prompt) + len(user)) // 4
         approx_cost = llm_mod.cost(approx_in, FIDELITY_MAX_OUTPUT_TOKENS,
                                      endpoint.get("model") or "")
-        if budget.would_trip_on_next(approx_cost):
+        if budget.would_exhaust_pass(approx_cost):
             budget.trip()
             break
 

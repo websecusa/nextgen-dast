@@ -42,6 +42,7 @@ from typing import Optional
 
 import db
 import llm as llm_mod
+import llm_budget
 
 
 # ---- Tunables ---------------------------------------------------------------
@@ -393,6 +394,17 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
     cached_in = int(result.get("cache_read_tokens") or 0)
     cost_usd = llm_mod.cost(in_tokens, out_tokens, model,
                             cached_in_tokens=cached_in)
+    # Round 5A: register this call against the shared accumulator
+    # and soft-warn if it pushed past the cap. Consolidation always
+    # runs (the assessment is unreadable without an exec summary) so
+    # we never block here; the warning leaves a breadcrumb if
+    # cumulative spend overshot.
+    try:
+        llm_budget.record(aid, in_tokens=in_tokens, out_tokens=out_tokens,
+                          model=model, cached_in_tokens=cached_in)
+        llm_budget.warn_if_over_cap(aid, context="consolidation")
+    except Exception:
+        pass
 
     if not result.get("ok"):
         err = result.get("error") or "LLM call failed"
