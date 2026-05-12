@@ -256,12 +256,33 @@ class BizLogicNegativeQuantityTotalProbe(Probe):
             and isinstance(post_total, float)
             and post_total < mid_total - 0.001
         )
-        if accepted and (post_has_neg or total_dropped):
+        # Third signal: the POST response body itself echoes back the
+        # persisted negative quantity. Some stacks (Juice Shop is the
+        # canonical example) write the row but the cart-view endpoint
+        # does not surface the orphaned line because it's keyed off a
+        # different basket id / nullable foreign key. The POST response
+        # is the most direct evidence the server stored the bad value
+        # without rejecting it -- parse it the same way we parse the
+        # cart-view payload.
+        post_response_text = (r_bad.text or "")
+        post_response_has_neg = _has_negative_line(post_response_text)
+        attempt["post_response_has_neg"] = post_response_has_neg
+        if accepted and (post_has_neg or total_dropped or post_response_has_neg):
+            if total_dropped:
+                _evidence_phrase = (
+                    f"Cart total dropped from {mid_total} to {post_total}")
+            elif post_has_neg:
+                _evidence_phrase = (
+                    "Cart view now contains a negative-quantity line item")
+            else:
+                _evidence_phrase = (
+                    "POST response body echoes the persisted "
+                    "negative-quantity row")
             return Verdict(
                 validated=True, confidence=0.92,
                 summary=(f"Confirmed: cart endpoint {origin}{good_path} "
                          f"accepted quantity=-1 (status {r_bad.status}). "
-                         f"Cart {('total dropped from ' + str(mid_total) + ' to ' + str(post_total)) if total_dropped else 'now contains a negative-qty line item'}."),
+                         f"{_evidence_phrase}."),
                 evidence=evidence,
                 severity_uplift="high",
                 remediation=(

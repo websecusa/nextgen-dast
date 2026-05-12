@@ -248,6 +248,117 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **Round-2 parity push against external DAST
+  tooling on Juice Shop -- enhanced 5 existing enhanced_testing
+  probes whose detection criteria did not match the actual bug
+  shapes, added 5 net-new probes for findings the catalog did not
+  cover, and broadened the LLM weakness pass's telemetry with a
+  request+response-paired placeholder for mass-assignment
+  reasoning.**
+
+  Probe enhancements (existing files, no new manifest entries):
+  - `bizlogic_negative_quantity_total`: accept "POST response body
+    echoes the persisted negative-quantity row" as a third validation
+    signal alongside the existing reduced-cart-total and
+    negative-line-in-cart-view checks. Catches stacks where the bad
+    row is written under a null / orphan basket and never surfaces in
+    the user's cart view, but the response from the write itself
+    proves persistence.
+  - `redirect_allowlist_bypass`: now also tests the OWASP Juice Shop
+    bypass shape -- attacker host with a trusted prefix EMBEDDED as a
+    query string (e.g. `https://evil.com/?https://github.com/juice-
+    shop/juice-shop`). The original shape (trusted prefix as host,
+    evil as `?pwned=`) is preserved. Added a baseline-rejection step
+    that fires the bare evil URL first; the differential (baseline
+    rejected, smuggled accepted) is enough to confirm bypass even when
+    the server fetches the redirect server-side and returns 200
+    rather than emitting a Location header.
+  - `angular_secrets_in_bundle`: added four generic literal-assignment
+    patterns to the existing canonical-shape catalog -- hardcoded
+    `testingPassword="..."` / `testingUsername="email@..."` /
+    `api_key="..." | client_secret="..."` / bearer-token literals.
+    Catches the OWASP Juice Shop `main.js` leak (`testingUsername=
+    "testing@juice-sh.op"; testingPassword="IamUsedForTesting"`) that
+    none of the cloud-vendor-shape regexes matched.
+  - `nosql_review_operator_injection`: now also issues a PATCH
+    /rest/products/reviews with a `$in` selector whose values are
+    synthetic non-existent IDs (so the safe outcome is
+    `{"modified": 0, ...}` -- proof the operator was honoured without
+    actually modifying any review records). Confirms NoSQL-injection
+    on the JSON body's `id` field even when the GET-with-bracket
+    syntax variant returns 500. Added to `_PROBES_NEEDING_POST` so
+    SafeClient permits the write verb.
+  - `prototype_pollution_any_patch`: added two new detection signals
+    beyond the marker-leak-on-unrelated-endpoint one. (1) Sequelize /
+    ORM error body that names the polluted child key -- the merge
+    reached the query generator and crashed citing an attribute that
+    came from Object.prototype (the OWASP Juice Shop POST
+    /api/Feedbacks shape). (2) Process-cascade canary: baseline GETs
+    on /, /api/Products, /api/about, /robots.txt before the payload,
+    same GETs after; a 2xx -> 5xx flip on any of them is strong
+    evidence the Node process is in a post-pollution unstable state.
+    Endpoint catalog also expanded to include POST /api/Users /
+    /api/Feedbacks / /api/Complaints (write-shaped pollution surfaces
+    that the previous PATCH-only catalog missed).
+
+  New probes (4x `.py` + `.manifest.json` under enhanced_testing/probes/):
+  - `info_admin_config_exposed` (read-only): walks a catalog of
+    conventional admin / application-configuration paths
+    (/rest/admin/application-configuration, /api/admin/config, etc.)
+    and emits a finding when an unauthenticated GET returns a
+    configuration-shaped JSON body (top-level config / application /
+    server envelope OR >=3 admin-flavoured field tokens).
+  - `authz_authentication_details_exposes_all_users` (read-only +
+    POST-gated): registers a fresh low-privilege user, GETs
+    /rest/user/authentication-details (and similar), and flags the
+    endpoint when the response returns >=2 distinct user records WITH
+    auth-flavoured fields (deluxeToken, totpSecret, lastLoginIp, role)
+    visible to a non-admin caller.
+  - `info_memories_exposes_nested_user_pii` (read-only + POST-gated):
+    registers a fresh user, walks feed-shaped endpoints (memories /
+    posts / activity / photos), and emits a finding when any row
+    carries a nested `User`-keyed object with a sensitive field
+    (password hash, role, deluxeToken, etc.) -- the canonical
+    "serializer ships the eager-loaded ORM row" bug.
+  - `authz_product_price_mass_assignment` (probe class, POST-gated):
+    registers a low-priv customer, PUT /api/Products/{id} with a
+    benign description suffix, verifies via follow-up GET, then
+    restores the original description before exiting. Confirms
+    vertical authorization failure on the catalog-update path that
+    almost certainly permits price / name mutations through the same
+    code path (deliberately not exercised to avoid touching financial
+    state).
+  - `config_true_client_ip_spoofable` (read-only + POST-gated):
+    registers a fresh user, then probes /rest/saveLoginIp (and
+    similar) with five spoofable IP headers (True-Client-IP,
+    X-Forwarded-For, X-Real-IP, X-Originating-IP, CF-Connecting-IP)
+    set to canary 10.0.0.x values. Flags the endpoint when the
+    stored audit-trail IP matches the spoofed value.
+
+  Orchestrator: 5 new probe names added to `_PROBES_NEEDING_POST` so
+  SafeClient permits their write or auth-gated phases (the
+  `allow_destructive=True` budget setting that lets POST/PUT/PATCH
+  through). No change to read-only probes' default plumbing.
+
+  LLM telemetry placeholder (B):
+  - New helper `_render_mutating_endpoints_full` in app/enhanced_ai.py
+    that emits, per mutation, BOTH the captured request body AND the
+    captured response body (with response status), one entry per
+    distinct endpoint, capped at 24 entries and PER_FINDING_QUOTE_MAX
+    chars per body. Surfaced as a new `{mutating_endpoints_full}`
+    placeholder added to `PLACEHOLDERS_BY_SLOT` for
+    `advanced_ai_testing.weakness_discovery`.
+  - The Mass Assignment / Auto-Binding scenario user-template now
+    quotes `{mutating_endpoints_full}` alongside the existing
+    `{mutating_requests}` block, with explicit instructions to look
+    for privilege-bearing fields echoed back in the response (the
+    request-only view cannot show that, which is why mass-assignment
+    findings were so commonly missed by the LLM previously). Other
+    scenarios can opt-in by adding the placeholder to their own
+    user_template -- since the data was already in the per-finding
+    raw_data, this is a renderer-only change and adds zero new
+    network requests.
+
 - **2026-05-12** — **New weakness-discovery scenario: "Collection
   Endpoint Authorization Audit"** (sort_order 105, slot
   `advanced_ai_testing.weakness_discovery`, category `bola_idor`).

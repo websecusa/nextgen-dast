@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "config_true_client_ip_spoofable",
+  "version": "1.0",
+  "summary": "Registers a fresh user, then probes /rest/saveLoginIp (and similar) with True-Client-IP / X-Forwarded-For / X-Real-IP / X-Originating-IP / CF-Connecting-IP set to canary values. Flags the endpoint when the stored audit-trail IP matches the spoofed value, demonstrating that authenticated callers can forge their own lastLoginIp record.",
+  "validates": [
+    "CWE-348",
+    "CWE-345",
+    "CWE-117"
+  ],
+  "matches_titles": [
+    "config_true_client_ip_spoofable",
+    "ip spoofing via true-client-ip",
+    "audit trail integrity"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 14,
+  "request_budget_max": 32,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

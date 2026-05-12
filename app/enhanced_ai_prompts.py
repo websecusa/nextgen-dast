@@ -127,6 +127,12 @@ PLACEHOLDERS_BY_SLOT: dict[str, set[str]] = {
         "auth_findings", "state_mutating_findings",
         "authenticated_endpoints", "object_id_patterns",
         "response_samples", "mutating_requests", "related_findings",
+        # Round-2 addition: companion to mutating_requests that also
+        # carries the captured response body per mutation, so
+        # mass-assignment scenarios can see "we sent role=admin and
+        # the server returned role=admin" rather than only the
+        # request-side payload.
+        "mutating_endpoints_full",
         "input_endpoints", "retrieval_endpoints",
         "xss_findings", "sqli_findings",
         "auth_redirect_chain", "jwt_findings", "oauth_endpoints",
@@ -297,9 +303,19 @@ TARGET
 ======
 {fqdn} ({profile} scan)
 
-MUTATING JSON REQUESTS captured during the scan
-================================================
+MUTATING JSON REQUESTS captured during the scan (request bodies only)
+======================================================================
 {mutating_requests}
+
+MUTATING REQUESTS WITH BOTH REQUEST AND RESPONSE BODIES
+==========================================================
+Use this block when reasoning about mass assignment: if a field we sent
+in the request body is echoed back in the response body (especially a
+privilege-bearing field like role / isAdmin / price / UserId), the
+server persisted what we sent. The request-only view above cannot show
+this; this block can.
+
+{mutating_endpoints_full}
 
 RELATED FINDINGS that may indicate the underlying framework / ORM
 ==================================================================

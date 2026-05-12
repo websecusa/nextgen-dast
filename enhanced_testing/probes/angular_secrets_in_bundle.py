@@ -60,6 +60,33 @@ PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
      "Twilio API Key"),
     (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
      "Embedded private key"),
+    # ---- generic literal-assignment patterns (round-2 additions) ----
+    # These complement the canonical-shape patterns above. They catch
+    # secrets shipped as plain JavaScript variable assignments inside
+    # the bundle -- the OWASP Juice Shop testingUsername / testingPassword
+    # leak is the canonical case. The regex is conservative: the name
+    # token must contain a secret-bearing word (password, secret, token,
+    # apikey, etc.) and the value must be a non-empty string literal
+    # of meaningful length, so a one-character demo password and an
+    # empty string don't false-positive.
+    (re.compile(
+        r"\b(testing|test|debug|demo|sample|seed)?[Pp]assword\s*=\s*"
+        r'["\']([^"\']{4,128})["\']'),
+     "Hardcoded password assignment in JS bundle"),
+    (re.compile(
+        r"\b(?:testing|test|debug|demo|sample|admin)?[Uu]sername\s*=\s*"
+        r'["\']([A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})["\']'),
+     "Hardcoded test/admin username (email-shaped) in JS bundle"),
+    (re.compile(
+        r"\b(?:api[_-]?key|api[_-]?secret|client[_-]?secret|"
+        r"access[_-]?token|bearer[_-]?token|auth[_-]?token)"
+        r"\s*[:=]\s*[\"']([A-Za-z0-9._\-+/]{16,})[\"']",
+        re.IGNORECASE),
+     "Hardcoded API/client secret or token assignment in JS bundle"),
+    (re.compile(
+        r"\bbearer\s+[A-Za-z0-9._\-]{20,}\b",
+        re.IGNORECASE),
+     "Bearer token literal in JS bundle"),
 )
 
 SCRIPT_RE = re.compile(r'<script[^>]+src\s*=\s*"([^"]+\.js[^"]*)"',

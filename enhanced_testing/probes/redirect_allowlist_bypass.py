@@ -87,36 +87,95 @@ class RedirectAllowlistBypassProbe(Probe):
         meta_refresh_re = re.compile(
             r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]*?url=([^"\'>\s]+)',
             re.IGNORECASE)
+        # Baseline-rejection cache per endpoint -- the comparative
+        # signal is "bare evil URL rejected, smuggled evil URL
+        # accepted". Apps that return 200 OK to BOTH are not actually
+        # gating on an allowlist (no bypass to flag); apps that reject
+        # both are gating correctly. The bypass is in the delta.
+        baseline_rejected: dict[str, dict] = {}
         for path in paths:
+            # 0. Baseline: bare evil URL with no smuggle. Most allow-
+            # listing apps return 4xx for this. We record the status
+            # so the smuggled variant can be compared against it.
+            bare_url = urljoin(
+                origin, f"{path}?to=https://{evil}")
+            r0 = client.request("GET", bare_url)
+            baseline_rejected[path] = {
+                "url": bare_url,
+                "status": r0.status,
+                "size": r0.size,
+                "rejected": r0.status >= 400,
+            }
+            attempts.append({**baseline_rejected[path], "kind": "baseline_bare_evil"})
+            if not baseline_rejected[path]["rejected"]:
+                # If the server accepts the bare evil URL, this isn't
+                # an allowlist-bypass class -- it's an unguarded open
+                # redirect, which is a different (existing) finding
+                # class. Skip the smuggle phase for this endpoint to
+                # avoid double-reporting.
+                continue
             for trusted in TRUSTED_PREFIXES:
-                # Smuggle: trusted prefix is the host, evil is a query
-                # string after `?pwned=` so any `.includes(trusted)`
-                # check passes but the actual URL ends at evil.
-                target = f"{trusted}?pwned=https://{evil}"
-                url = urljoin(origin,
-                              f"{path}?to={quote(target, safe=':/?=&')}")
-                r = client.request("GET", url)
-                row: dict = {"path": path, "url": url,
-                             "status": r.status, "size": r.size,
-                             "trusted_prefix": trusted}
-                # Don't follow redirects — we want to see Location.
-                location = _hdr(r.headers, "Location")
-                if location:
-                    row["location"] = location
-                    if evil in location:
-                        row["redirect_to_evil"] = True
+                # SMUGGLE 1 (legacy): trusted prefix is the host, evil
+                # is a query string after `?pwned=`. Catches apps that
+                # check whether the target *contains* a trusted prefix
+                # and let the actual URL resolve to anywhere.
+                target_v1 = f"{trusted}?pwned=https://{evil}"
+                # SMUGGLE 2 (Juice Shop shape): evil is the host, the
+                # trusted prefix is the query string. Catches apps
+                # whose allowlist check is a substring match anywhere
+                # in the URL, not just on the origin. This is the
+                # variant the OWASP Juice Shop /redirect handler is
+                # vulnerable to and is the more common modern bypass
+                # because the resulting Location is unambiguously the
+                # attacker host.
+                target_v2 = f"https://{evil}/?{trusted}"
+                for variant_name, raw_target in (
+                        ("v1_trusted_host", target_v1),
+                        ("v2_evil_host", target_v2)):
+                    url = urljoin(origin,
+                                  f"{path}?to={quote(raw_target, safe=':/?=&')}")
+                    r = client.request("GET", url)
+                    row: dict = {"kind": variant_name, "path": path,
+                                 "url": url, "status": r.status,
+                                 "size": r.size, "trusted_prefix": trusted}
+                    # Don't follow redirects — we want to see Location.
+                    location = _hdr(r.headers, "Location")
+                    if location:
+                        row["location"] = location
+                        if evil in location:
+                            row["redirect_to_evil"] = True
+                            confirmed = row
+                            attempts.append(row)
+                            break
+                    # Meta-refresh case (some apps emit refresh HTML
+                    # instead of a 30x).
+                    if r.body and r.text:
+                        m = meta_refresh_re.search(r.text)
+                        if m and evil in m.group(1):
+                            row["meta_refresh"] = m.group(1)
+                            confirmed = row
+                            attempts.append(row)
+                            break
+                    # 200-OK differential: bare evil URL was rejected
+                    # (status >= 400) but the smuggled variant returned
+                    # 2xx. Treat as confirmed bypass even when the
+                    # response is a body-rendered fetch rather than a
+                    # 30x redirect -- the server-side allowlist is
+                    # still passing an attacker-controllable target,
+                    # which is the underlying defect regardless of
+                    # whether it manifests as a Location header or an
+                    # SSRF-like body fetch.
+                    if (200 <= r.status < 300
+                            and baseline_rejected[path]["rejected"]):
+                        row["status_differential"] = (
+                            f"baseline {baseline_rejected[path]['status']} -> "
+                            f"smuggle {r.status}")
                         confirmed = row
                         attempts.append(row)
                         break
-                # Meta-refresh case
-                if r.body and r.text:
-                    m = meta_refresh_re.search(r.text)
-                    if m and evil in m.group(1):
-                        row["meta_refresh"] = m.group(1)
-                        confirmed = row
-                        attempts.append(row)
-                        break
-                attempts.append(row)
+                    attempts.append(row)
+                if confirmed:
+                    break
             if confirmed:
                 break
 

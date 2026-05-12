@@ -365,6 +365,10 @@ def build_telemetry(aid: int) -> dict:
     summary["object_id_patterns"] = _render_object_ids(parsed)
     summary["response_samples"] = _render_response_samples(parsed)
     summary["mutating_requests"] = _render_mutating_requests(parsed)
+    # Companion to mutating_requests: includes BOTH the request and
+    # the server's response body so mass-assignment-style findings
+    # have the echo-back evidence the request-only view can't show.
+    summary["mutating_endpoints_full"] = _render_mutating_endpoints_full(parsed)
     summary["related_findings"] = _render_findings_filtered(
         parsed, lambda f: True, limit=20)
     summary["input_endpoints"] = _render_endpoints_by_methods(
@@ -620,6 +624,52 @@ def _render_mutating_requests(parsed: list[dict]) -> str:
         if len(out) >= 30:
             break
     return "\n\n".join(out) or "(no mutating JSON requests captured)"
+
+
+def _render_mutating_endpoints_full(parsed: list[dict]) -> str:
+    """Like _render_mutating_requests but emits BOTH the request body
+    and the captured response body for each mutation. Mass-assignment
+    findings hinge on what the server *echoes back* after a write --
+    not just what we sent. The request-only renderer above is good
+    for inferring the model shape, but it can't show "we sent
+    role=admin and the server returned role=admin", which is the
+    decisive evidence for the mass-assignment scenario. We cap each
+    body at PER_FINDING_QUOTE_MAX chars so a single huge response
+    can't blow the prompt budget, and stop after 24 endpoints so we
+    don't run the LLM input quadratic on a large scan.
+
+    Returns a placeholder string suitable for str.format substitution.
+    Empty when no captured mutation had both bodies; the scenario
+    prompts treat that as 'fall back to {mutating_requests}'."""
+    out: list[str] = []
+    for f in parsed:
+        method = (f.get("evidence_method") or "").upper()
+        if method not in ("POST", "PUT", "PATCH", "DELETE"):
+            continue
+        rd = f.get("_raw") or {}
+        req_body = (rd.get("request_body")
+                    or (rd.get("evidence") or {}).get("request_body")
+                    or "")
+        resp_body = (rd.get("response_body_excerpt")
+                     or (rd.get("evidence") or {}).get("response_body_excerpt")
+                     or rd.get("body") or "")
+        # Need at least one body; the request-only case is already
+        # covered by _render_mutating_requests, so skip it here.
+        if not (req_body and resp_body):
+            continue
+        rb = req_body[:PER_FINDING_QUOTE_MAX]
+        sb = resp_body[:PER_FINDING_QUOTE_MAX]
+        status = rd.get("response_status") or rd.get("status") or "?"
+        out.append(
+            f"[#{f['id']} {method} {f.get('evidence_url')}  -> {status}]\n"
+            f"  request_body:  {rb}\n"
+            f"  response_body: {sb}")
+        if len(out) >= 24:
+            break
+    return ("\n\n".join(out)
+            or "(no mutating requests had both request and response "
+               "bodies captured -- see {mutating_requests} for the "
+               "request-only view)")
 
 
 def _render_endpoints_by_methods(parsed: list[dict],

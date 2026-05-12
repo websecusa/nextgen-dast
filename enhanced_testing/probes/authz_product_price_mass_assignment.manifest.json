@@ -1,0 +1,26 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_product_price_mass_assignment",
+  "version": "1.0",
+  "summary": "Registers a low-privilege customer, attempts a description-only PUT against /api/Products/{id}, and verifies persistence via follow-up GET. Restores the original description on success so the catalog is left clean. Confirms vertical authorization failure on the product-update path that the same code path almost certainly permits price/name mutations through.",
+  "validates": [
+    "CWE-285",
+    "CWE-915",
+    "CWE-862"
+  ],
+  "matches_titles": [
+    "authz_product_price_mass_assignment",
+    "mass assignment on product update",
+    "product catalog vertical authorization"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "probe",
+  "requires_post": true,
+  "request_budget_typical": 12,
+  "request_budget_max": 24,
+  "args": {
+    "--url": "Target origin URL"
+  }
+}

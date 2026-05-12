@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "authz_authentication_details_exposes_all_users",
+  "version": "1.0",
+  "summary": "Registers a fresh low-privilege user, GETs /rest/user/authentication-details (and similar paths), and flags the endpoint when it returns the full user directory with auth-flavoured fields (deluxeToken, totpSecret, lastLoginIp, role) to a non-admin caller.",
+  "validates": [
+    "CWE-285",
+    "CWE-200",
+    "CWE-863"
+  ],
+  "matches_titles": [
+    "authz_authentication_details_exposes_all_users",
+    "authentication metadata disclosure",
+    "vertical authorization bypass"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 10,
+  "request_budget_max": 24,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional candidate path (repeatable)"
+  }
+}
