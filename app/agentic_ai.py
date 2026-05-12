@@ -70,6 +70,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import db
+import dedup as dedup_mod
+import enrichment as enrichment_mod
 import llm as llm_mod
 
 logger = logging.getLogger(__name__)
@@ -418,26 +420,72 @@ def _execute_tool(client, tool_name: str, tool_input: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _insert_agentic_finding(aid: int, parent_finding_id: Optional[int],
-                              agent_mode: str, payload: dict) -> int:
+                              agent_mode: str, payload: dict,
+                              *, dedup_index: Optional[dict] = None
+                              ) -> tuple:
     """Insert one LLM-emitted finding row with source_tool=
-    'agentic_ai_testing'. Returns the newly-inserted row id."""
+    'agentic_ai_testing'. Returns a (fid, refusal_reason) tuple:
+      - (int, None) on success                     -- row inserted
+      - (0, str)    when refused as a duplicate    -- caller reports
+                    the reason back to the agent as a tool_result so
+                    it pivots instead of retrying
+      - (0, None)   when schema-validation failed  -- caller reports
+                    a generic schema error to the agent
+
+    `dedup_index` is the {signature: canonical} map built once at the
+    top of the run (see `dedup_mod.build_signature_index`). When the
+    candidate's signature is already present in the index, the row is
+    refused before writing -- the agent gets the canonical id back so
+    it can chain into deeper impact instead of duplicating coverage."""
     sev = (payload.get("severity") or "").lower()
     if sev not in ("critical", "high", "medium", "low"):
-        return 0
+        return (0, None)
     title = (payload.get("title") or "").strip()[:500]
     if not title:
-        return 0
+        return (0, None)
     description = (payload.get("description") or "").strip()
     evidence = (payload.get("evidence") or "").strip()
     reproduction = (payload.get("reproduction") or "").strip()
     remediation = (payload.get("remediation") or "").strip()
     if not description and evidence:
         description = f"Evidence: {evidence}"
+
+    # ---- pre-emit dedup gate ------------------------------------
+    # Build a synthetic finding shape so the same compute helper
+    # used by the consolidation pass produces the same signature.
+    candidate = {
+        "title": title,
+        "evidence_url": "",
+        "raw_data": json.dumps({"llm_evidence": evidence}),
+        "owasp_category": "",
+    }
+    sig = dedup_mod.compute_signature_for_finding(candidate)
+    if sig and dedup_index is not None:
+        canonical = dedup_index.get(sig)
+        if canonical is not None:
+            reason = (
+                f"Refused as duplicate of finding "
+                f"#{canonical['canonical_id']} '{canonical['title']}' "
+                f"(already confirmed by {canonical['source_tool']}). "
+                "Don't re-emit this bug -- investigate a different "
+                "endpoint or chain it into deeper impact "
+                "(e.g. exploit the leak you just confirmed instead of "
+                "re-reporting it).")
+            logger.info(
+                "agentic_ai: dedup-refused emit on aid=%s sig=%r "
+                "canonical=#%s (%s)",
+                aid, sig, canonical["canonical_id"],
+                canonical["source_tool"])
+            return (0, reason)
+
     raw = {
         "agent_mode": agent_mode,
         "parent_finding_id": parent_finding_id,
         "llm_evidence": evidence,
         "llm_reproduction": reproduction,
+        # Cache the signature on the row so the post-hoc consolidation
+        # pass doesn't have to recompute it. Round 4C reads this.
+        "dedup_signature_v2": sig,
     }
     db.execute(
         """INSERT INTO findings
@@ -451,7 +499,44 @@ def _insert_agentic_finding(aid: int, parent_finding_id: Optional[int],
          title, description, remediation,
          json.dumps(raw, default=str)))
     new_id = db.query_one("SELECT LAST_INSERT_ID() AS id") or {"id": 0}
-    return int(new_id.get("id") or 0)
+    fid = int(new_id.get("id") or 0)
+    # Round 4B: enrich crit/high/medium AI-emitted findings so the
+    # "Attacker workflow & exploitability" block (likelihood,
+    # prerequisites, exploit chain, end-to-end narrative,
+    # remediation) renders on these rows the same way it does on
+    # deterministic scanner findings. Cache-keyed by signature so 5
+    # different agent runs that legitimately emit findings of the
+    # same type pay one LLM call total. Low/info findings skip
+    # enrichment to keep the bill bounded -- the rich block adds
+    # less value at those severities and the volume can spike.
+    if fid and sev in ("critical", "high", "medium"):
+        try:
+            row = db.query_one(
+                "SELECT * FROM findings WHERE id=%s", (fid,))
+            ep = _resolve_anthropic_endpoint(aid)
+            enr_id = enrichment_mod.get_or_create(row, ep)
+            if enr_id:
+                db.execute(
+                    "UPDATE findings SET enrichment_id=%s WHERE id=%s",
+                    (enr_id, fid))
+        except Exception as e:
+            # Enrichment is best-effort -- a transient LLM failure
+            # must not lose the finding. The stub path in
+            # enrichment.get_or_create also catches most issues.
+            logger.warning(
+                "agentic_ai: enrichment failed for finding #%s: %r",
+                fid, e)
+    # Add to the live index so a second agentic emission in the same
+    # run can't beat the gate by being faster than the SELECT.
+    if fid and sig and dedup_index is not None:
+        dedup_index.setdefault(sig, {
+            "canonical_id": fid,
+            "source_tool": "agentic_ai_testing",
+            "severity": sev,
+            "title": title,
+            "tier": dedup_mod.tier_for("agentic_ai_testing"),
+        })
+    return (fid, None)
 
 
 def _record_llm_call(aid: int, target_id: str, mode: str,
@@ -547,22 +632,29 @@ def _get_session_cookie(a: dict) -> Optional[str]:
 def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
               system_prompt: str, seed_user_message: str,
               client, budget, max_turns: int,
-              endpoint: dict, model: str) -> dict:
+              endpoint: dict, model: str,
+              dedup_index: Optional[dict] = None) -> dict:
     """Drive the Anthropic tool-use loop. Returns a summary dict:
       {findings_inserted, turns, llm_in, llm_out, errors,
-       finish_rationale}.
+       finish_rationale, dedup_refused}.
     Stops on (a) explicit finish tool call, (b) end_turn stop reason,
     (c) max_turns exceeded, (d) HTTP budget tripped, (e) LLM-call
     error.
 
     Findings are inserted into the DB as they are emitted so a
     mid-loop crash doesn't lose work.
+
+    `dedup_index` is the live signature -> canonical map built at the
+    top of the run. The loop passes it into _insert_agentic_finding
+    which both consults and updates it, so duplicate emissions in the
+    same run -- the agent re-describing the same bug under a new
+    title -- are also caught.
     """
     messages: list[dict] = [
         {"role": "user", "content": seed_user_message}]
     out = {"findings_inserted": 0, "turns": 0,
            "llm_in": 0, "llm_out": 0, "errors": [],
-           "finish_rationale": ""}
+           "finish_rationale": "", "dedup_refused": 0}
     api_key = endpoint.get("api_key") or ""
     for _ in range(max_turns):
         out["turns"] += 1
@@ -614,8 +706,9 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
             tool_input = block.get("input") or {}
 
             if tool_name == "emit_finding":
-                fid = _insert_agentic_finding(
-                    aid, parent_finding_id, mode, tool_input)
+                fid, refusal = _insert_agentic_finding(
+                    aid, parent_finding_id, mode, tool_input,
+                    dedup_index=dedup_index)
                 if fid:
                     out["findings_inserted"] += 1
                     tool_results.append({
@@ -625,6 +718,18 @@ def _run_loop(*, aid: int, mode: str, parent_finding_id: Optional[int],
                             f"Recorded finding (id={fid}). Continue "
                             "if you have more verbatim evidence, or "
                             "call `finish` to stop."),
+                    })
+                elif refusal:
+                    # Pre-emit dedup gate matched. The tool_result is
+                    # NOT marked is_error -- this isn't a malformed
+                    # call, it's a policy outcome the agent should
+                    # reason about. Mark only as_error when the schema
+                    # check failed (no signature, just a bad row).
+                    out["dedup_refused"] += 1
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": refusal,
                     })
                 else:
                     tool_results.append({
@@ -715,6 +820,8 @@ http_patch_json, http_options, emit_finding, finish.
 """
 
 _PER_FINDING_USER = """\
+{already_known_block}
+
 TARGET FINDING TO DEEP-DIVE
 ============================
 id:           {finding_id}
@@ -756,6 +863,8 @@ You are doing a FREE-ROAM agentic pass over the in-flight scan of \
 {fqdn}. You have already completed a per-finding deep-dive of the \
 top severity findings; this pass is looking for misses the probes \
 and the LLM weakness-discovery scenarios did not surface.
+
+{already_known_block}
 
 OPEN FINDINGS DIGEST (titles only, oldest-to-newest, sample of 30)
 ====================================================================
@@ -864,7 +973,19 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         return {"skipped": "no open findings to deep-dive"}
     summary = {"runs": 0, "findings_inserted": 0,
                 "llm_in": 0, "llm_out": 0,
-                "errors": []}
+                "errors": [], "dedup_refused": 0}
+    # Build the live dedup index ONCE for the whole pass. Each
+    # per-finding sub-run shares it so an agent emission in run 2
+    # is checked against agent emissions in run 1 too. Excludes
+    # nothing -- the agent should not duplicate ANY existing
+    # finding, regardless of source tier.
+    dedup_index = dedup_mod.build_signature_index(aid)
+    # Preamble shows non-agentic findings -- the agent already knows
+    # its own outputs from the dedup gate; the preamble's job is to
+    # surface what OTHER scanners + the LLM weakness pass already
+    # confirmed, so the agent doesn't burn a turn re-testing them.
+    preamble = dedup_mod.build_already_known_preamble(
+        aid, exclude_source_tools={"agentic_ai_testing"})
     for f in candidates:
         client, _audit, budget = _build_safeclient(
             scope_hosts=(fqdn,),
@@ -879,6 +1000,7 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
         except Exception:
             raw_data_str = (f.get("raw_data") or "")[:2000]
         user_msg = _PER_FINDING_USER.format(
+            already_known_block=preamble,
             finding_id=f["id"],
             source_tool=f.get("source_tool") or "",
             severity=f.get("severity") or "",
@@ -893,11 +1015,13 @@ def run_per_finding(aid: int, fqdn: str, dive_count: int) -> dict:
             system_prompt=sys_prompt, seed_user_message=user_msg,
             client=client, budget=budget,
             max_turns=PER_FINDING_TURN_MAX,
-            endpoint=endpoint, model=model)
+            endpoint=endpoint, model=model,
+            dedup_index=dedup_index)
         summary["runs"] += 1
         summary["findings_inserted"] += result.get("findings_inserted", 0)
         summary["llm_in"] += result.get("llm_in", 0)
         summary["llm_out"] += result.get("llm_out", 0)
+        summary["dedup_refused"] += result.get("dedup_refused", 0)
         if result.get("errors"):
             summary["errors"].extend(result["errors"])
     return summary
@@ -989,8 +1113,15 @@ def run_free_roam(aid: int, fqdn: str) -> dict:
         session_cookie=session_cookie,
         allow_destructive=True)
     sys_prompt = _build_system_prompt(fqdn, a, bool(session_cookie))
+    # Build the dedup index + preamble for free-roam too. Free-roam
+    # is the mode most prone to noise since it has no parent finding
+    # to anchor the search, so the dedup gate matters most here.
+    dedup_index = dedup_mod.build_signature_index(aid)
+    preamble = dedup_mod.build_already_known_preamble(
+        aid, exclude_source_tools={"agentic_ai_testing"})
     user_msg = _FREE_ROAM_USER.format(
         fqdn=fqdn,
+        already_known_block=preamble,
         open_findings_digest=_open_findings_digest(aid),
         request_clusters=_request_clusters_digest(aid),
         authenticated_endpoints=_authenticated_endpoints_digest(aid))
@@ -999,7 +1130,8 @@ def run_free_roam(aid: int, fqdn: str) -> dict:
         system_prompt=sys_prompt, seed_user_message=user_msg,
         client=client, budget=budget,
         max_turns=FREE_ROAM_TURN_MAX,
-        endpoint=endpoint, model=model)
+        endpoint=endpoint, model=model,
+        dedup_index=dedup_index)
     return result
 
 

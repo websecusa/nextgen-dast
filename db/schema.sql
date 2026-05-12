@@ -329,11 +329,20 @@ CREATE TABLE IF NOT EXISTS findings (
   -- Pointer into finding_enrichment for cached LLM remediation guidance.
   -- NULL until the enrichment pipeline runs for this finding's signature.
   enrichment_id INT NULL,
+  -- Cross-source dedup pointer. NULL on canonical rows; on a duplicate it
+  -- points at the canonical finding id that swallowed this one. The
+  -- workspace listing, severity rollup, and PDF report hide rows with
+  -- dedup_of IS NOT NULL by default and surface them under a "see N
+  -- duplicate findings" disclosure on the canonical row instead.
+  -- Soft demote -- nothing is deleted, so a wrong signature can be
+  -- reversed by clearing this column.
+  dedup_of INT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_assessment (assessment_id),
   KEY idx_severity (severity),
   KEY idx_tool (source_tool),
   KEY idx_enrichment (enrichment_id),
+  KEY idx_dedup_of (dedup_of),
   CONSTRAINT fk_finding_assessment FOREIGN KEY (assessment_id)
     REFERENCES assessments(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -768,6 +777,9 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS validation_run_at DATETIME;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS validation_evidence LONGTEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS enrichment_id INT NULL;
 ALTER TABLE findings ADD INDEX IF NOT EXISTS idx_enrichment (enrichment_id);
+-- Cross-source dedup pointer; see column comment in CREATE TABLE.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS dedup_of INT NULL;
+ALTER TABLE findings ADD INDEX IF NOT EXISTS idx_dedup_of (dedup_of);
 
 -- Granular branding migrations: split web vs PDF, per-severity colors, font.
 ALTER TABLE branding ADD COLUMN IF NOT EXISTS web_mode ENUM('dark','custom') NOT NULL DEFAULT 'dark';

@@ -578,6 +578,13 @@ MIGRATIONS: list = [
     # m_2026_05_12_add_agentic_columns docstring for full writeup.
     ("2026_05_12_add_agentic_columns",
      lambda: __import__("__main__")),
+    # 2026-05-12 (Round 4): cross-source dedup pointer. Soft-demote
+    # column on findings so a duplicate row from a low-fidelity source
+    # is hidden from listings/PDF while preserving its raw_data for
+    # forensic recovery. NULL on canonical rows; integer pointer on
+    # the loser of a dedup tie. Idempotent.
+    ("2026_05_12_add_dedup_of",
+     lambda: __import__("__main__")),
 ]
 
 
@@ -797,6 +804,46 @@ def m_2026_05_12_add_agentic_columns() -> str:
     return "all agentic columns already present -- no-op"
 
 
+def m_2026_05_12_add_dedup_of() -> str:
+    """Add the cross-source dedup pointer column to findings on
+    existing 2.1.1 deployments.
+
+    Why: round-4 of the parity push introduces cross-source duplicate
+    detection. When several scanners + the LLM weakness pass + the
+    agentic pass all report the same underlying bug, only the
+    highest-fidelity row stays visible -- the rest get
+    dedup_of=<canonical_id> set on them, which the workspace listing
+    and PDF report use to hide duplicates by default (with a "see N
+    duplicates" disclosure on the canonical row). Soft demote --
+    nothing is deleted, so a mis-clustered signature can be reversed
+    by clearing the column on the affected rows.
+
+    Idempotent: gated on information_schema. The same column is
+    present in db/schema.sql for fresh installs."""
+    row = db.query_one(
+        "SELECT 1 AS exists_ FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() "
+        "  AND table_name = 'findings' "
+        "  AND column_name = 'dedup_of'")
+    if row and row.get("exists_"):
+        return "findings.dedup_of already present -- no-op"
+    db.execute(
+        "ALTER TABLE findings ADD COLUMN dedup_of INT NULL "
+        "AFTER enrichment_id")
+    # Index helps the "load every duplicate that points at me" query
+    # used by the canonical row's disclosure block. Idempotent via
+    # information_schema check.
+    idx = db.query_one(
+        "SELECT 1 AS exists_ FROM information_schema.statistics "
+        "WHERE table_schema = DATABASE() "
+        "  AND table_name = 'findings' "
+        "  AND index_name = 'idx_dedup_of'")
+    if not (idx and idx.get("exists_")):
+        db.execute(
+            "ALTER TABLE findings ADD INDEX idx_dedup_of (dedup_of)")
+    return "added findings.dedup_of + idx_dedup_of"
+
+
 def m_2026_05_12_unstick_llm_errored_validations() -> str:
     """Reset validation_status='errored' on enhanced_ai_testing-source
     findings back to 'unvalidated' so the LLM fidelity grader can pick
@@ -862,6 +909,8 @@ _LATE_BIND = {
         m_2026_05_12_unstick_llm_errored_validations,
     "2026_05_12_add_agentic_columns":
         m_2026_05_12_add_agentic_columns,
+    "2026_05_12_add_dedup_of":
+        m_2026_05_12_add_dedup_of,
 }
 for _i, (_id, _fn) in enumerate(MIGRATIONS):
     if _id in _LATE_BIND:

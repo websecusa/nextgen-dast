@@ -868,15 +868,22 @@ def api_get_scan(
     return _public_assessment_fields(a)
 
 
-def _findings_for(scan_id: int) -> list[dict]:
+def _findings_for(scan_id: int,
+                    *, include_duplicates: bool = False) -> list[dict]:
+    """Default API view excludes Round-4C cross-source duplicates so
+    callers don't have to filter them out themselves -- the canonical
+    finding is already in the list. Pass include_duplicates=True to
+    surface the full set (e.g. for an analyst CSV that wants
+    everything emitted, including demoted rows)."""
+    dedup_clause = "" if include_duplicates else " AND dedup_of IS NULL "
     return db.query(
         "SELECT id, source_tool, source_scan_id, severity, owasp_category, "
         "cwe, cvss, title, description, evidence_url, evidence_method, "
         "remediation, status, "
         "COALESCE(validation_status, 'unvalidated') AS validation_status, "
         "COALESCE(seen_count, 1) AS seen_count, "
-        "created_at "
-        "FROM findings WHERE assessment_id = %s "
+        "dedup_of, created_at "
+        f"FROM findings WHERE assessment_id = %s{dedup_clause}"
         "ORDER BY FIELD(severity,'critical','high','medium','low','info'), id",
         (scan_id,))
 

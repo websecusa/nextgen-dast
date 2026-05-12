@@ -62,6 +62,8 @@ from typing import Any, Optional
 
 import auth_recapture
 import db
+import dedup as dedup_mod
+import enrichment as enrichment_mod
 import flow_index
 import llm as llm_mod
 import spa_fallback
@@ -1582,7 +1584,8 @@ def run(aid: int, endpoint: Optional[dict]) -> dict:
                 "enhanced_ai: dropped %d/%d findings from %s as "
                 "ungrounded or SPA-fallback hallucinations",
                 dropped, dropped + len(kept), row.get("name"))
-        inserted = _insert_weakness_findings(aid, row, kept)
+        inserted = _insert_weakness_findings(aid, row, kept,
+                                              endpoint=endpoint)
         summary["weakness_findings_inserted"] += inserted
         summary["scenarios_run"] += 1
         _record_analysis(
@@ -2043,13 +2046,20 @@ def _dedup_signature(title: str, evidence: str, owasp: str,
 
 
 def _insert_weakness_findings(aid: int, prompt_row: dict,
-                                items: list) -> int:
+                                items: list,
+                                *, endpoint: Optional[dict] = None) -> int:
     """Validate + insert LLM-emitted findings as source_tool=
     'enhanced_ai_testing'. Returns count inserted. Skips entries that
     fail the schema check (severity / title) — the LLM occasionally
     emits a stray comment row that would crash the strict NOT NULL
     constraints, and a strict caller would lose every other finding in
     the batch as collateral.
+
+    `endpoint` is the LLM endpoint used for the weakness pass; we
+    reuse it for the Round-4B per-finding enrichment call. None
+    falls back to the enrichment module's default-endpoint
+    resolution. Keyword-only so call sites that don't care about
+    enrichment can keep the existing arity.
 
     Cross-scenario dedup: each candidate is reduced to a stable
     signature (severity + owasp_category + sorted content-token set
@@ -2095,8 +2105,33 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
         if sig:
             seen_sigs.add(sig)
 
+    # Round 4A: cross-source pre-emit set. Holds severity-free v2
+    # signatures from every finding the assessment already has from
+    # OTHER sources (testssl, nuclei, enhanced_testing, nikto, wapiti,
+    # ...). When the LLM re-states one of these we drop the LLM copy.
+    # We seed it with everything from non-LLM sources so the first
+    # weakness-scenario run already knows what testssl etc. found,
+    # plus everything emitted earlier in the SAME enhanced_ai_testing
+    # batch so two scenarios don't both retain the same bug.
+    cross_source_sigs: set[str] = set()
+    other_rows = db.query_all(
+        "SELECT title, evidence_url, raw_data, source_tool "
+        "FROM findings "
+        "WHERE assessment_id=%s "
+        "  AND source_tool != 'enhanced_ai_testing' "
+        "  AND source_tool != 'agentic_ai_testing' "
+        "  AND COALESCE(status,'open') NOT IN "
+        "      ('false_positive','fixed','accepted_risk') "
+        "  AND COALESCE(dedup_of, 0) = 0",
+        (aid,))
+    for orow in other_rows:
+        s = dedup_mod.compute_signature_for_finding(orow)
+        if s:
+            cross_source_sigs.add(s)
+
     n = 0
     skipped_dups = 0
+    cross_skipped = 0
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -2159,6 +2194,29 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
         if sig:
             seen_sigs.add(sig)
 
+        # Cross-source dedup gate (Round 4A). Use the severity-free
+        # v2 signature against the live index of higher-fidelity
+        # sources (testssl, nuclei, enhanced_testing, nikto, wapiti,
+        # ...). If the same bug is already on the assessment from a
+        # deterministic source, drop the LLM-emitted duplicate -- the
+        # consolidation pass at the end will handle any nuance about
+        # which one wins.
+        sig_v2 = dedup_mod.dedup_signature_v2(title, evidence,
+                                              owasp_code[:64])
+        if sig_v2 and sig_v2 in cross_source_sigs:
+            cross_skipped += 1
+            continue
+        if sig_v2:
+            # Don't lock this in cross_source_sigs yet -- we want to
+            # admit the FIRST enhanced_ai_testing row that carries
+            # this signature so the assessment has at least one
+            # canonical AI-emitted finding to attach an exploit chain
+            # to. Later rows in the same run get refused by seen_sigs
+            # above (which is severity-aware). Adding to cross_source
+            # only when no higher-tier match exists keeps the gate
+            # one-directional.
+            cross_source_sigs.add(sig_v2)
+
         raw = {"llm_scenario": prompt_row.get("name"),
                 "llm_prompt_id": prompt_row.get("id"),
                 "llm_category": category,
@@ -2185,11 +2243,32 @@ def _insert_weakness_findings(aid: int, prompt_row: dict,
             title[:500], description, remediation,
             json.dumps(raw, default=str),
         ))
+        new_id = db.query_one("SELECT LAST_INSERT_ID() AS id") or {"id": 0}
+        fid = int(new_id.get("id") or 0)
+        # Round 4B: enrich crit/high/medium LLM-emitted findings so
+        # the "Attacker workflow & exploitability" block renders
+        # here too. Skips low/info to keep cost bounded. Cache-keyed
+        # by signature so a finding type that recurs across
+        # scenarios pays one LLM call.
+        if fid and sev in ("critical", "high", "medium"):
+            try:
+                row = db.query_one(
+                    "SELECT * FROM findings WHERE id=%s", (fid,))
+                enr_id = enrichment_mod.get_or_create(row, endpoint)
+                if enr_id:
+                    db.execute(
+                        "UPDATE findings SET enrichment_id=%s "
+                        "WHERE id=%s",
+                        (enr_id, fid))
+            except Exception as e:
+                logger.warning(
+                    "enhanced_ai: enrichment failed for finding "
+                    "#%s: %r", fid, e)
         n += 1
-    if skipped_dups:
-        logger.info("enhanced_ai dedup: skipped %d duplicate finding(s) "
-                    "from prompt #%s (%s)",
-                    skipped_dups, prompt_row.get("id"),
+    if skipped_dups or cross_skipped:
+        logger.info("enhanced_ai dedup: skipped %d within-source + %d "
+                    "cross-source duplicate(s) from prompt #%s (%s)",
+                    skipped_dups, cross_skipped, prompt_row.get("id"),
                     prompt_row.get("name") or "")
     return n
 
