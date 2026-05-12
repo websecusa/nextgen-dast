@@ -41,6 +41,36 @@
         <span>Last assessment {{ a.finished_at.strftime('%Y-%m-%d %H:%M') if a.finished_at.strftime else a.finished_at }}</span>
       {% endif %}
       <span class="muted small" id="step">{{ a.current_step or "" }}</span>
+      {# "Stop agentic_ai_testing" button. Visible only while the
+         agentic phase is the active step on this assessment. Clicking
+         flips assessments.agentic_stop_requested=1; the running agent
+         polls that column at the top of each turn + between dives and
+         exits gracefully, letting the orchestrator continue to dedup
+         + consolidation as if the agent had finished naturally. Cost-
+         control mechanism for long-running agentic runs the operator
+         decides to cut short. Once the agent acknowledges (current_step
+         moves off "agentic_ai:..."), this button disappears on the
+         next poll. #}
+      {% if is_admin and (a.current_step or "").startswith("agentic_ai:")
+            and a.status in ('running','queued') %}
+        <form method="post"
+              action="{{ base }}/assessment/{{ a.id }}/stop_agentic"
+              style="display:inline; margin-left:.75em"
+              onsubmit="this.querySelector('button').disabled = true;
+                        this.querySelector('button').textContent =
+                          'Stopping&hellip;';">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="ghost"
+                  title="Halt the agentic_ai_testing pass and continue to dedup + consolidation. Already-spent budget is not recovered; this only saves the rest of the pass.">
+            Stop agentic_ai_testing
+          </button>
+        </form>
+      {% elif is_admin and a.agentic_stop_requested
+            and (a.current_step or "").startswith("agentic_ai:") %}
+        <span class="muted small" style="margin-left:.75em">
+          stop requested &mdash; agent will exit on its next turn
+        </span>
+      {% endif %}
     </div>
   </div>
   <div class="actions">

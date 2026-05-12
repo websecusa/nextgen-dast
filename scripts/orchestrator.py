@@ -935,15 +935,20 @@ def main() -> int:
         try:
             import dedup as _dedup_mod
             ded_summary = _dedup_mod.apply_cross_source_dedup(aid)
-            log.info(
-                "dedup: aid=%s clusters_demoted=%s rows_demoted=%s "
-                "rows_untouched=%s total_open=%s",
-                aid, ded_summary.get("clusters_demoted"),
-                ded_summary.get("rows_demoted"),
-                ded_summary.get("rows_untouched"),
-                ded_summary.get("total_open"))
+            # Orchestrator writes its log via print() to the file the
+            # supervising server tee'd it to; using a `logging` logger
+            # here would silently land in stderr and miss the per-
+            # assessment orchestrator_<id>.log surfaced in the UI.
+            print(
+                f"[orchestrator] dedup: aid={aid} "
+                f"clusters_demoted={ded_summary.get('clusters_demoted')} "
+                f"rows_demoted={ded_summary.get('rows_demoted')} "
+                f"rows_untouched={ded_summary.get('rows_untouched')} "
+                f"total_open={ded_summary.get('total_open')}",
+                flush=True)
         except Exception as e:
-            log.warning("dedup: apply_cross_source_dedup crashed: %r", e)
+            print(f"[orchestrator] dedup: apply_cross_source_dedup "
+                  f"crashed: {e!r}", flush=True, file=sys.stderr)
 
         # Basic-tier roll-up: ask the LLM to produce an executive summary,
         # an overall risk score, and a top-priorities list from the

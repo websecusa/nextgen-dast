@@ -6690,6 +6690,44 @@ def finding_test(request: Request, fid: int):
     })
 
 
+@app.post("/assessment/{aid}/stop_agentic")
+def assessment_stop_agentic(aid: int, request: Request,
+                              csrf_token: str = Form("")):
+    """Operator kill switch for the agentic_ai_testing phase. Flips
+    assessments.agentic_stop_requested=1; the running agent polls
+    that column at the top of each turn + between dives and exits
+    gracefully. The orchestrator then proceeds to the next stages
+    (dedup + consolidation) as if the agent had finished naturally.
+
+    Cost-control mechanism for long-running agentic runs. The button
+    only renders on the workspace while current_step is in the
+    agentic phase, so reaching this endpoint when the agent is no
+    longer running is harmless -- the flag just sits at 1 until the
+    next scan creates a fresh row with default 0.
+
+    Admin gating is enforced by the global middleware (only admin /
+    superadmin can POST); we don't re-check here. CSRF is enforced
+    on every state-changing call."""
+    check_csrf(request, csrf_token)
+    a = db.query_one(
+        "SELECT id, status, current_step "
+        "FROM assessments WHERE id = %s", (aid,))
+    if not a:
+        raise HTTPException(404)
+    db.execute(
+        "UPDATE assessments SET agentic_stop_requested = 1 "
+        "WHERE id = %s", (aid,))
+    audit_mod.log_event(
+        "agentic_stop_requested",
+        actor=audit_mod.actor_from_user(current_user(request)),
+        ip=client_ip(request),
+        extra={"assessment_id": aid,
+                "status_at_request": a.get("status"),
+                "step_at_request": a.get("current_step")},
+    )
+    return redirect(f"/assessment/{aid}?msg=stop+requested")
+
+
 @app.post("/assessment/{aid}/filter_info")
 def assessment_filter_info(aid: int, enabled: Optional[str] = Form(None)):
     """Persist the 'hide info-severity findings' toggle on the assessment
