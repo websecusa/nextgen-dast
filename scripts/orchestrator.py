@@ -515,6 +515,7 @@ _PROBES_NEEDING_POST = {
     "auth_logout_does_not_invalidate":   "register/login + GET/POST /logout + replay",
     # ----- Round-6 injection batch ------------------------------------
     "nosql_review_dos_where":            "PATCH reviews with $where time-delay",
+    "nosql_review_operator_injection":   "PATCH /rest/products/reviews with $in synthetic-id selector (safe)",
     "redos_b2b_orderlines":              "PATCH /b2b orderLinesData with backtracking payload",
     "prototype_pollution_user_patch":    "PUT /api/Users with __proto__ payload (gated)",
     "ssti_pug_username":                 "PUT username with Pug interpolation (gated)",
@@ -555,6 +556,18 @@ _PROBES_NEEDING_POST = {
     "bizlogic_race_condition_transfer":     "30 concurrent same-account transfers (bounded)",
     "bizlogic_coupon_reuse_or_stack":       "apply same coupon Nx and stack distinct codes",
     "bizlogic_negative_quantity_total":     "POST cart with quantity=-1",
+    # ----- Round-2 (parity push) probes -------------------------------
+    # All do register/login first, then a targeted write or auth-gated
+    # GET. allow_destructive=True lets SafeClient pass the write phase.
+    "authz_authentication_details_exposes_all_users":
+        "register/login + GET /rest/user/authentication-details",
+    "info_memories_exposes_nested_user_pii":
+        "register/login + GET /rest/memories looking for nested User PII",
+    "authz_product_price_mass_assignment":
+        "register/login + PUT /api/Products/{id} description round-trip "
+        "(restores on success)",
+    "config_true_client_ip_spoofable":
+        "register/login + GET /rest/saveLoginIp with spoofed IP headers",
     "bizlogic_workflow_skip_payment":       "POST /order/confirm without preceding payment step",
     "bizlogic_inventory_oversell_race":     "concurrent add-to-cart against last-stock item (bounded)",
     "bizlogic_self_referral_credit":        "register new account using own referral code",

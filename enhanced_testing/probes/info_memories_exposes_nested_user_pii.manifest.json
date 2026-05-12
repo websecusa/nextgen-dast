@@ -1,0 +1,27 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_memories_exposes_nested_user_pii",
+  "version": "1.0",
+  "summary": "Registers a fresh user and GETs feed-shaped endpoints (memories / posts / activity) looking for nested User objects whose serializer leaked password hashes, role, deluxeToken, or other sensitive ORM columns alongside the public feed payload.",
+  "validates": [
+    "CWE-200",
+    "CWE-359",
+    "CWE-213"
+  ],
+  "matches_titles": [
+    "info_memories_exposes_nested_user_pii",
+    "excessive data exposure",
+    "nested user object disclosure"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": true,
+  "request_budget_typical": 12,
+  "request_budget_max": 24,
+  "args": {
+    "--url": "Target origin URL",
+    "--path": "Additional feed-style endpoint path (repeatable)"
+  }
+}

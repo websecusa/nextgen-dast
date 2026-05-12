@@ -1,0 +1,28 @@
+{
+  "author": "Tim Rice <tim.j.rice@hackrange.com>",
+  "name": "info_admin_config_exposed",
+  "version": "1.0",
+  "summary": "Detects unauthenticated GET on an admin / application configuration endpoint. Walks a small catalog of conventional paths and emits a finding when the response is shaped like a configuration document (top-level config/application/server keys, or >=3 admin-flavoured field-name tokens nested inside).",
+  "validates": [
+    "CWE-306",
+    "CWE-285",
+    "CWE-200"
+  ],
+  "matches_titles": [
+    "info_admin_config_exposed",
+    "admin configuration exposed",
+    "unauthenticated configuration",
+    "application configuration disclosure"
+  ],
+  "matches_tools": [
+    "enhanced_testing"
+  ],
+  "safety_class": "read-only",
+  "requires_post": false,
+  "request_budget_typical": 8,
+  "request_budget_max": 20,
+  "args": {
+    "--url": "Target origin URL (probe sweeps /rest/admin/application-configuration and similar paths under it)",
+    "--path": "Additional candidate config endpoint path (repeatable)"
+  }
+}
