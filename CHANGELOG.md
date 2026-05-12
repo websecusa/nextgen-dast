@@ -248,6 +248,135 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
+- **2026-05-12** — **New weakness-discovery scenario: "Collection
+  Endpoint Authorization Audit"** (sort_order 105, slot
+  `advanced_ai_testing.weakness_discovery`, category `bola_idor`).
+  Fires when the assessment has captured credentials AND
+  (`has_state_mutating_endpoint` OR `findings_count >= 5`). Targets
+  the BOLA-on-list-endpoint class specifically: `GET /api/{Resource}`
+  paths (no id in the URL) where the server authenticates the caller
+  but fails to filter the response set by ownership. The per-record
+  BOLA scenario (sort_order 20) was missing these because its prompt
+  asks the LLM to swap object IDs and it ignores no-id collection
+  paths entirely.
+
+  The new prompt instructs the LLM to walk every authenticated GET
+  collection endpoint, locate its body in the captured response
+  samples, and emit a finding ONLY when the verbatim excerpt proves
+  cross-tenant exposure (UserId / OwnerId / TenantId fields that
+  don't match the session's identity, admin records visible to a
+  non-admin session, etc.). Hard-rule: reproduction must be a
+  non-destructive GET piped through `jq` for distinct-owner counting;
+  remediation must name the missing server-side filter clause. One
+  finding per distinct collection endpoint -- not per leaked record.
+  Severity rubric maps to OWASP A01 with critical reserved for
+  auth-metadata exposure across users (deluxeToken, totpSecret,
+  password hash) and high for PII / business-activity records.
+
+  Seeded into the `ai_prompts` table on next container boot via the
+  existing per-row `seed_defaults_if_empty` path -- no schema
+  migration needed. Operators who want to disable the scenario can
+  flip `is_active=0` from /admin/ai-prompts as with every other
+  seeded prompt. The "Restore to default" admin action re-syncs the
+  in-code body / user_template after edits.
+
+- **2026-05-12** — **Cross-scenario dedup for LLM-emitted findings.**
+  The Enhanced-AI weakness pass runs up to 20 scenario prompts per
+  assessment, and the same underlying issue (Prometheus `/metrics`
+  exposed, CORS wildcard, etc.) can surface from multiple scenarios
+  with slightly different titles -- producing 3-4 near-duplicate rows
+  in the findings table that the consolidation roll-up cannot collapse
+  because `enrichment_id` is keyed off the rephrased title. On
+  assessment 64, the `/metrics` finding appeared four times and CORS
+  twice.
+
+  Fix: `_insert_weakness_findings` now computes a stable signature
+  per candidate before inserting. Signature precedence:
+  `severity|owasp|<vuln_class>|<url_path>` when both are detected
+  (tight match for "exposed /metrics across scenarios"); falls back
+  to `severity|owasp|<vuln_class>` (groups every same-class finding),
+  then `severity|owasp|url:<path>` (when no class fires but a URL
+  does), and finally a sorted content-token set. Signatures already
+  emitted for this assessment cause subsequent matching candidates to
+  be skipped silently and logged at INFO level with the skip count
+  per scenario.
+
+  Vuln-class regex catalogue covers the OWASP-Top-10 staples:
+  stored/reflected/DOM XSS (kept as distinct subtypes -- they have
+  different remediation), SQL/NoSQL/UNION SQLi, IDOR/BOLA,
+  mass-assignment, prototype pollution, XXE, SSRF, open redirect,
+  JWT `alg:none` / `no-exp` / key-confusion (each distinct), exposed
+  Prometheus metrics / Swagger / `/rest/admin/*`, permissive CORS,
+  verbose-error / framework version disclosure, directory listing,
+  hardcoded secrets in client bundles, missing rate-limit / brute
+  force. Smoke-tested against the verbatim assessment-64 titles --
+  four `/metrics` rephrasings collapse to one signature, two CORS
+  rephrasings collapse to one, six genuinely-different findings stay
+  separate, three XSS subtypes stay separate.
+
+- **2026-05-12** — **Severity calibration on two over-rated
+  enhanced_testing probes** that were emitting `critical` for
+  evidence that did not constitute end-to-end compromise. Reserving
+  `critical` for findings that demonstrate full account takeover,
+  unauthenticated RCE, or arbitrary write/exfil — read-only IDOR or
+  exposure-only findings without a chained exploit now downgrade to
+  `high`.
+  - `authz_basket_idor_walk`: read-only cross-tenant exposure of
+    purchase intent. Significant privacy impact and OWASP A01, but
+    not full ATO on its own — chained with mass-assignment or
+    privesc elsewhere is what makes it critical. Now `high`.
+  - `info_key_material_exposed`: split by what was actually found.
+    Private key material (PEM/OpenSSH/PGP PRIVATE markers) keeps
+    `critical` because possessing the signing key is itself a
+    compromise of every credential signed with it. Public signing
+    keys (RSA PUBLIC, PEM PUBLIC) and AES-shaped blobs now emit
+    `high`, with a `severity_basis` field in evidence explaining
+    that weaponization requires a separate signature-validation
+    flaw to chain against. The full chain (e.g., exposed `jwt.pub` +
+    `alg=HS256` confusion + accepted forged token) still surfaces
+    as critical via the dedicated `auth_jwt_no_expiration`
+    `signature_not_verified` branch, which DOES demonstrate the
+    end-to-end exploit and remains `critical`.
+
+  Other probes that emit `critical` (60 total) were spot-audited
+  and left alone — `auth_default_admin_credentials`,
+  `auth_sql_login_bypass`, `authz_role_mass_assignment`,
+  `xxe_file_upload`, etc. all genuinely demonstrate the impact their
+  severity claims.
+
+- **2026-05-12** — **Stop LLM-emitted findings from getting trapped on
+  `validation_status='errored'`.** The auto-validation pass that runs
+  inside `enhanced_ai.run()` was probing freshly-emitted LLM findings
+  with toolkit probes, but those findings ship with `evidence_url=NULL`
+  (the LLM rarely conforms to the strict probe schema), so the probe
+  could not construct a valid request and returned an `errored`
+  verdict. That verdict was written onto the finding row, and the
+  fidelity grader's selection then excluded `errored` rows, so the
+  LLM's most actionable critical/high findings sat permanently in
+  limbo — neither validated nor refuted, invisible to the next
+  triage pass. On assessment 64 alone this affected 7 of 13 LLM
+  findings (auth_jwt_no_expiration, info_metrics_exposed x3,
+  info_directory_listing, info_verbose_error, info_disclosure,
+  config_cors_wildcard x2). The fix is in three parts:
+  - `scripts/challenge_runner.py` no longer overwrites
+    `validation_status` to `errored` when the probe errors on a
+    finding with `source_tool='enhanced_ai_testing'`. The probe error
+    transcript is still written to `validation_evidence` so an
+    analyst can see what was attempted, but the row stays at its
+    default `unvalidated` state so the fidelity grader can see it.
+  - `app/enhanced_ai.py` widens the fidelity selection from
+    `validation_status IN ('unvalidated','inconclusive')` to also
+    include `'errored'`. This catches the case where a non-LLM-source
+    finding genuinely failed probe validation (transient network
+    failure, target offline) and gives the LLM grader a chance to
+    triage it from evidence alone.
+  - Migration `2026_05_12_unstick_llm_errored_validations` rewinds
+    existing `enhanced_ai_testing` rows stuck at `errored` back to
+    `unvalidated` on already-deployed databases so the fix lands
+    without requiring a full re-scan. Non-LLM-source `errored` rows
+    are left alone (they often reflect real probe failure worth
+    keeping visible). Idempotent; re-runs are no-ops.
+
 - **2026-05-12** — **LLM-driven exploit-chain validation and attacker
   workflow demonstrations on every finding.** The per-finding
   enrichment pipeline now asks the configured LLM endpoint not just

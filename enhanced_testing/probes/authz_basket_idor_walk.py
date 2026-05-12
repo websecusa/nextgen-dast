@@ -146,7 +146,15 @@ class BasketIdorWalkProbe(Probe):
                          f"{top['product_count']} product line(s) to "
                          "our session."),
                 evidence={**evidence, "confirmed": confirmed},
-                severity_uplift="critical",
+                # Severity calibration: read-only cross-tenant exposure
+                # on a single resource type. Real impact (PII leakage of
+                # purchase intent across customers) is significant, but
+                # this finding alone is not full account takeover or
+                # data exfiltration -- those require chaining with a
+                # mass-assignment / privesc finding elsewhere. Reserve
+                # `critical` for end-to-end demonstrated compromise; a
+                # confirmed read-only IDOR walk is HIGH.
+                severity_uplift="high",
                 remediation=(
                     "Gate /rest/basket/<id> on `id == jwt.subject.bid`. "
                     "Reject (404 or 403) any request where the path "

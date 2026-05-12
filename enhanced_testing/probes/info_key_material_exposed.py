@@ -138,14 +138,36 @@ class KeyMaterialExposedProbe(Probe):
         if confirmed:
             kinds = sorted({c["key_kind"] for c in confirmed})
             paths_seen = sorted({c["path"] for c in confirmed})
+            # Severity calibration: distinguish private key material
+            # (account takeover possible immediately) from public
+            # signing keys (no direct compromise, but enables JWT
+            # key-confusion / token-forgery chains that are critical
+            # only when combined with a separate signature-validation
+            # weakness elsewhere). Without a chained probe confirming
+            # the server actually accepts forged tokens, the standalone
+            # finding is HIGH, not critical. Private-key strings keep
+            # the critical uplift because exposing them is itself a
+            # full compromise of every credential signed with them.
+            _PRIVATE_KIND_MARKERS = ("PEM private key", "OpenSSH private key",
+                                     "PGP private key")
+            has_private = any(any(m in k for m in _PRIVATE_KIND_MARKERS)
+                              for k in kinds)
+            uplift = "critical" if has_private else "high"
             return Verdict(
                 validated=True, confidence=0.97,
                 summary=(f"Confirmed: cryptographic key material exposed "
                          f"on {origin} — "
                          + ", ".join(paths_seen)
                          + f" ({'/'.join(kinds)})."),
-                evidence={**evidence, "confirmed": confirmed},
-                severity_uplift="critical",
+                evidence={**evidence, "confirmed": confirmed,
+                          "severity_basis": (
+                              "critical: private key material found"
+                              if has_private else
+                              "high: only public signing material or "
+                              "AES-shaped blob found — requires a "
+                              "chained signature-validation flaw to "
+                              "weaponize")},
+                severity_uplift=uplift,
                 remediation=(
                     "Move the key file out of the document root. "
                     "Application-signing keys belong in a key store "
