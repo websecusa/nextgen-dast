@@ -173,7 +173,7 @@ If you already know what URL you want, export it before running setup so
 the env file gets the right value out of the gate:
 
 ```bash
-export APP_URL="https://pentest.example.com/"   # mind the trailing slash
+export APP_URL="https://pentest.example.com/"   # Make note of the trailing slash
 ```
 
 If you don't set it, `setup.sh` defaults to `https://localhost/`,
@@ -733,6 +733,28 @@ sudo ./setup.sh
 Everything except TLS termination runs inside containers. The application
 container itself spawns scanner subprocesses (wapiti, nuclei, etc.) — they
 all live in the same image, so no extra installs on the host.
+
+---
+
+## Screenshots
+
+Sample renderings of every operator-facing page in the 2.1.1 UI live under
+[`screenshots/`](screenshots/). The full inventory and the
+`capture.py` script that refreshes them are documented in
+[`screenshots/README.md`](screenshots/README.md). A few highlights:
+
+| Page | Preview |
+| --- | --- |
+| Sign-in | [`screenshots/01_login.png`](screenshots/01_login.png) |
+| Dashboard | [`screenshots/02_dashboard.png`](screenshots/02_dashboard.png) |
+| Capture proxy | [`screenshots/03_proxy.png`](screenshots/03_proxy.png) |
+| New assessment | [`screenshots/07_assess_new.png`](screenshots/07_assess_new.png) |
+| Assessment history | [`screenshots/08_assessments.png`](screenshots/08_assessments.png) |
+| User management | [`screenshots/14_admin_users.png`](screenshots/14_admin_users.png) |
+| AI prompt library | [`screenshots/22_admin_ai_prompts.png`](screenshots/22_admin_ai_prompts.png) |
+
+Screenshots are checked-in artifacts — they are **not** copied into the
+runtime Docker image, so they add nothing to the deploy footprint.
 
 ---
 
