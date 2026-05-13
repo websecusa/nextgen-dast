@@ -46,7 +46,7 @@ conflict.
 
 The canonical repository is hosted at:
 
-> <https://git.hackrange.com/trice/nextgen-dast>
+> <https://github.com/websecusa/nextgen-dast>
 
 If a mirror exists on another forge (GitHub, GitLab, etc.), pull requests
 filed there will be reviewed but may be transferred back to the canonical

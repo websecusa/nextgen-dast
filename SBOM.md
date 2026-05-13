@@ -81,10 +81,10 @@ files are authoritative**. If they ever disagree, the JSON wins.
 | Name               | `nextgen-dast`                                                   |
 | Version            | `2.1.1`                                                          |
 | Supplier / Author  | Tim Rice <tim.j.rice@hackrange.com>                              |
-| Source repository  | <https://git.hackrange.com/trice/nextgen-dast.git>               |
+| Source repository  | <https://github.com/websecusa/nextgen-dast.git>               |
 | Distribution       | `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`                 |
 | Declared license   | NOASSERTION (no LICENSE file in the source tree)                 |
-| Document namespace | `https://git.hackrange.com/trice/nextgen-dast/sbom/2.1.1-<uuid>` |
+| Document namespace | `https://github.com/websecusa/nextgen-dast/sbom/2.1.1-<uuid>` |
 
 The application's own source code is enumerated in the SBOM as a
 single root component (`pkg:generic/nextgen-dast@2.1.1`); every other
@@ -289,7 +289,7 @@ across the two formats.
   "dataLicense":  "CC0-1.0",
   "SPDXID":       "SPDXRef-DOCUMENT",
   "name":         "nextgen-dast-2.1.1",
-  "documentNamespace": "https://git.hackrange.com/trice/nextgen-dast/sbom/2.1.1-<uuid>",
+  "documentNamespace": "https://github.com/websecusa/nextgen-dast/sbom/2.1.1-<uuid>",
   "creationInfo": {
     "created":  "2026-05-09T00:00:00Z",
     "creators": [
@@ -312,7 +312,7 @@ Root package (the application itself):
   "SPDXID": "SPDXRef-Pkg-nextgen-dast-2.1.1",
   "name": "nextgen-dast",
   "versionInfo": "2.1.1",
-  "downloadLocation": "https://git.hackrange.com/trice/nextgen-dast.git",
+  "downloadLocation": "https://github.com/websecusa/nextgen-dast.git",
   "filesAnalyzed": false,
   "licenseConcluded": "NOASSERTION",
   "licenseDeclared":  "NOASSERTION",
