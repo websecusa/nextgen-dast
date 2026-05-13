@@ -746,12 +746,19 @@ Sample renderings of every operator-facing page in the 2.1.1 UI live under
 | Page | Preview |
 | --- | --- |
 | Sign-in | [`screenshots/01_login.png`](screenshots/01_login.png) |
-| Dashboard | [`screenshots/02_dashboard.png`](screenshots/02_dashboard.png) |
+| Dashboard (dark / light) | [`02_dashboard.png`](screenshots/02_dashboard.png) · [`62_dashboard_light.png`](screenshots/62_dashboard_light.png) |
 | Capture proxy | [`screenshots/03_proxy.png`](screenshots/03_proxy.png) |
 | New assessment | [`screenshots/07_assess_new.png`](screenshots/07_assess_new.png) |
-| Assessment history | [`screenshots/08_assessments.png`](screenshots/08_assessments.png) |
-| User management | [`screenshots/14_admin_users.png`](screenshots/14_admin_users.png) |
+| Assessment detail | [`screenshots/25_assessment_detail.png`](screenshots/25_assessment_detail.png) |
+| Finding detail | [`screenshots/26_finding_detail.png`](screenshots/26_finding_detail.png) |
+| User management | [`screenshots/14_admin_users.png`](screenshots/14_admin_users.png) (usernames redacted) |
 | AI prompt library | [`screenshots/22_admin_ai_prompts.png`](screenshots/22_admin_ai_prompts.png) |
+
+Three focused walkthroughs are also captured:
+
+- **TOTP enrolment** — [`40_totp_not_enrolled.png`](screenshots/40_totp_not_enrolled.png) → [`41_totp_enrollment_qr.png`](screenshots/41_totp_enrollment_qr.png) (QR + secret redacted; the verify step is never submitted).
+- **SAML 2.0 SSO (Generic + Okta)** — [`50_admin_sso_generic.png`](screenshots/50_admin_sso_generic.png) and [`51_admin_sso_okta_relabeled.png`](screenshots/51_admin_sso_okta_relabeled.png) — the "Use Okta" radio relabels every IdP field client-side.
+- **Theme switching** — [`60_theme_dark.png`](screenshots/60_theme_dark.png) → [`61_theme_light.png`](screenshots/61_theme_light.png), with the dashboard re-rendered in light mode at [`62_dashboard_light.png`](screenshots/62_dashboard_light.png).
 
 Screenshots are checked-in artifacts — they are **not** copied into the
 runtime Docker image, so they add nothing to the deploy footprint.

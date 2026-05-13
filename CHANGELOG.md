@@ -249,16 +249,43 @@ running 2.1.1 image at `dockerregistry.fairtprm.com/nextgen-dast:2.1.1`.
 ## 2026-05 — High-fidelity CSRF rule, anomaly_5xx_validation, 404 short-circuits, Re-scan prefill
 
 - **2026-05-13** — **Documentation: UI screenshots checked into the
-  repo.** New `screenshots/` directory under the source tree holds a
-  PNG for every operator-facing GET route in the 2.1.1 web UI (login,
-  dashboard, proxy, flows, scan, auth profiles, assess, assessments,
-  schedules, llm, user-agents, security/MFA, and the ten
-  `/admin/*` pages). Captures are produced by `screenshots/capture.py`,
-  a Playwright/headless-Chromium driver that signs in with operator
-  creds and walks every parameter-free route. The README gains a
-  Screenshots section with thumbnails of the highlights. None of these
-  files are copied into the runtime image, so the deploy footprint is
-  unchanged.
+  repo, expanded coverage + walkthroughs.** New `screenshots/`
+  directory under the source tree holds a PNG for every
+  operator-facing page in the 2.1.1 web UI:
+
+    - **01–24** Top-level pages reachable without route parameters
+      (login, dashboard, proxy, flows, scan, auth profiles, assess,
+      assessments, schedules, llm, user-agents, security/MFA, theme,
+      and the ten `/admin/*` pages).
+    - **25–33** Detail pages that need a row id (assessment, finding,
+      scan, flow, AI prompt) plus SCA log/config and
+      `/admin/branding`. Ids are discovered at run time by scraping
+      the corresponding listing page.
+    - **40–41** TOTP walkthrough: `/security` in the "not enrolled"
+      and "scan this QR" states. The verify form is deliberately
+      never submitted, so the enrolment leaves no DB record. The
+      QR + manual-entry secret are also blacked out via PIL before
+      the screenshot is written to disk.
+    - **50–51** SAML 2.0 SSO configuration walkthrough: `/admin/sso`
+      with Generic labels, then again with the "Use Okta" radio
+      toggled, which relabels every IdP field client-side to match
+      Okta's "View SAML setup instructions" panel.
+    - **60–63** Theme walkthrough: `/theme` in dark, then in light,
+      plus the dashboard and assessments list re-rendered in light
+      mode. The script flips the operator's theme inside a
+      `try/finally` so a mid-run crash still restores the original
+      choice.
+
+  Captures are produced by `screenshots/capture.py`, a Playwright /
+  headless-Chromium driver that signs in with operator creds and
+  walks every route. PII redaction is built into the script:
+  usernames on `/admin/users` are blacked out per row, and the TOTP
+  secret + QR on the enrolment screenshot are redacted with a
+  labelled overlay. The README gains a Screenshots section with the
+  highlights and links into the three walkthroughs.
+
+  None of these files are referenced from the Dockerfile, so the
+  deploy footprint is unchanged.
 
 - **2026-05-12** — **Round-6 validation-aware agentic candidate
   selection.** The per-finding deep-dive pass now skips findings
