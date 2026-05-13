@@ -1,0 +1,83 @@
+nextgen-dast
+Copyright 2026 Tim Rice <tim.j.rice@hackrange.com>
+
+This product includes software developed by Tim Rice and is licensed under
+the Apache License, Version 2.0. See the LICENSE.md file at the root of
+this distribution for the full license text.
+
+================================================================================
+Third-party components
+================================================================================
+
+This product bundles, depends on, or invokes several third-party components
+that are distributed under their own licenses. A complete inventory with
+versions and license declarations is available in:
+
+  - sbom.spdx.json  (SPDX 2.3 format)
+  - sbom.cdx.json   (CycloneDX 1.5 format)
+  - SBOM.md         (human-readable summary)
+
+The components listed below are highlighted because their licenses include
+notice or attribution requirements beyond what the SBOM captures. The
+remaining components carry permissive licenses (MIT, BSD, Apache 2.0, ISC,
+PSF) and are reproduced under their original terms; their copyright notices
+remain intact in their respective source distributions.
+
+--------------------------------------------------------------------------------
+Bundled CLI scanners (invoked as subprocesses; not linked)
+--------------------------------------------------------------------------------
+
+The Docker image bundles the following GPL-licensed command-line scanners.
+They are executed as separate processes by the orchestrator and are not
+linked into nextgen-dast. They retain their original licenses; nothing in
+this distribution alters or supersedes those licenses.
+
+  - wapiti3 (GPL-2.0-only)         https://wapiti-scanner.github.io/
+  - wapiti-swagger (GPL-2.0-only)  https://github.com/wapiti-scanner/wapiti-swagger
+  - nikto (GPL-2.0-only)           https://github.com/sullo/nikto
+  - testssl.sh (GPL-2.0-only)      https://testssl.sh/
+  - sqlmap (GPL-2.0-or-later)      https://sqlmap.org/
+  - nuclei (MIT)                   https://github.com/projectdiscovery/nuclei
+  - dalfox (MIT)                   https://github.com/hahwul/dalfox
+  - ffuf (MIT)                     https://github.com/ffuf/ffuf
+
+Source code for the GPL-licensed scanners is available from their upstream
+projects at the URLs above. The exact versions shipped in any given image
+are recorded in the SBOM files distributed alongside this NOTICE.
+
+--------------------------------------------------------------------------------
+Database
+--------------------------------------------------------------------------------
+
+  - MariaDB Server (GPL-2.0-only) https://mariadb.org/
+
+MariaDB Server is bundled in the compose stack as a separate container. The
+application communicates with it over the standard MySQL/MariaDB wire
+protocol via the PyMySQL client library (MIT). MariaDB Server source is
+available from https://mariadb.org/download/.
+
+--------------------------------------------------------------------------------
+Python transitive dependencies with notice-bearing licenses
+--------------------------------------------------------------------------------
+
+The following Python packages may be installed as transitive dependencies
+of the bundled scanners (above). They are not directly imported by the
+nextgen-dast application code, but their presence in the image is disclosed
+here for completeness.
+
+  - browser-cookie3 (LGPL-3.0-only)
+  - ldap3 (LGPL-3.0-only)
+  - urwid (LGPL-2.1-only)
+  - pyphen (GPL-2.0-or-later OR LGPL-2.1-or-later OR MPL-1.1; used under LGPL)
+  - certifi (MPL-2.0)
+  - publicsuffix2 (MPL-2.0 OR MIT; used under MIT)
+
+LGPL-licensed libraries are used as separately-installable Python packages
+that can be replaced or upgraded by the end user via standard pip
+operations, satisfying the LGPL's library-replaceability requirement.
+MPL-2.0 components are redistributed unmodified; any modifications to those
+files would be made available under the MPL-2.0 terms.
+
+================================================================================
+End of NOTICE
+================================================================================
