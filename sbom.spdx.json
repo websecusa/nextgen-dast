@@ -3,7 +3,7 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "nextgen-dast-2.1.1",
-  "documentNamespace": "https://git.hackrange.com/trice/nextgen-dast/sbom/2.1.1-fb8b4fba-06be-5efc-baea-e279c87d10f2",
+  "documentNamespace": "https://github.com/websecusa/nextgen-dast/sbom/2.1.1-fb8b4fba-06be-5efc-baea-e279c87d10f2",
   "creationInfo": {
     "created": "2026-05-09T00:00:00Z",
     "creators": [
@@ -17,7 +17,7 @@
       "SPDXID": "SPDXRef-Pkg-nextgen-dast-2.1.1",
       "name": "nextgen-dast",
       "versionInfo": "2.1.1",
-      "downloadLocation": "https://git.hackrange.com/trice/nextgen-dast.git",
+      "downloadLocation": "https://github.com/websecusa/nextgen-dast.git",
       "filesAnalyzed": false,
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "NOASSERTION",

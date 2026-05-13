@@ -43,7 +43,7 @@ or `README.md → Troubleshooting`.
 ```bash
 sudo mkdir -p /data/pentest
 sudo chown "$USER":"$USER" /data/pentest
-git clone https://git.hackrange.com/trice/nextgen-dast.git /data/pentest
+git clone https://github.com/websecusa/nextgen-dast.git /data/pentest
 cd /data/pentest
 sudo ./setup.sh
 ```

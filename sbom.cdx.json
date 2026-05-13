@@ -39,7 +39,7 @@
       "externalReferences": [
         {
           "type": "vcs",
-          "url": "https://git.hackrange.com/trice/nextgen-dast.git"
+          "url": "https://github.com/websecusa/nextgen-dast.git"
         },
         {
           "type": "distribution",
