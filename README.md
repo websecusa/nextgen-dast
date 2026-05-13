@@ -733,3 +733,28 @@ sudo ./setup.sh
 Everything except TLS termination runs inside containers. The application
 container itself spawns scanner subprocesses (wapiti, nuclei, etc.) — they
 all live in the same image, so no extra installs on the host.
+
+---
+
+## License
+
+nextgen-dast is licensed under the **Apache License, Version 2.0**.
+Copyright 2026 Tim Rice &lt;tim.j.rice@hackrange.com&gt;.
+
+See [`LICENSE.md`](LICENSE.md) for the full license text and
+[`NOTICE`](NOTICE) for attribution of bundled third-party components
+(wapiti, nikto, testssl.sh, MariaDB, and others). A full software bill of
+materials is provided in `sbom.spdx.json` and `sbom.cdx.json`.
+
+### Contributing
+
+Issues and pull requests are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow, style expectations,
+and DCO sign-off requirement.
+
+### Security
+
+To report a vulnerability **in nextgen-dast itself**, email
+`tim.j.rice@hackrange.com`. Do not file public issues for security
+problems. See [`SECURITY.md`](SECURITY.md) for the full disclosure policy
+and scope.
