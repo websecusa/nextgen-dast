@@ -24,6 +24,3 @@ data/
 # Source control
 .git/
 .gitignore
-
-# Local agent / tooling state — never bake into image
-.claude/
