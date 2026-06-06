@@ -20,5 +20,3 @@ __pycache__/
 *.swp
 .DS_Store
 
-# Local agent / tooling state — never publish
-.claude/
