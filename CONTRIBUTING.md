@@ -54,7 +54,7 @@ repository for final merge.
 
 ### Branch and Tag Conventions
 
-- `master` is the active development branch.
+- `master` or `main`  is the active development branch.
 - Release branches and tags follow the `MAJOR.MINOR.PATCH` pattern
   (e.g. `2.1.1`).
 - Never bump the version, Docker tag, or release branch in a pull request
